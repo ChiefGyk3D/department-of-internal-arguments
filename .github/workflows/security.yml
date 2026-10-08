@@ -1,7 +1,5 @@
-# SPDX-License-Identifier: MIT
-# CodeQL (Python and the workflow files), gitleaks, dependency review on pull requests, Semgrep and OpenSSF
-# Scorecard. The jobs live in ChiefGyk3D/git-your-ship-together. There are no runtime dependencies, so the
-# pip-audit leg is switched off by leaving its requirements file empty.
+# CodeQL, gitleaks, a dependency audit and dependency review on pull
+# requests. The jobs live in ChiefGyk3D/git-your-ship-together.
 name: Security
 
 on:
@@ -22,8 +20,13 @@ jobs:
       contents: read
       security-events: write
       pull-requests: write
-      id-token: write   # Scorecard publishing; the Snyk leg is off
+      id-token: write
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
     with:
-      pip-audit-requirements: ''
+      pip-audit-requirements: ""   # no requirements.txt; add a hash-pinned lock and name it here
       scorecard: true
       egress-policy: block
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
