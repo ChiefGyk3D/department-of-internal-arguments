@@ -1,6 +1,7 @@
 ---
 name: "linux-platform"
 description: "Rules for Linux and platform change planning and diagnosis: each plan names exact target, change, evidence, blast radius and rollback; privileged commands are handed to the human as full copy-paste ssh -t host 'sudo ...' lines; never gain root through the docker group; tests never touch a live config or running services; GUI and build work stays light. Load for service, udev, systemd, firewall, package, kernel, hardware or install work. Not for application code that touches no system state."
+updated: "2026-10-08"
 ---
 
 # Pack: Linux and platform
@@ -28,8 +29,9 @@ Inspection and mutation are different acts. Diagnose with read-only commands fir
 3. Change plan with target, change, evidence, blast radius, rollback.
 4. Post-change checks, including reboot persistence.
 
-## Check before you hand it back
+## How to verify (before you hand it back)
 
-- Every command is a full line the human can paste, with `host` as the placeholder.
+- Every command is a full line the human can paste, with `host` as the placeholder: `grep -nE '^(ssh|sudo)' <plan>` shows only `ssh -t host 'sudo ...'` forms.
+- `grep -nE 'docker run .*(--privileged|-v /:)' <plan>` returns nothing.
 - No test in the diff reads or writes a real config path or a live unit.
 - The rollback was written before the change, not after.

@@ -32,7 +32,7 @@ breaking one, stop and say so in the pull request instead.
 
 - Do not add `continue-on-error`, `*-continue-on-error: true`, `require-non-root: false`,
   `nosemgrep`, a bare `# noqa`, `# type: ignore`, `shellcheck disable`,
-  `hadolint ignore`, skipped tests, `|| true` after a test or gate, or `--no-verify`
+  `hadolint ignore`, `pytest.mark.skip` or any skipped test, `|| true` after a test or gate, or `--no-verify`
   to make something pass. If the only way to green is one of these, stop and
   explain in the PR. A lint ignore needs a written reason on the same or previous
   line and must be called out in the PR description.

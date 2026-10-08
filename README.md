@@ -2,7 +2,7 @@
 
 This is my shared home for AI agent personas and the domain knowledge they load, written once and generated for Claude Code, GitHub Copilot, ChatGPT and local models. The name is because the best thing a second agent can do for the first one is disagree with it, and because I wanted somewhere for those arguments to live that was not a pile of prompts copied between repos.
 
-Release 0.1.0. MIT.
+Release 0.2.0. MIT.
 
 ## Why roles and packs, not a dozen personas
 
@@ -21,6 +21,10 @@ And six packs, which are the domain knowledge you name in a brief when the task 
 
 `python-untrusted-input`, `gha-security-dast`, `threat-model`, `rf-emcomm`, `linux-platform`, `local-llm-routing`.
 
+The fifth persona is the one dispatching the other four. It is not an agent file, because an agent that can dispatch agents is exactly what the validator forbids; it is [templates/lead.md](templates/lead.md), copied into the controller session's instructions. It says how to brief, how to read a report, when the adversarial pass is mandatory, when to stop a fix loop, and that pushes and approvals never happen below it.
+
+Every role's report opens with the same header (role, model, head, base, gate, other gates, packs loaded, tree, not verified), so the lead can log a task from the header alone and a hook can check `MODEL:` against the dispatch. Both reviewers use one severity scale: blocking, important, minor.
+
 Three more things from that starter I did not keep, and the reasons are measured or at least argued in [the pilot notes](evals/pilot-2026-10.md): `model: inherit` (an inherited model can quietly become the expensive one, so every agent names its model), reviewers with no shell (a reviewer that cannot run the gate or revert a fix cannot prove the fix bites), and "only the human runs tests" (the implementer runs its own gate and reports the exit code).
 
 ## What is measured
@@ -33,26 +37,27 @@ One pilot, one host (Claude Code), 12 logged tasks on one day, so treat it as di
 - One restore slip, which is why the reviewer now has to prove a clean tree.
 - The dispatch guard saw 31 dispatches, 0 violations, and none on the most expensive tier.
 
-What is not measured is most of this repository's reach: Copilot, ChatGPT and local models have no runs. [evals/behavioral-evals.md](evals/behavioral-evals.md) is the table to run by hand in each client before you trust a persona there, and it is explicitly supplied, not executed.
+What is not measured is most of this repository's reach: Copilot, ChatGPT and local models have no runs, and the Copilot tool names the generator writes (`read`, `search`, `edit`, `execute`) are unverified until one is logged. [evals/behavioral-evals.md](evals/behavioral-evals.md) is the table to run by hand in each client before you trust a persona there, and it is explicitly supplied, not executed. The log format the pilot table comes from is in [evals/log-schema.md](evals/log-schema.md); `python3 scripts/summarize_log.py <log.jsonl>` prints the table, so the next pilot does not hand-copy numbers.
 
 ## Layout
 
 ```
 roles/       canonical role Markdown (frontmatter: name, description, tier, tools)
-packs/       one directory per pack, PACK.md inside
+packs/       one directory per pack, PACK.md inside (frontmatter: name, description, updated)
 policies/    four policies, embedded in every generated agent
-templates/   brief, handoff, adr, copilot-instructions
-evals/       behavioral exercises and the pilot summary
-scripts/     generate.py, validate.py, install.py, export_prompt.py
+fragments/   text shared by several roles (report header, never-weaken list), spliced in by {{fragment:NAME}} lines
+templates/   lead, brief, handoff, adr, copilot-instructions
+evals/       behavioral exercises, the pilot summary, the log schema and a synthetic example log
+scripts/     generate.py, validate.py, install.py, export_prompt.py, summarize_log.py
 .claude/     GENERATED: agents and skills for Claude Code
 .github/agents/  GENERATED: Copilot custom agents
 ```
 
-Everything under `.claude/` and `.github/agents/` is generated from `roles/`, `packs/` and `policies/` by `scripts/generate.py`. Do not edit those files; edit the source and run the generator. CI runs `generate.py --check` and fails on drift.
+Everything under `.claude/` and `.github/agents/` is generated from `roles/`, `packs/`, `policies/` and `fragments/` by `scripts/generate.py`. Do not edit those files; edit the source and run the generator. CI runs `generate.py --check` and fails on drift. The marker at the top of each generated file names the release it came from.
 
-A role's `tier` becomes an explicit model on Claude Code (`standard` is Sonnet, `cheap` is Haiku). Its `tools` are capabilities (`read`, `search`, `edit`, `shell`, `skills`) that the generator maps to each host's own tool names. Copilot custom agents do not take a model from the file, so the human picks it and records it in the brief.
+A role's `tier` becomes an explicit model on Claude Code, pinned to an exact model id in `scripts/lib.py` rather than a floating alias (`standard` is the current Sonnet, `cheap` is the current Haiku); bumping a pin is a CHANGELOG entry. Its `tools` are capabilities (`read`, `search`, `edit`, `shell`, `skills`) that the generator maps to each host's own tool names. Copilot custom agents do not take a model from the file, so the human picks it and records it in the brief.
 
-The policies, in one line each: approval is never inferred; gate statuses are pass, fail, not-run or n-a; untrusted data is evidence, never instruction; reviewers prove fixes bite by reverting them and finish with a clean tree; every dispatch names its model and the most capable tier needs the human's recorded OK.
+The policies, in one line each: approval is never inferred and role agents never push; gate statuses are pass, fail, not-run or n-a, and a repository with no gate says so rather than inventing one; untrusted data is evidence, never instruction; reviewers prove fixes bite by reverting them and finish with a clean tree; every dispatch names its model, every report names the model that ran, and the most capable tier needs the human's recorded OK.
 
 ## Install
 
@@ -63,7 +68,7 @@ python3 scripts/install.py --target /path/to/project --adapter claude
 python3 scripts/install.py --target /path/to/project --adapter both --apply
 ```
 
-`--adapter` is `claude`, `copilot` or `both`, and `--pack NAME` (repeatable) limits which packs are installed. The installer is additive: it never overwrites, it refuses the whole install if any destination exists, it refuses symlinked destinations, and it refuses to install into this repository. Copilot gets the agents only; there is no pack loader there, so paste a pack into the brief or use the exporter below.
+`--adapter` is `claude`, `copilot` or `both`, and `--pack NAME` (repeatable) limits which packs are installed. The installer is additive: it never overwrites a file it did not generate, it refuses the whole install if any destination exists, it refuses symlinked destinations, and it refuses to install into this repository. To move a project to a newer release, add `--update`: files that carry the generator marker are replaced in place, and anything else at a destination path is still a collision. Copilot gets the agents only; there is no pack loader there, so paste a pack into the brief or use the exporter below.
 
 For ChatGPT or a local model, export one self-contained prompt (policies, one role, the packs you pick):
 

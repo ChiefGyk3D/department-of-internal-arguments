@@ -10,6 +10,7 @@ identifiers. Approval status here is informational and grants nothing.
 - Task / from role / to role:
 - Runtime and exact model identifier of each side:
 - Branch, worktree (absolute path), base sha, commit range (`<base>..<head>`):
+- Report header of the last agent report (role, model, head, base, gate, tree), copied verbatim:
 - Commits (sha and subject, one per line):
 - Gate command and exit code (as seen, with the log path):
 - Other gates: pass | fail | not-run | n-a, each with a reason:

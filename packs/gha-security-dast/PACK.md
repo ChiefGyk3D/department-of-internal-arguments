@@ -1,6 +1,7 @@
 ---
 name: "gha-security-dast"
 description: "Checklist and measured gotchas for reviewing or writing GitHub Actions workflows (SHA pinning, least-privilege permissions, caller/reusable-workflow permission matching, expression injection, pull_request_target, egress block mode, branch-protection force-push bypass) and OWASP ZAP / DAST automation (context XML parsing, Java regex scope, loopback scope, sign-in proof, report redaction, digest binding). Load for .github/workflows changes, reusable-workflow callers, security scan jobs, or ZAP configuration. Not for general CI speed or caching questions."
+updated: "2026-10-08"
 ---
 
 # Pack: GitHub Actions security and ZAP/DAST
