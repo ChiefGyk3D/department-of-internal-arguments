@@ -20,23 +20,20 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@1360d100a45897b2d658272441bc5238d6532743 # v1.16.0
     permissions:
       contents: read
-      id-token: write   # Doppler OIDC (see the shared repository's README)
-    secrets:
-      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
+      id-token: write   # declared by the shared python-ci workflow; checked statically, unused here
     with:
       python-versions: '["3.11", "3.12", "3.13"]'
       install-command: |
         python -m pip install --upgrade pip
-        pip install -e .
         pip install pytest
-      test-command: pytest
+      test-command: |
+        python scripts/generate.py --check
+        python scripts/validate.py
+        pytest
       lint-install-command: |
         pip install ruff
       lint-command: |
         ruff check .
-        ruff format --check . || echo "::warning title=ruff format::formatting drift (advisory)"
+        ruff format --check .
       docker-build: false
       egress-policy: block
-      doppler-project: ci
-      doppler-config: ci
-      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
