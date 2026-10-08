@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT
+# The generic legs (ruff, the Python test matrix, the workflow lint) are ChiefGyk3D/git-your-ship-together's
+# python-ci.yml; it reports its gate as `CI green`, here `ci / CI green`. The package's own checks (generator
+# drift, validator, unit tests) run as the python-ci test command. This repository is stdlib-only Python, so there
+# is nothing to install, no type-check leg, no Docker image and no coverage upload.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@1360d100a45897b2d658272441bc5238d6532743 # v1.16.0
+    permissions:
+      contents: read
+      id-token: write   # python-ci's coverage job declares it; unused here (codecov is off), but a caller must grant it
+    with:
+      python-versions: '["3.11", "3.12", "3.13"]'
+      install-command: python -m pip install --upgrade pip
+      test-command: |
+        python scripts/generate.py --check
+        python scripts/validate.py
+        python -m unittest discover -s tests -v
+      lint-command: |
+        ruff check .
+        ruff format --check .
+      docker-build: false
+      egress-policy: block

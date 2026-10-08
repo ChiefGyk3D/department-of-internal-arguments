@@ -1,0 +1,15 @@
+[project]
+name = "department-of-internal-arguments"
+version = "0.1.0"
+description = "Shared AI agent personas (roles) and domain knowledge packs, generated for Claude Code, GitHub Copilot, ChatGPT and local models."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "ChiefGyk3D" }]
+dependencies = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

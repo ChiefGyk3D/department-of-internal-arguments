@@ -1,0 +1,32 @@
+# Raw corpus data never enters this repository.
+transcripts/
+*.vtt
+mastodon*.json
+
+# Secrets and key material
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python and tooling
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.coverage
+coverage.xml
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

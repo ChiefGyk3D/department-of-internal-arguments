@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+# CodeQL (Python and the workflow files), gitleaks, dependency review on pull requests, Semgrep and OpenSSF
+# Scorecard. The jobs live in ChiefGyk3D/git-your-ship-together. There are no runtime dependencies, so the
+# pip-audit leg is switched off by leaving its requirements file empty.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly, so new advisories surface between commits
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@1360d100a45897b2d658272441bc5238d6532743 # v1.16.0
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      id-token: write   # Scorecard publishing; the Snyk leg is off
+    with:
+      pip-audit-requirements: ''
+      scorecard: true
+      egress-policy: block
