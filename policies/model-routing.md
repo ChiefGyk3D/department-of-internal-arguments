@@ -2,8 +2,9 @@
 
 Routing is a decision policy, not a router. Hooks that enforce it live elsewhere (see the README).
 
-- **Every dispatch names its model explicitly.** Never `inherit`: an inherited model can silently become the expensive one. In the Claude Code adapter the model comes from the role's tier (`standard` is Sonnet, `cheap` is Haiku). On hosts that do not take a model in the agent file (Copilot, ChatGPT, local runtimes) the human picks and records the model in the brief.
+- **Every dispatch names its model explicitly.** Never `inherit`: an inherited model can silently become the expensive one. In the Claude Code adapter the model comes from the role's tier, pinned to an exact model id in `scripts/lib.py` (`standard` is the current Sonnet, `cheap` is the current Haiku), never a floating alias: an alias moves when a new model ships, which changes cost and behavior silently. Bumping a pin is a CHANGELOG entry. On hosts that do not take a model in the agent file (Copilot, ChatGPT, local runtimes) the human picks and records the model in the brief.
 - **The most capable tier needs the human's recorded OK**, with the reason, before it is used. No role in this repository is assigned to it. A first-choice upgrade is never silent.
+- **Every report names the model that ran it** (the `MODEL:` line of the shared header), so the lead's log can be checked against the dispatch. Naming a model in a brief is not proof it was used.
 - Default to `standard`; use `cheap` only for mechanical work whose complete code is already written.
 - If two fix rounds on the same finding class fail, stop and recommend a different model rather than a third round on the same one.
 - A local model may draft text (summaries, commit bodies, PR text); code does the counting and grouping, and a stronger model or the human verifies every claim. It never writes code, rules or verdicts.

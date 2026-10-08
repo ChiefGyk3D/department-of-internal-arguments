@@ -1,14 +1,18 @@
-"""Additive project-only installer. Preview by default; never overwrite existing files.
+"""Additive project-only installer. Preview by default; never overwrite a file it did not generate.
 
-python3 scripts/install.py --target <project> --adapter claude|copilot|both [--pack NAME ...] [--apply]
+python3 scripts/install.py --target <project> --adapter claude|copilot|both [--pack NAME ...] [--update] [--apply]
+
+Without --update every existing destination is a collision and the whole install is refused.
+With --update a destination that carries the generator marker is replaced in place; a file
+without the marker (one you wrote or edited) is still a collision.
 """
 
 import argparse
-import shutil
+import os
 import sys
 from pathlib import Path
 
-from lib import PACK_NAMES, ROOT
+from lib import GENERATED_MARK, PACK_NAMES, ROOT
 
 ADAPTERS = ("claude", "copilot", "both")
 
@@ -19,6 +23,19 @@ def ensure_safe(path):
     for parent in (path, *path.parents):
         if parent.is_symlink():
             raise ValueError(f"symlink destination refused: {parent}")
+
+
+def is_generated(path):
+    """True only for a regular, non-symlink file whose first lines carry the generator marker."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        with path.open(encoding="utf-8") as f:
+            head = f.read(4096)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return GENERATED_MARK in head
 
 
 def _sources(adapter, packs, root):
@@ -33,7 +50,8 @@ def _sources(adapter, packs, root):
     return out
 
 
-def plan(target, adapter, packs=None, root=ROOT):
+def plan(target, adapter, packs=None, root=ROOT, update=False):
+    """[(source, destination, 'new' | 'update')]; raises before anything is written."""
     if adapter not in ADAPTERS:
         raise ValueError("unknown adapter")
     packs = list(PACK_NAMES) if packs is None else list(packs)
@@ -46,7 +64,7 @@ def plan(target, adapter, packs=None, root=ROOT):
         raise ValueError("target must be an existing project directory")
     if target.resolve() == Path(root).resolve():
         raise ValueError("target cannot be this repository")
-    pairs = []
+    triples = []
     for src in _sources(adapter, packs, root):
         if src.is_symlink():
             raise ValueError(f"source symlink refused: {src.name}")
@@ -54,28 +72,43 @@ def plan(target, adapter, packs=None, root=ROOT):
             raise ValueError(f"missing generated source (run scripts/generate.py): {src.name}")
         dest = target / src.relative_to(root)
         ensure_safe(dest)
-        if dest.exists():
-            raise ValueError(f"collision; merge manually: {dest.relative_to(target)}")
+        action = "new"
+        if dest.exists() or dest.is_symlink():
+            if update and is_generated(dest):
+                action = "update"
+            elif update:
+                raise ValueError(f"not a generated file; merge manually: {dest.relative_to(target)}")
+            else:
+                raise ValueError(f"collision; merge manually (or use --update): {dest.relative_to(target)}")
         # Reject a file in place of a directory before writing anything.
         for parent in dest.parents:
             if parent == target:
                 break
             if parent.exists() and not parent.is_dir():
                 raise ValueError(f"parent is not a directory: {parent}")
-        pairs.append((src, dest))
-    return pairs
+        triples.append((src, dest, action))
+    return triples
 
 
-def install(target, adapter, apply=False, packs=None, root=ROOT):
-    pairs = plan(target, adapter, packs, root)
+def install(target, adapter, apply=False, packs=None, root=ROOT, update=False):
+    triples = plan(target, adapter, packs, root, update)
     if apply:
-        for src, dest in pairs:
+        for src, dest, action in triples:
             ensure_safe(dest)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            # Exclusive creation: a file that appeared after the preflight is never overwritten.
-            with dest.open("xb") as out, src.open("rb") as inp:
-                shutil.copyfileobj(inp, out)
-    return [str(dest.relative_to(Path(target).absolute())) for _, dest in pairs]
+            data = src.read_bytes()
+            if action == "update":
+                if not is_generated(dest):  # changed between preflight and write
+                    raise ValueError(f"destination changed during install: {dest}")
+                tmp = dest.with_name(dest.name + ".doia-tmp")
+                with tmp.open("xb") as out:
+                    out.write(data)
+                os.replace(tmp, dest)
+            else:
+                # Exclusive creation: a file that appeared after the preflight is never overwritten.
+                with dest.open("xb") as out:
+                    out.write(data)
+    return [str(dest.relative_to(Path(target).absolute())) for _, dest, _ in triples]
 
 
 def main(argv=None):
@@ -83,14 +116,17 @@ def main(argv=None):
     ap.add_argument("--target", type=Path, required=True)
     ap.add_argument("--adapter", choices=ADAPTERS, default="claude")
     ap.add_argument("--pack", action="append", help="install only this pack (repeatable); default all")
+    ap.add_argument("--update", action="store_true", help="replace files that carry the generator marker")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
     try:
-        files = install(a.target, a.adapter, a.apply, a.pack)
+        triples = plan(a.target, a.adapter, a.pack, update=a.update)
+        files = install(a.target, a.adapter, a.apply, a.pack, update=a.update)
     except (OSError, ValueError) as exc:
         print(f"Installation refused: {exc}", file=sys.stderr)
         return 1
-    print("\n".join(files))
+    for (_, _, action), rel in zip(triples, files, strict=True):
+        print(f"{action}: {rel}")
     print(("Installed" if a.apply else "Preview only; rerun with --apply after review") + f": {len(files)} files")
     return 0
 

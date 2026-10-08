@@ -1,6 +1,7 @@
 ---
 name: "local-llm-routing"
 description: "Measured knowledge for sending work to a local Ollama server and for configuring one: send exactly the num_ctx a model is loaded with, think=false for cheap text tasks, what small local models do well and badly (code does grouping and counting; the model writes prose only), an evaluation record per model, reachability checks, and verification commands. Single GPU and small context first; every setting configurable. Load when routing text work to a local model, writing a client that calls Ollama, or sizing models and context. Not for cloud-model prompting."
+updated: "2026-10-08"
 ---
 
 # Pack: local LLM routing (Ollama)

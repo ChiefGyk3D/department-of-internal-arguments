@@ -1,6 +1,7 @@
 ---
 name: "rf-emcomm"
 description: "Rules and deliverable shape for amateur radio and emergency-communications work: never key a transmitter or configure a live radio, keep simulation apart from live transmission, synthetic identifiers only (N0CALL, N0TST, FN31pr), verify current regulator rules before real guidance, a qualified operator controls every live action. Load for RF, EMCOMM, Meshtastic, SDR, repeater, packet or digital-mode tasks, drill plans and fail-safe reviews. Not for generic networking or Linux questions."
+updated: "2026-10-08"
 ---
 
 # Pack: RF and EMCOMM
@@ -27,7 +28,7 @@ A drill is not an emergency and an example is not an authorization. Radio output
 4. **Operator checklist** (steps for the qualified operator, each marked live or offline).
 5. **Facts to verify** (rules and specs you could not confirm, with the source to check).
 
-## Check before you hand it back
+## How to verify (before you hand it back)
 
-- `grep` your output for anything shaped like a callsign or a grid square and confirm only the placeholders appear.
+- `grep -nE '\b[A-Z]{1,2}[0-9][A-Z]{1,3}\b' <output> | grep -vE 'N0CALL|N0TST'` for callsign shapes and `grep -nE '\b[A-R]{2}[0-9]{2}[a-x]{2}\b' <output> | grep -v FN31pr` for grid squares; both must return nothing.
 - Every step is tagged offline or live, and no live step is phrased as something you will do.

@@ -1,6 +1,6 @@
 [project]
 name = "department-of-internal-arguments"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared AI agent personas (roles) and domain knowledge packs, generated for Claude Code, GitHub Copilot, ChatGPT and local models."
 requires-python = ">=3.11"
 license = "MIT"

@@ -1,6 +1,7 @@
 ---
 name: "python-untrusted-input"
 description: "Checklist and measured gotchas for Python code that loads YAML or JSON from an untrusted or semi-trusted source (duplicate keys, aliases and anchors, merge keys, nesting depth, size caps), calls HTTP or GraphQL APIs (redirect credential carry, bounded backoff and pagination, never replaying a non-idempotent call after an ambiguous outcome), opens files by path (confinement, symlinks, FIFOs), or guards network access. Load when writing or reviewing config loaders, API clients, file transports, or hostile-input tests. Not for general style or typing questions."
+updated: "2026-10-08"
 ---
 
 # Pack: Python untrusted-input and API-client hardening

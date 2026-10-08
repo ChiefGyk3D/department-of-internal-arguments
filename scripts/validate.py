@@ -7,11 +7,14 @@ from pathlib import Path
 from generate import drift
 from lib import (
     CAPABILITY_ORDER,
+    FRAGMENT_NAMES,
+    GENERATED_MARK,
     PACK_NAMES,
     POLICIES,
     ROLE_NAMES,
     ROOT,
     TIER_MODEL,
+    fragment_text,
     frontmatter,
     load_packs,
     load_roles,
@@ -20,19 +23,32 @@ from lib import (
 EDITORS = {"implementer", "transcriber"}  # the only roles that may carry the edit capability
 RUNNERS = {"implementer", "reviewer", "adversarial-reviewer", "transcriber"}  # all must be able to run commands
 
-# Built from pieces so this file does not trip the sweep it implements.
+# Built from pieces so this file does not trip the sweep it implements. Word-bounded so a
+# commit SHA or a four-part version string cannot trip it.
 PRIVACY_PATTERNS = [
-    r"([0-9]{1,3}\.){3}[0-9]{1,3}",
-    "192" + r"\.168",
+    r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])",
+    r"\b" + "192" + r"\.168" + r"\b",
     "/ho" + "me/",
     "chiefgyk3d" + "/dotfiles",
-    "llm" + "-local",
-    "dot" + "sync",
-    "agents" + "-status",
-    "50" + "60",
-    "30" + "50",
-    "114" + "35",
+    r"\b" + "llm" + "-local" + r"\b",
+    r"\b" + "dot" + "sync" + r"\b",
+    r"\b" + "agents" + "-status" + r"\b",
+    r"\b" + "50" + "60" + r"\b",
+    r"\b" + "30" + "50" + r"\b",
+    r"\b" + "114" + "35" + r"\b",
 ]
+REPORT_FIELDS = (
+    "ROLE:",
+    "MODEL:",
+    "HEAD:",
+    "BASE:",
+    "GATE:",
+    "OTHER GATES:",
+    "PACKS LOADED:",
+    "TREE:",
+    "NOT VERIFIED:",
+)
+TEMPLATES = ("adr", "brief", "copilot-instructions", "handoff", "lead")
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
@@ -109,7 +125,7 @@ def validate(root=ROOT):
             n = r["name"]
             require(r["file"] == f"{n}.md", f"{n}: file name must match name")
             require(
-                set(r) == {"name", "description", "tier", "tools", "body", "file"},
+                set(r) == {"name", "description", "tier", "tools", "body", "source", "file"},
                 f"{n}: unreviewed frontmatter fields",
             )
             require(bool(r.get("description")) and bool(r.get("body")), f"{n}: empty description or body")
@@ -124,14 +140,42 @@ def validate(root=ROOT):
                 require(("edit" in tools) == (n in EDITORS), f"{n}: edit capability mismatch")
                 if n in RUNNERS:
                     require("shell" in tools, f"{n}: must be able to run commands (read-only reviewers were rejected)")
+            require("{{fragment:report-header}}" in r["source"], f"{n}: report must use the shared header fragment")
+            require("{{fragment:" not in r["body"], f"{n}: unresolved fragment marker")
+            for field in REPORT_FIELDS:
+                require(field in r["body"], f"{n}: report header lacks {field}")
+            if "edit" in (tools or []):
+                require("{{fragment:never-weaken}}" in r["source"], f"{n}: editing roles share the never-weaken rule")
+                require("Never push" in r["body"], f"{n}: editing roles must say they never push")
         require({r["name"]: r["tier"] for r in roles}.get("transcriber") == "cheap", "transcriber must be tier cheap")
+
+        frag_dir = root / "fragments"
+        require(
+            {f.stem for f in frag_dir.glob("*.md")} == set(FRAGMENT_NAMES),
+            "fragments/ must hold exactly the known fragments",
+        )
+        # The Copilot template is copied into other repos verbatim, so its opt-out list must carry every
+        # token the shared fragment names.
+        tokens = re.findall(r"`([^`]+)`", fragment_text("never-weaken", root))
+        copilot = (root / "templates/copilot-instructions.md").read_text(encoding="utf-8")
+        for tok in tokens:
+            require(tok in copilot, f"templates/copilot-instructions.md lacks never-weaken token {tok!r}")
+        require({f.stem for f in (root / "templates").glob("*.md")} == set(TEMPLATES), "unexpected or missing template")
 
         packs = load_packs(root)
         require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the six packs")
         for p in packs:
             require(p.get("name") == p["dir"], f"{p['dir']}: name must match directory")
             require(bool(p.get("description")) and bool(p["body"]), f"{p['dir']}: empty description or body")
-            require(set(p) == {"name", "description", "body", "dir"}, f"{p['dir']}: unreviewed frontmatter fields")
+            require(
+                set(p) == {"name", "description", "updated", "body", "dir"},
+                f"{p['dir']}: unreviewed frontmatter fields",
+            )
+            require(
+                isinstance(p.get("updated"), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p["updated"]) is not None,
+                f"{p['dir']}: updated must be YYYY-MM-DD",
+            )
+            require("## How to verify" in p["body"], f"{p['dir']}: pack needs a '## How to verify' section")
 
         for pol in POLICIES:
             require((root / f"policies/{pol}.md").is_file(), f"missing policy {pol}")
@@ -139,6 +183,7 @@ def validate(root=ROOT):
 
         # Adapters: byte-for-byte regeneration, then the host-specific guarantees.
         errors.extend(drift(root))
+        version = (root / "VERSION").read_text().strip()
         for f in sorted((root / ".claude/agents").glob("*.md")):
             d, _ = frontmatter(f)
             require(set(d) == {"name", "description", "model", "tools"}, f"{f.name}: unreviewed Claude fields")
@@ -152,9 +197,14 @@ def validate(root=ROOT):
         for f in sorted((root / ".claude/skills").glob("*/SKILL.md")):
             d, b = frontmatter(f)
             require(set(d) == {"name", "description"} and d["name"] == f.parent.name and bool(b), f"{f}: invalid skill")
+        for d_ in (".claude/agents", ".claude/skills", ".github/agents"):
+            for f in sorted((root / d_).rglob("*.md")):
+                require(
+                    f"{GENERATED_MARK} (release {version})" in f.read_text(encoding="utf-8"),
+                    f"{f.relative_to(root)}: generated marker lacks the current release",
+                )
 
         # Version agreement.
-        version = (root / "VERSION").read_text().strip()
         require(bool(re.fullmatch(r"\d+\.\d+\.\d+", version)), "VERSION is not semver")
         require(f'version = "{version}"' in (root / "pyproject.toml").read_text(), "pyproject version mismatch")
         require(
