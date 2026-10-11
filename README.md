@@ -2,7 +2,7 @@
 
 This is my shared home for AI agent personas and the domain knowledge they load, written once and generated for Claude Code, GitHub Copilot, ChatGPT and local models. The name is because the best thing a second agent can do for the first one is disagree with it, and because I wanted somewhere for those arguments to live that was not a pile of prompts copied between repos.
 
-Release 0.3.0. MIT.
+Release 0.3.1. MIT.
 
 ## Why roles and packs, not a dozen personas
 
@@ -78,7 +78,7 @@ The routine, from a checkout pinned to a release tag:
 
 ```
 git -C /path/to/department-of-internal-arguments fetch --tags
-git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.3.0
+git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.3.1
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update --apply
 git -C ~/dotfiles/claude status   # review the diff, then commit
