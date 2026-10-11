@@ -59,6 +59,31 @@ class MarkerHash(unittest.TestCase):
         self.assertIsNotNone(lib.split_marker(f"{LEGACY_MARKER}\nbody\n"))
 
 
+class MarkerStrictness(unittest.TestCase):
+    def test_text_around_a_valid_marker_line_is_not_well_formed(self):
+        for line in (f"junk {LEGACY_MARKER}", f"{LEGACY_MARKER} junk", f"<!--  {LEGACY_MARKER[5:]}"):
+            self.assertIsNone(lib.split_marker(f"{line}\nbody\n"), line)
+
+    def test_generator_refuses_a_body_that_quotes_the_marker(self):
+        import generate
+
+        pack = {"dir": "x", "description": "d", "body": f"quoted: {LEGACY_MARKER}", "updated": "2026-10-08"}
+        with self.assertRaisesRegex(ValueError, "marker"):
+            generate.render_skill(pack, "0.0.0")
+
+    def test_oversized_marker_file_is_edited_not_owned(self):
+        with tempfile.TemporaryDirectory() as d:
+            big = Path(d) / "big.md"
+            big.write_text((ROOT / ".claude/agents/reviewer.md").read_text() + "x" * installer.MAX_MANAGED_BYTES)
+            self.assertEqual(installer.inspect(big)[0], "edited")
+
+    def test_list_managed_flags_reject_force_edited(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, _, err = run_main("--target", d, "--list-managed", "--force-edited")
+            self.assertEqual(code, 1)
+            self.assertIn("read-only", err)
+
+
 class EditedFiles(unittest.TestCase):
     def setup_installed(self, d):
         install(d, "claude", True, layout="user")
