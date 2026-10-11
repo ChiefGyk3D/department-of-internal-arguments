@@ -50,6 +50,7 @@ class AppendOnly(unittest.TestCase):
         self.assertTrue(tail.startswith(f"\n{HEADING}\n"), tail[:80])
         self.assertIn(f"Extra duty {SECRET}.", tail)
         self.assertEqual(body.count(HEADING), 1)
+        self.assertIn(generate.ADDITIONS_NOTE, tail)
         self.assertIn("overlay", m.group(2))
         self.assertEqual(m.group(3), lib.body_sha256(body))
         # frontmatter is the public one
@@ -149,7 +150,9 @@ class AdditionsRefused(unittest.TestCase):
                     self.load(packs={"threat-model": additions("threat-model", "Extra.", f'{key}: "2026-01-01"\n')})
 
     def test_duplicate_public_headings_are_refused(self):
-        for heading in ("## Hard rules", "### Hard rules", "#### hard   RULES", "### Security boundaries", HEADING):
+        shapes = ("## Hard rules", "### Hard rules", "#### hard   RULES", "### Security boundaries", HEADING)
+        shapes += ("### Maintainer additions (private overlay)", "   ### Hard rules", "### Hard rules ###")
+        for heading in shapes:
             with self.subTest(heading):
                 with self.assertRaisesRegex(ValueError, "heading"):
                     self.load(roles={"implementer": additions("implementer", f"{heading}\nbody")})
@@ -166,7 +169,11 @@ class AdditionsRefused(unittest.TestCase):
         self.assertTrue(self.load(roles={"reviewer": additions("reviewer", "### Local notes\ntext")}).role_additions)
 
     def test_marker_text_and_fragment_lines_are_refused(self):
-        for body in (f"<!-- {GENERATED_MARK} (release 1) -->", "{{fragment:never-weaken}}"):
+        for body in (
+            f"<!-- {GENERATED_MARK} (release 1) -->",
+            "{{fragment:never-weaken}}",
+            "text {{fragment:x}} inline",
+        ):
             with self.subTest(body):
                 with self.assertRaises(ValueError):
                     self.load(roles={"reviewer": additions("reviewer", body)})
@@ -179,6 +186,10 @@ class AdditionsRefused(unittest.TestCase):
         self.assertTrue(self.load(roles={"reviewer": additions("reviewer", ok)}).role_additions)
         with self.assertRaisesRegex(ValueError, "empty"):
             self.load(roles={"reviewer": additions("reviewer", "")})
+
+    def test_a_public_pack_needs_its_own_name(self):
+        with self.assertRaisesRegex(ValueError, "name"):
+            self.load(packs={"threat-model": additions("rf-emcomm", "Extra.")})
 
     def test_the_old_override_machinery_is_gone(self):
         import validate

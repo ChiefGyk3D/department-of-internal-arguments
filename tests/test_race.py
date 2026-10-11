@@ -46,6 +46,8 @@ class DirectorySwap(unittest.TestCase):
             self.assertEqual(victim.read_text(), "VICTIM\n")
             self.assertEqual(sorted(p.name for p in victim_dir.iterdir()), ["reviewer.md"])
             self.assertEqual(list(Path(d).rglob("*.doia-tmp")), [])
+            # nothing was written anywhere: the moved original still holds the stale file
+            self.assertIn("(release 0.0.1)", (t / "agents.moved/reviewer.md").read_text())
 
     def test_parent_swapped_after_the_write_still_fails_the_run(self):
         with tempfile.TemporaryDirectory() as d:
@@ -65,6 +67,24 @@ class DirectorySwap(unittest.TestCase):
             ):
                 installer._apply(items)
             self.assertEqual(list(victim_dir.iterdir()), [])
+
+    def test_parent_replaced_by_another_real_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            t, agent = stale_install(d)
+            items = installer._plan(t, "claude", update=True, layout="user")
+
+            def swap(stage, dest):
+                if stage == "checked" and dest.name == "reviewer.md":
+                    (t / "agents").rename(t / "agents.moved")
+                    (t / "agents").mkdir()
+
+            with (
+                mock.patch.object(installer, "_race_seam", side_effect=swap),
+                self.assertRaisesRegex(ValueError, "replaced"),
+            ):
+                installer._apply(items)
+            self.assertEqual(list((t / "agents").iterdir()), [])
+            self.assertIn("(release 0.0.1)", (t / "agents.moved/reviewer.md").read_text())
 
     def test_new_file_into_a_directory_swapped_before_the_write(self):
         with tempfile.TemporaryDirectory() as d:
@@ -101,6 +121,8 @@ class DirectorySwap(unittest.TestCase):
             link.symlink_to(real, target_is_directory=True)
             with self.assertRaises(OSError):
                 os.close(installer._open_dir_chain(link / "sub", create=False))
+            with self.assertRaises(FileNotFoundError):
+                os.close(installer._open_dir_chain(real / "missing", create=False))
             os.close(installer._open_dir_chain(real / "sub", create=False))
 
 
@@ -133,6 +155,7 @@ class FileSwap(unittest.TestCase):
 
             def swap(stage, dest):
                 if stage == "checked" and dest.name == "reviewer.md":
+                    os.link(dest, dest.with_name("keep-inode"))  # so the new file cannot reuse the inode number
                     dest.unlink()
                     dest.write_text("someone else's file\n")
 
@@ -158,6 +181,36 @@ class FileSwap(unittest.TestCase):
             with mock.patch.object(installer, "_race_seam", side_effect=swap), self.assertRaises(ValueError):
                 installer._apply(items)
             self.assertEqual(victim.read_text(), "VICTIM\n")
+
+    def test_new_destination_planted_as_a_regular_file_is_not_truncated(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / "dot"
+            (t / "agents").mkdir(parents=True)
+            items = installer._plan(t, "claude", layout="user")
+
+            def swap(stage, dest):
+                if stage == "checked" and dest.name == "reviewer.md":
+                    dest.write_text("planted\n")
+
+            with mock.patch.object(installer, "_race_seam", side_effect=swap), self.assertRaises(ValueError):
+                installer._apply(items)
+            self.assertEqual((t / "agents/reviewer.md").read_text(), "planted\n")
+
+    def test_directory_in_place_of_the_destination_before_apply(self):
+        with tempfile.TemporaryDirectory() as d:
+            t, agent = stale_install(d)
+            items = installer._plan(t, "claude", update=True, layout="user")
+            agent.unlink()
+            agent.mkdir()
+            with self.assertRaisesRegex(ValueError, "changed"):
+                installer._apply(items)
+
+    def test_dotdot_in_the_target_still_works(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a").mkdir()
+            (Path(d) / "dot").mkdir()
+            install(Path(d) / "a" / ".." / "dot", "claude", True, layout="user")
+            self.assertTrue((Path(d) / "dot/agents/reviewer.md").is_file())
 
     def test_swap_of_a_file_for_a_directory_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as d:

@@ -275,8 +275,6 @@ def _open_dir_chain(path, create):
     Every component is opened O_DIRECTORY|O_NOFOLLOW relative to the previous descriptor, so a component that is (or
     later becomes) a symlink can never redirect what is done through the returned descriptor."""
     parts = Path(path).absolute().parts
-    if ".." in parts:
-        raise ValueError("path with .. refused")
     fd = os.open(parts[0], _DIR_FLAGS)
     try:
         for part in parts[1:]:
