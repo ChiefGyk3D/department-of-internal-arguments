@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+Install into a user-level tree (a dotfiles checkout) and keep private personas out of the public repo.
+
+- `scripts/install.py --layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md`; the default `--layout project` output is unchanged byte for byte. Claude only: `--adapter copilot|both` with the user layout is refused. A target inside this repository is now refused (it used to refuse only the repository root).
+- `--overlay DIR`: a private directory (`roles/`, `packs/`) outside this repository. A new name is installed as a whole persona or pack; a name that is also public is append-only (below); marker records `overlay` and the file name, never a path. Read with confinement (no symlinks, regular files, size and entry caps, owner and mode checks) by the new `scripts/overlay.py`, validated by the same role and pack rules, and exempt from the public-repo privacy sweep on purpose. Nothing can be written inside this repository.
+- `--list-managed`: read-only report of marker files under a target with release, source and status (current, stale, differs, orphan, unchecked); exit 3 on drift.
+- `scripts/validate.py` exposes `role_errors` and `pack_errors` so the overlay uses the public rules; `scripts/generate.py` render functions take an optional marker source; `ensure_safe` moved to `scripts/lib.py`.
+- The generated marker now carries `sha256:` of the file minus the marker line (a format change: every generated file's marker line differs from 0.2.0, nothing else does). Ownership is content-bound: `--update` replaces a file only when the marker is well-formed and the body matches its hash; otherwise it is `edited` and refused. New `--force-edited` (with `--update`) discards local edits. The preview labels `new`, `update`, `unchanged`, `edited`. Release 0.2.0 files are legacy-owned only when their body is one of the 14 known 0.2.0 outputs, else `legacy-unverified`. `--list-managed` also reports `edited` and `legacy-unverified`.
+- Append-only overlay for public names: an overlay `roles/<public>.md` or `packs/<public>/PACK.md` may carry only `name:` in its frontmatter and its body is appended, unchanged public text first, under a generator-written `## Maintainer additions (private overlay)` section (size cap, no marker text or fragment markers, no level 1-2 or setext headings, no heading repeating a public section name). The earlier override rules (`override_errors`) are gone. Prose in the additions can still conflict with the public rules; the README says so. Frontmatter nesting is capped (a depth error, not "empty description"). A group-writable overlay file is refused with the exact `chmod -R g-w,o-w` remedy.
+- File modes: public files are created `0644` (before: `0666` masked by the umask, so `0664` under umask 002) and updates no longer widen permissions (temp file `0600`, then the destination's mode is applied before the rename); overlay-sourced files are created or narrowed to `0600`.
+- Additions may not contain raw HTML (`<` before a letter, `/`, `!`, `?`; autolinks included) or an encoded `#` (`&#35;`, `&#x23;`, `&num;`).
+- Installer writes are race-safe: every directory component is opened `O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor, and the existing-file read, temp file (`O_EXCL|O_NOFOLLOW`) and rename are done relative to those descriptors, with the destination's device and inode re-checked, so a parent or file swapped for a symlink after the hash check cannot redirect a write; the run fails.
+- README: "Keeping a dotfiles repo current", including why symlinks must not be used.
+
 ## [0.2.0] - 2026-10-08
 
 The lead gets a persona, reports get a shared header, and installed copies can be upgraded.

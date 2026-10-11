@@ -78,7 +78,7 @@ class CurrentTree(unittest.TestCase):
         for f in files:
             self.assertIn(f"{GENERATED_MARK} (release {ver})", f.read_text(), f.name)
         for f in (ROOT / ".claude/skills").rglob("SKILL.md"):
-            self.assertRegex(f.read_text(), r"updated \d{4}-\d{2}-\d{2}\. Do not edit", f.name)
+            self.assertRegex(f.read_text(), r"updated \d{4}-\d{2}-\d{2}\. sha256:[0-9a-f]{64}\. Do not edit", f.name)
 
     def test_every_role_report_has_shared_header_and_model_line(self):
         for role in load_roles(ROOT):

@@ -21,9 +21,11 @@ from lib import (
     POLICIES,
     ROOT,
     TIER_MODEL,
+    body_sha256,
     load_packs,
     load_roles,
     policy_text,
+    split_marker,
     version,
 )
 
@@ -32,7 +34,7 @@ def _q(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def _policies_block(root):
+def policies_block(root):
     parts = ["## Shared policies", ""]
     for name in POLICIES:
         text = policy_text(name, root)
@@ -45,8 +47,18 @@ def _policies_block(root):
     return "\n".join(parts).rstrip()
 
 
-def _marker(source, ver, extra=""):
-    return f"<!-- {GENERATED_MARK} (release {ver}) from {source}{extra}. Do not edit; run the generator. -->"
+def _marker(source, ver, extra="", digest=None):
+    sha = f" sha256:{digest}." if digest else ""
+    return f"<!-- {GENERATED_MARK} (release {ver}) from {source}{extra}.{sha} Do not edit; run the generator. -->"
+
+
+def _seal(head, tail, source, ver, extra=""):
+    """head + marker + tail, with the marker carrying the sha256 of everything except the marker line."""
+    text = f"{head}\n{_marker(source, ver, extra)}\n\n{tail}"
+    parts = split_marker(text)
+    if parts is None:  # a body that quotes the marker text would make ownership unprovable
+        raise ValueError(f"{source}: body must not contain the generator marker text")
+    return f"{head}\n{_marker(source, ver, extra, body_sha256(parts[1]))}\n\n{tail}"
 
 
 def _capabilities(role):
@@ -56,7 +68,19 @@ def _capabilities(role):
     return [c for c in CAPABILITY_ORDER if c in caps]
 
 
-def render_claude_agent(role, policies, ver):
+ADDITIONS_HEADING = "## Maintainer additions (private overlay)"
+ADDITIONS_NOTE = (
+    "> Everything above this heading is the public persona and its rules. These additions extend it; "
+    "they do not replace or relax anything above."
+)
+
+
+def additions_section(additions):
+    """The only way private overlay text reaches a public persona: appended, labelled, never replacing."""
+    return f"\n{ADDITIONS_HEADING}\n\n{ADDITIONS_NOTE}\n\n{additions.strip()}\n"
+
+
+def render_claude_agent(role, policies, ver, source=None, additions=None):
     tier = role["tier"]
     if tier not in TIER_MODEL:
         raise ValueError(f"roles/{role['file']}: tier {tier!r} has no model mapping")
@@ -69,27 +93,30 @@ def render_claude_agent(role, policies, ver):
         f"tools: {', '.join(tools)}\n"
         "---\n"
     )
-    return f"{head}\n{_marker('roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
+    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
-def render_copilot_agent(role, policies, ver):
+def render_copilot_agent(role, policies, ver, source=None, additions=None):
     tools = [COPILOT_TOOLS[c] for c in _capabilities(role) if c in COPILOT_TOOLS]
     head = f"---\nname: {role['name']}\ndescription: {_q(role['description'])}\ntools: {_q(tools)}\n---\n"
-    return f"{head}\n{_marker('roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
+    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
-def render_skill(pack, ver):
+def render_skill(pack, ver, source=None, additions=None):
     head = f"---\nname: pack-{pack['dir']}\ndescription: {_q(pack['description'])}\n---\n"
     updated = pack.get("updated")
     if not isinstance(updated, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
         raise ValueError(f"packs/{pack['dir']}/PACK.md: frontmatter needs updated: YYYY-MM-DD")
-    return f"{head}\n{_marker('packs/' + pack['dir'] + '/PACK.md', ver, f', updated {updated}')}\n\n{pack['body']}\n"
+    tail = f"{pack['body']}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "packs/" + pack["dir"] + "/PACK.md", ver, f", updated {updated}")
 
 
 def render_all(root=ROOT):
     """Return {relative path: text} for every generated file."""
     root = Path(root)
-    policies = _policies_block(root)
+    policies = policies_block(root)
     ver = version(root)
     out = {}
     for role in load_roles(root):
