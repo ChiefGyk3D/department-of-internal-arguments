@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- `local-llm-routing` pack: upstreamed generic measured knowledge from a maintainer's private copy. `keep_alive` does not stop a context-change eviction; the 12B-plus-second-model fit measurement (8192 yes, 16384 no, Ollama 0.33.2); the `using device` journal grep and the 100% GPU check for multi-GPU placement; stale-probe and brief-versus-call guard notes; the Codex-over-Ollama command shape (still UNVERIFIED). A comparison of the `linux-platform` and `rf-emcomm` private copies found nothing to add.
+
 ## [0.3.0] - 2026-10-11
 
 Install into a user-level tree (a dotfiles checkout) and keep private personas out of the public repo.
