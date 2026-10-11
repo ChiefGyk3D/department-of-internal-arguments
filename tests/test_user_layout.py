@@ -15,7 +15,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import install as installer  # noqa: E402  (path set up above)
+import generate  # noqa: E402  (path set up above)
+import install as installer  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
 from install import install, is_generated, list_managed, plan  # noqa: E402
 from lib import GENERATED_MARK, PACK_NAMES, ROLE_NAMES, version  # noqa: E402
@@ -628,11 +629,11 @@ class ListManaged(unittest.TestCase):
             edited = Path(d) / "agents/implementer.md"
             edited.write_text(edited.read_text() + "\nlocal edit\n")
             orphan = Path(d) / "agents/gone.md"
-            orphan.write_text(f"<!-- {GENERATED_MARK} (release {version()}) from roles/gone.md. -->\n")
+            orphan.write_text(generate._seal("---\nname: gone\n---\n", "body\n", "roles/gone.md", version()))
             rows = self.rows(d, layout="user")
             self.assertEqual(rows["agents/reviewer.md"]["status"], "stale")
             self.assertEqual(rows["agents/reviewer.md"]["release"], "0.0.1")
-            self.assertEqual(rows["agents/implementer.md"]["status"], "differs")
+            self.assertEqual(rows["agents/implementer.md"]["status"], "edited")
             self.assertEqual(rows["agents/gone.md"]["status"], "orphan")
             self.assertEqual(rows["agents/transcriber.md"]["status"], "current")
 

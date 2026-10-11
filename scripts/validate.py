@@ -8,6 +8,7 @@ from generate import drift
 from lib import (
     CAPABILITY_ORDER,
     FRAGMENT_NAMES,
+    FRAGMENT_RE,
     GENERATED_MARK,
     PACK_NAMES,
     POLICIES,
@@ -150,6 +151,48 @@ def role_errors(r):
         require("Never push" in r["body"], f"{n}: editing roles must say they never push")
     if n == "transcriber":
         require(r.get("tier") == "cheap", "transcriber must be tier cheap")
+    return errors
+
+
+TIER_RANK = {"cheap": 0, "standard": 1}
+
+
+def hard_rule_lines(source):
+    """The lines under a role's '## Hard rules' heading (fragment lines excluded), stripped."""
+    out, inside = [], False
+    for line in source.splitlines():
+        if line.startswith("## "):
+            inside = line.strip() == "## Hard rules"
+        elif inside and line.strip() and not FRAGMENT_RE.fullmatch(line.strip()):
+            out.append(line.strip())
+    return out
+
+
+def override_errors(r, public):
+    """Extra rules for a private overlay role that REPLACES a public role of the same name.
+
+    It must keep every fragment, every Hard rules line and every Severity line of the public role (verbatim), may not
+    request tools the public role lacks, and may not raise the tier. Free-form prose that contradicts a kept rule
+    is not machine-detectable; the kept rules are what a reader and the validator can rely on."""
+    n = r["name"]
+    errors = []
+    have = {m.group(1) for ln in r["source"].splitlines() if (m := FRAGMENT_RE.fullmatch(ln.strip()))}
+    for ln in public["source"].splitlines():
+        m = FRAGMENT_RE.fullmatch(ln.strip())
+        if m and m.group(1) not in have:
+            errors.append(f"{n}: override lacks required fragment {{{{fragment:{m.group(1)}}}}}")
+    mine = {ln.strip() for ln in r["source"].splitlines()}
+    for rule in hard_rule_lines(public["source"]):
+        if rule not in mine:
+            errors.append(f"{n}: override lacks required rule line: {rule[:90]}")
+    for ln in public["source"].splitlines():
+        if ln.strip().startswith("Severity") and ln.strip() not in mine:
+            errors.append(f"{n}: override lacks the required Severity scale line: {ln.strip()[:90]}")
+    widened = [t for t in r["tools"] if t not in public["tools"]]
+    if widened:
+        errors.append(f"{n}: override widens tools beyond the public role: {', '.join(widened)}")
+    if TIER_RANK.get(r["tier"], 99) > TIER_RANK.get(public["tier"], -1):
+        errors.append(f"{n}: override raises tier from {public['tier']} to {r['tier']}")
     return errors
 
 

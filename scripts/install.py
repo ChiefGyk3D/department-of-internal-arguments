@@ -1,7 +1,7 @@
 """Additive installer. Preview by default; never overwrite a file it did not generate.
 
 python3 scripts/install.py --target <dir> --adapter claude|copilot|both [--pack NAME ...] [--update] [--apply]
-                           [--layout project|user] [--overlay DIR]
+                           [--layout project|user] [--overlay DIR] [--force-edited]
 python3 scripts/install.py --target <dir> --list-managed [--layout project|user] [--overlay DIR]
 
 Layouts:
@@ -10,8 +10,9 @@ Layouts:
                      tree such as a dotfiles checkout). Claude only: Copilot has no user layout.
 
 Without --update every existing destination is a collision and the whole install is refused.
-With --update a destination that carries the generator marker is replaced in place; a file
-without the marker (one you wrote or edited) is still a collision.
+With --update a destination is replaced in place only if its marker is well-formed and its body still matches the
+sha256 in the marker (or it is a known release-0.2.0 file). A file you edited is "edited" and refused; --force-edited
+discards your edits. A file without the marker is still a collision.
 
 --overlay DIR is a private directory outside this repository (roles/, packs/; see scripts/overlay.py). An overlay
 entry with a public name replaces the public one; a new name is installed in addition. Overlay files carry the
@@ -22,13 +23,14 @@ they match this checkout (exit 0 when all are current, 3 otherwise).
 """
 
 import argparse
+import hashlib
 import os
 import re
 import sys
 from pathlib import Path
 
 import generate
-from lib import GENERATED_MARK, PACK_NAMES, ROOT, ensure_safe, version
+from lib import GENERATED_MARK, LEGACY_BODY_SHA256, PACK_NAMES, ROOT, body_sha256, ensure_safe, split_marker, version
 from overlay import load_overlay
 
 ADAPTERS = ("claude", "copilot", "both")
@@ -37,17 +39,40 @@ MAX_MANAGED_BYTES = 1024 * 1024
 _RELEASE_RE = re.compile(r"[0-9A-Za-z.+_-]{1,40}")
 
 
-def is_generated(path):
-    """True only for a regular, non-symlink file whose first lines carry the generator marker."""
+def inspect(path):
+    """(state, release, source, bytes) for what is on disk at path.
+
+    state: none (absent, not a regular file, a symlink, or no marker text at all) | owned (well-formed marker whose
+    sha256 matches the body) | legacy (0.2.0 marker without a hash, body is a known 0.2.0 output) | legacy-unverified
+    (hashless marker, unknown body) | edited (marker text present but malformed, forged, or the body no longer matches).
+    The marker text alone is never ownership."""
     path = Path(path)
     if path.is_symlink() or not path.is_file():
-        return False
+        return "none", None, None, b""
     try:
-        with path.open(encoding="utf-8") as f:
-            head = f.read(4096)
-    except (OSError, UnicodeDecodeError):
-        return False
-    return GENERATED_MARK in head
+        data = _read_capped(path)
+    except OSError:
+        return "none", None, None, b""
+    text = data.decode("utf-8", "replace")
+    if GENERATED_MARK not in text:
+        return "none", None, None, data
+    parts = split_marker(text) if len(data) <= MAX_MANAGED_BYTES else None
+    if parts is None:
+        return "edited", "unknown", "unknown", data
+    m, body = parts
+    release = m.group(1) if _RELEASE_RE.fullmatch(m.group(1)) else "unknown"
+    source = "overlay" if m.group(2).startswith("overlay ") else "public"
+    digest = body_sha256(body)
+    if m.group(3):
+        state = "owned" if m.group(3) == digest else "edited"
+    else:
+        state = "legacy" if digest in LEGACY_BODY_SHA256 else "legacy-unverified"
+    return state, release, source, data
+
+
+def is_generated(path):
+    """True only for a file the installer may replace without --force-edited."""
+    return inspect(path)[0] in ("owned", "legacy")
 
 
 def assert_outside_repo(path, root=ROOT):
@@ -141,9 +166,17 @@ def _items(adapter, packs, layout, root, ov):
     return out
 
 
-def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None):
-    """[(source, destination Path, action, bytes)]; raises before anything is written."""
+def _sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
+    """[(source, destination Path, action, bytes, sha of the existing file or None)]; raises before writing anything.
+
+    action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
     _check_options(adapter, layout)
+    if force_edited and not update:
+        raise ValueError("--force-edited only makes sense with --update")
     ov = load_overlay(overlay, root) if overlay is not None else None
     target = _check_target(target, root)
     items = []
@@ -151,37 +184,52 @@ def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project"
         dest = target / rel
         ensure_safe(dest)
         assert_outside_repo(dest, root)
-        action = "new"
+        action, seen = "new", None
         if dest.exists() or dest.is_symlink():
-            if update and is_generated(dest):
-                action = "update"
-            elif update:
-                raise ValueError(f"not a generated file; merge manually: {dest.relative_to(target)}")
-            else:
+            if not update:
                 raise ValueError(f"collision; merge manually (or use --update): {dest.relative_to(target)}")
+            state, _rel, _src, existing = inspect(dest)
+            if state in ("owned", "legacy"):
+                action = "unchanged" if existing == data else "update"
+            elif state in ("edited", "legacy-unverified"):
+                action = "forced" if force_edited else "edited"
+            else:
+                raise ValueError(f"not a generated file; merge manually: {dest.relative_to(target)}")
+            seen = _sha(existing)
         # Reject a file in place of a directory before writing anything.
         for parent in dest.parents:
             if parent == target:
                 break
             if parent.exists() and not parent.is_dir():
                 raise ValueError(f"parent is not a directory: {parent}")
-        items.append((src, dest, action, data))
+        items.append((src, dest, action, data, seen))
     return items
 
 
-def plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None):
-    """[(source, destination, 'new' | 'update')]; raises before anything is written."""
-    return [(s, d, a) for s, d, a, _ in _plan(target, adapter, packs, root, update, layout, overlay)]
+def plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
+    """[(source, destination, action)]; raises before anything is written. See _plan for the actions."""
+    return [(s, d, a) for s, d, a, _, _ in _plan(target, adapter, packs, root, update, layout, overlay, force_edited)]
+
+
+def _refuse_edited(items):
+    edited = [str(d.name) for _, d, a, _, _ in items if a == "edited"]
+    if edited:
+        raise ValueError(
+            "edited files refused (merge manually, or --force-edited discards your changes): " + ", ".join(edited)
+        )
 
 
 def _apply(items, root=ROOT):
-    for _src, dest, action, data in items:
+    _refuse_edited(items)
+    for _src, dest, action, data, seen in items:
+        if action == "unchanged":
+            continue
         ensure_safe(dest)
         assert_outside_repo(dest, root)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if action == "update":
-            if not is_generated(dest):  # changed between preflight and write
-                raise ValueError(f"destination changed during install: {dest}")
+        if action in ("update", "forced"):
+            if dest.is_symlink() or not dest.is_file() or _sha(_read_capped(dest)) != seen:
+                raise ValueError(f"destination changed during install: {dest.name}")
             tmp = dest.with_name(dest.name + ".doia-tmp")
             with tmp.open("xb") as out:
                 out.write(data)
@@ -192,11 +240,12 @@ def _apply(items, root=ROOT):
                 out.write(data)
 
 
-def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, layout="project", overlay=None):
-    items = _plan(target, adapter, packs, root, update, layout, overlay)
+def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, layout="project", overlay=None, **kw):
+    items = _plan(target, adapter, packs, root, update, layout, overlay, **kw)
+    _refuse_edited(items)
     if apply:
         _apply(items, root)
-    return [str(dest.relative_to(Path(target).absolute())) for _, dest, _, _ in items]
+    return [str(dest.relative_to(Path(target).absolute())) for _, dest, _, _, _ in items]
 
 
 def _scan_patterns(layout):
@@ -211,11 +260,13 @@ def _read_capped(path):
 
 
 def list_managed(target, layout="project", overlay=None, root=ROOT):
-    """Read-only: one row per marker-carrying file under target.
+    """Read-only: one row per file under target whose text carries the marker.
 
     status: current | stale (older release, differs) | differs (this release, content differs) |
-            orphan (this checkout and overlay no longer produce it) | unchecked (overlay-sourced, no --overlay given).
-    Files without the marker and symlinks are not listed."""
+            orphan (this checkout and overlay no longer produce it) | unchecked (overlay-sourced, no --overlay given) |
+            edited (marker present but the body no longer matches it, or the marker is malformed) |
+            legacy-unverified (0.2.0 marker without a hash and a body 0.2.0 never produced).
+    Files without the marker text and symlinks are not listed."""
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout: {layout}")
     ov = load_overlay(overlay, root) if overlay is not None else None
@@ -230,16 +281,13 @@ def list_managed(target, layout="project", overlay=None, root=ROOT):
                 ensure_safe(path)
             except ValueError:
                 continue
-            if not is_generated(path):
+            state, release, source, data = inspect(path)
+            if state == "none":
                 continue
             rel = str(path.relative_to(target))
-            data = _read_capped(path)
-            head = data[:4096].decode("utf-8", "replace")
-            line = next(ln for ln in head.splitlines() if GENERATED_MARK in ln)
-            m = re.search(r"\(release ([^)]*)\)", line)
-            release = m.group(1) if m and _RELEASE_RE.fullmatch(m.group(1)) else "unknown"
-            source = "overlay" if "from overlay " in line else "public"
-            if source == "overlay" and ov is None:
+            if state in ("edited", "legacy-unverified"):
+                status = state
+            elif source == "overlay" and ov is None:
                 status = "unchecked"
             elif rel not in expected:
                 status = "orphan"
@@ -255,6 +303,12 @@ def _safe(text):
     return "".join(c if " " <= c <= "~" else "?" for c in text)
 
 
+LABELS = {
+    "edited": "edited (refused; --force-edited discards your changes)",
+    "forced": "update (forced; discards local edits)",
+}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=Path, required=True)
@@ -262,29 +316,39 @@ def main(argv=None):
     ap.add_argument("--layout", choices=LAYOUTS, default="project")
     ap.add_argument("--overlay", type=Path, help="private directory outside this repository (roles/, packs/)")
     ap.add_argument("--pack", action="append", help="install only this pack (repeatable); default all")
-    ap.add_argument("--update", action="store_true", help="replace files that carry the generator marker")
+    ap.add_argument("--update", action="store_true", help="replace files whose marker and body hash still match")
+    ap.add_argument("--force-edited", action="store_true", help="with --update: also replace edited marker files")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--list-managed", action="store_true", help="read-only: list marker files and their drift")
     a = ap.parse_args(argv)
     try:
         if a.list_managed:
-            if a.apply or a.update or a.pack:
-                raise ValueError("--list-managed is read-only and takes no --apply, --update or --pack")
+            if a.apply or a.update or a.pack or a.force_edited:
+                raise ValueError("--list-managed is read-only and takes no --apply, --update, --force-edited or --pack")
             rows = list_managed(a.target, a.layout, a.overlay)
             for r in rows:
-                print(f"{r['status']:10} {r['release']:10} {r['source']:8} {_safe(r['path'])}")
+                print(f"{r['status']:17} {r['release']:10} {r['source']:8} {_safe(r['path'])}")
             bad = [r for r in rows if r["status"] != "current"]
             print(f"{len(rows)} managed files, {len(bad)} not current")
             return 3 if bad else 0
-        items = _plan(a.target, a.adapter, a.pack, update=a.update, layout=a.layout, overlay=a.overlay)
+        items = _plan(
+            a.target,
+            a.adapter,
+            a.pack,
+            update=a.update,
+            layout=a.layout,
+            overlay=a.overlay,
+            force_edited=a.force_edited,
+        )
+        target = Path(a.target).absolute()
+        for _, dest, action, _, _ in items:
+            print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}")
+        _refuse_edited(items)
         if a.apply:
             _apply(items)
     except (OSError, ValueError) as exc:
         print(f"Installation refused: {exc}", file=sys.stderr)
         return 1
-    target = Path(a.target).absolute()
-    for _, dest, action, _ in items:
-        print(f"{action}: {dest.relative_to(target)}")
     print(("Installed" if a.apply else "Preview only; rerun with --apply after review") + f": {len(items)} files")
     return 0
 

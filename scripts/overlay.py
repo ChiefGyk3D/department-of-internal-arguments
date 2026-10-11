@@ -17,19 +17,25 @@ by the current user, not group- or world-writable, strict names.
 
 import os
 import re
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import ROOT, ensure_safe, parse_frontmatter, resolve_fragments
-from validate import pack_errors, role_errors
+from lib import ROOT, ensure_safe, load_roles, parse_frontmatter, resolve_fragments
+from validate import override_errors, pack_errors, role_errors
 
 MAX_FILE_BYTES = 64 * 1024
 MAX_ENTRIES = 64
+MAX_NESTING = 8
 NAME_PATTERN = r"[a-z0-9][a-z0-9-]{0,63}"
 
 _OPEN_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _OPEN_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+class OverlayPermissionError(ValueError):
+    """Owner or mode refusal; load_overlay adds the exact remedy."""
 
 
 @dataclass(frozen=True)
@@ -52,9 +58,9 @@ def _name_ok(name):
 
 def _check_owner_and_mode(st, label):
     if st.st_uid != os.geteuid():
-        raise ValueError(f"overlay {label}: not owned by the current user")
+        raise OverlayPermissionError(f"overlay {label}: not owned by the current user")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise ValueError(f"overlay {label}: group- or world-writable")
+        raise OverlayPermissionError(f"overlay {label}: group- or world-writable")
 
 
 def _open_dir(name, label, dir_fd=None):
@@ -122,11 +128,26 @@ def _read_file(dir_fd, name, label):
         raise ValueError(f"overlay {label}: not valid UTF-8") from None
 
 
+def nesting_depth(value):
+    """Container nesting depth of a parsed JSON value (a scalar is 0), computed without recursion."""
+    deepest, stack = 0, [(value, 0)]
+    while stack:
+        v, d = stack.pop()
+        if isinstance(v, (list, dict)):
+            d += 1
+            deepest = max(deepest, d)
+            stack.extend((c, d) for c in (v.values() if isinstance(v, dict) else v))
+    return deepest
+
+
 def _parse(text, label):
     try:
-        return parse_frontmatter(text, f"overlay {label}")
+        meta, body = parse_frontmatter(text, f"overlay {label}")
     except RecursionError:
         raise ValueError(f"overlay {label}: frontmatter nested too deeply") from None
+    if nesting_depth(meta) > MAX_NESTING:
+        raise ValueError(f"overlay {label}: frontmatter nested too deeply (limit {MAX_NESTING})")
+    return meta, body
 
 
 def _load_roles(root_fd, root):
@@ -189,6 +210,13 @@ def load_overlay(path, root=ROOT):
     path = Path(path).absolute()
     ensure_safe(path)
     _outside_repo(path, root)
+    try:
+        return _load(path, root)
+    except OverlayPermissionError as exc:
+        raise ValueError(f"{exc}; remedy: chmod -R g-w,o-w {shlex.quote(str(path))}") from None
+
+
+def _load(path, root):
     root_fd = _open_dir(str(path), "directory")
     try:
         present = {}
@@ -207,8 +235,12 @@ def load_overlay(path, root=ROOT):
         os.close(root_fd)
     errors = []
     try:
+        public = {r["name"]: r for r in load_roles(root)}
         for r in roles:
-            errors.extend(role_errors(r))
+            own = role_errors(r)
+            errors.extend(own)
+            if not own and r["name"] in public:  # a replacement of a public persona also keeps its hard rules
+                errors.extend(override_errors(r, public[r["name"]]))
         for p in packs:
             errors.extend(pack_errors(p))
     except (TypeError, KeyError) as exc:
