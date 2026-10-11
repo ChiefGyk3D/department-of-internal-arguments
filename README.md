@@ -48,7 +48,7 @@ policies/    four policies, embedded in every generated agent
 fragments/   text shared by several roles (report header, never-weaken list), spliced in by {{fragment:NAME}} lines
 templates/   lead, brief, handoff, adr, copilot-instructions
 evals/       behavioral exercises, the pilot summary, the log schema and a synthetic example log
-scripts/     generate.py, validate.py, install.py, export_prompt.py, summarize_log.py
+scripts/     generate.py, validate.py, install.py, overlay.py, export_prompt.py, summarize_log.py
 .claude/     GENERATED: agents and skills for Claude Code
 .github/agents/  GENERATED: Copilot custom agents
 ```
@@ -69,6 +69,34 @@ python3 scripts/install.py --target /path/to/project --adapter both --apply
 ```
 
 `--adapter` is `claude`, `copilot` or `both`, and `--pack NAME` (repeatable) limits which packs are installed. The installer is additive: it never overwrites a file it did not generate, it refuses the whole install if any destination exists, it refuses symlinked destinations, and it refuses to install into this repository. To move a project to a newer release, add `--update`: files that carry the generator marker are replaced in place, and anything else at a destination path is still a collision. Copilot gets the agents only; there is no pack loader there, so paste a pack into the brief or use the exporter below.
+
+## Keeping a dotfiles repo current
+
+The project install writes `<project>/.claude/...`. A user-level Claude Code tree (the one a dotfiles repo keeps) has no `.claude` level, so `--layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md` instead. It is still additive, still refuses symlinked destinations and whole-install collisions, still previews by default, and `--update` still replaces only files that carry the generator marker. It is Claude only (Copilot has no user layout, and asking for it is refused), and a target inside this repository is refused.
+
+The routine, from a checkout pinned to a release tag:
+
+```
+git -C /path/to/department-of-internal-arguments fetch --tags
+git -C /path/to/department-of-internal-arguments checkout v0.3.0
+python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update
+python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update --apply
+git -C ~/dotfiles/claude status   # review the diff, then commit
+```
+
+The first install run is the preview and writes nothing. To see drift without writing, `--list-managed` prints every file under the target that carries the marker, its release, its source (`public` or `overlay`) and whether it is `current`, `stale` (older release), `differs` (this release, content changed), `orphan` (this checkout no longer produces it) or `unchecked` (overlay-sourced and no `--overlay` was given). It exits 0 when everything is current and 3 otherwise, so a sync step can report drift and decide.
+
+**Never symlink the installed files into a dotfiles repo.** Git stores the link, not the content; every other machine that pulls gets a dangling link to a path that does not exist there; and a secret scan over the repo sees a link target string, never the persona text. The backup is only a backup if the repo holds real files, which is what this installer writes.
+
+### Overlay: personas too sensitive for this public repo
+
+`--overlay DIR` points at a private directory with the same shape as the sources here: `roles/<name>.md` and `packs/<name>/PACK.md`, read by the same parsers and checked by the same structural rules as the public ones (tier, tools, report header, packs need a `## How to verify` section). An overlay entry with a public name is installed instead of the public one; a new name is installed in addition; both carry the generator marker. For overlay files the marker says `overlay` and the file's own name and never a path.
+
+```
+python3 scripts/install.py --target ~/dotfiles/claude --layout user --overlay ~/private-personas --update --apply
+```
+
+The overlay is private by definition, so the public-repo privacy sweep is the one rule that is not applied to it. It lives outside this repository and cannot be written into it: an overlay or a target inside this repository is refused, and so is any destination that resolves inside it. The overlay is read with the same confinement as everything else (no symlinks on the path, regular files only, size and entry-count caps, owned by you, not group- or world-writable) and anything wrong refuses the whole install before a byte is written. Edit capability stays limited to the `implementer` and `transcriber` names, as in the public tree. The maintainer may later move those private personas to their own private repository; the flag takes any directory, so nothing here changes when that happens.
 
 For ChatGPT or a local model, export one self-contained prompt (policies, one role, the packs you pick):
 

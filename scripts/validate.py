@@ -110,6 +110,72 @@ def workflow_errors(root):
     return errors
 
 
+def role_errors(r):
+    """Structural rules for one loaded role. Shared by the public tree and the private overlay.
+
+    Content rules only: no filesystem access and no privacy sweep (the sweep is tree-wide and public-only)."""
+    errors = []
+
+    def require(ok, message):
+        if not ok:
+            errors.append(message)
+
+    n = r["name"]
+    require(r["file"] == f"{n}.md", f"{n}: file name must match name")
+    require(
+        set(r) == {"name", "description", "tier", "tools", "body", "source", "file"},
+        f"{n}: unreviewed frontmatter fields",
+    )
+    require(
+        isinstance(r.get("description"), str) and bool(r.get("description")) and bool(r.get("body")),
+        f"{n}: empty description or body",
+    )
+    require(
+        isinstance(r.get("tier"), str) and r.get("tier") in TIER_MODEL,
+        f"{n}: tier must be one of {sorted(TIER_MODEL)} (the most capable tier is never a role default)",
+    )
+    tools = r.get("tools")
+    ok_tools = isinstance(tools, list) and tools and all(t in CAPABILITY_ORDER for t in tools)
+    require(ok_tools, f"{n}: tools must be a non-empty list of known capabilities")
+    if ok_tools:
+        require(("edit" in tools) == (n in EDITORS), f"{n}: edit capability mismatch")
+        if n in RUNNERS:
+            require("shell" in tools, f"{n}: must be able to run commands (read-only reviewers were rejected)")
+    require("{{fragment:report-header}}" in r["source"], f"{n}: report must use the shared header fragment")
+    require("{{fragment:" not in r["body"], f"{n}: unresolved fragment marker")
+    for field in REPORT_FIELDS:
+        require(field in r["body"], f"{n}: report header lacks {field}")
+    if "edit" in (tools or []):
+        require("{{fragment:never-weaken}}" in r["source"], f"{n}: editing roles share the never-weaken rule")
+        require("Never push" in r["body"], f"{n}: editing roles must say they never push")
+    if n == "transcriber":
+        require(r.get("tier") == "cheap", "transcriber must be tier cheap")
+    return errors
+
+
+def pack_errors(p):
+    """Structural rules for one loaded pack. Shared by the public tree and the private overlay."""
+    errors = []
+
+    def require(ok, message):
+        if not ok:
+            errors.append(message)
+
+    d = p["dir"]
+    require(p.get("name") == d, f"{d}: name must match directory")
+    require(
+        isinstance(p.get("description"), str) and bool(p.get("description")) and bool(p["body"]),
+        f"{d}: empty description or body",
+    )
+    require(set(p) == {"name", "description", "updated", "body", "dir"}, f"{d}: unreviewed frontmatter fields")
+    require(
+        isinstance(p.get("updated"), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p["updated"]) is not None,
+        f"{d}: updated must be YYYY-MM-DD",
+    )
+    require("## How to verify" in p["body"], f"{d}: pack needs a '## How to verify' section")
+    return errors
+
+
 def validate(root=ROOT):
     root = Path(root)
     errors = []
@@ -122,31 +188,7 @@ def validate(root=ROOT):
         roles = load_roles(root)
         require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the four roles")
         for r in roles:
-            n = r["name"]
-            require(r["file"] == f"{n}.md", f"{n}: file name must match name")
-            require(
-                set(r) == {"name", "description", "tier", "tools", "body", "source", "file"},
-                f"{n}: unreviewed frontmatter fields",
-            )
-            require(bool(r.get("description")) and bool(r.get("body")), f"{n}: empty description or body")
-            require(
-                r.get("tier") in TIER_MODEL,
-                f"{n}: tier must be one of {sorted(TIER_MODEL)} (the most capable tier is never a role default)",
-            )
-            tools = r.get("tools")
-            ok_tools = isinstance(tools, list) and tools and all(t in CAPABILITY_ORDER for t in tools)
-            require(ok_tools, f"{n}: tools must be a non-empty list of known capabilities")
-            if ok_tools:
-                require(("edit" in tools) == (n in EDITORS), f"{n}: edit capability mismatch")
-                if n in RUNNERS:
-                    require("shell" in tools, f"{n}: must be able to run commands (read-only reviewers were rejected)")
-            require("{{fragment:report-header}}" in r["source"], f"{n}: report must use the shared header fragment")
-            require("{{fragment:" not in r["body"], f"{n}: unresolved fragment marker")
-            for field in REPORT_FIELDS:
-                require(field in r["body"], f"{n}: report header lacks {field}")
-            if "edit" in (tools or []):
-                require("{{fragment:never-weaken}}" in r["source"], f"{n}: editing roles share the never-weaken rule")
-                require("Never push" in r["body"], f"{n}: editing roles must say they never push")
+            errors.extend(role_errors(r))
         require({r["name"]: r["tier"] for r in roles}.get("transcriber") == "cheap", "transcriber must be tier cheap")
 
         frag_dir = root / "fragments"
@@ -165,17 +207,7 @@ def validate(root=ROOT):
         packs = load_packs(root)
         require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the six packs")
         for p in packs:
-            require(p.get("name") == p["dir"], f"{p['dir']}: name must match directory")
-            require(bool(p.get("description")) and bool(p["body"]), f"{p['dir']}: empty description or body")
-            require(
-                set(p) == {"name", "description", "updated", "body", "dir"},
-                f"{p['dir']}: unreviewed frontmatter fields",
-            )
-            require(
-                isinstance(p.get("updated"), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p["updated"]) is not None,
-                f"{p['dir']}: updated must be YYYY-MM-DD",
-            )
-            require("## How to verify" in p["body"], f"{p['dir']}: pack needs a '## How to verify' section")
+            errors.extend(pack_errors(p))
 
         for pol in POLICIES:
             require((root / f"policies/{pol}.md").is_file(), f"missing policy {pol}")

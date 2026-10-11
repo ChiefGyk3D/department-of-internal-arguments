@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+Install into a user-level tree (a dotfiles checkout) and keep private personas out of the public repo.
+
+- `scripts/install.py --layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md`; the default `--layout project` output is unchanged byte for byte. Claude only: `--adapter copilot|both` with the user layout is refused. A target inside this repository is now refused (it used to refuse only the repository root).
+- `--overlay DIR`: a private directory (`roles/`, `packs/`) outside this repository. An overlay entry replaces a public one of the same name or is added; marker records `overlay` and the file name, never a path. Read with confinement (no symlinks, regular files, size and entry caps, owner and mode checks) by the new `scripts/overlay.py`, validated by the same role and pack rules, and exempt from the public-repo privacy sweep on purpose. Nothing can be written inside this repository.
+- `--list-managed`: read-only report of marker files under a target with release, source and status (current, stale, differs, orphan, unchecked); exit 3 on drift.
+- `scripts/validate.py` exposes `role_errors` and `pack_errors` so the overlay uses the public rules; `scripts/generate.py` render functions take an optional marker source; `ensure_safe` moved to `scripts/lib.py`.
+- README: "Keeping a dotfiles repo current", including why symlinks must not be used.
+
 ## [0.2.0] - 2026-10-08
 
 The lead gets a persona, reports get a shared header, and installed copies can be upgraded.

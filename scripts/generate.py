@@ -32,7 +32,7 @@ def _q(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def _policies_block(root):
+def policies_block(root):
     parts = ["## Shared policies", ""]
     for name in POLICIES:
         text = policy_text(name, root)
@@ -56,7 +56,7 @@ def _capabilities(role):
     return [c for c in CAPABILITY_ORDER if c in caps]
 
 
-def render_claude_agent(role, policies, ver):
+def render_claude_agent(role, policies, ver, source=None):
     tier = role["tier"]
     if tier not in TIER_MODEL:
         raise ValueError(f"roles/{role['file']}: tier {tier!r} has no model mapping")
@@ -69,27 +69,28 @@ def render_claude_agent(role, policies, ver):
         f"tools: {', '.join(tools)}\n"
         "---\n"
     )
-    return f"{head}\n{_marker('roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
+    return f"{head}\n{_marker(source or 'roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
 
 
-def render_copilot_agent(role, policies, ver):
+def render_copilot_agent(role, policies, ver, source=None):
     tools = [COPILOT_TOOLS[c] for c in _capabilities(role) if c in COPILOT_TOOLS]
     head = f"---\nname: {role['name']}\ndescription: {_q(role['description'])}\ntools: {_q(tools)}\n---\n"
-    return f"{head}\n{_marker('roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
+    return f"{head}\n{_marker(source or 'roles/' + role['file'], ver)}\n\n{role['body']}\n\n{policies}\n"
 
 
-def render_skill(pack, ver):
+def render_skill(pack, ver, source=None):
     head = f"---\nname: pack-{pack['dir']}\ndescription: {_q(pack['description'])}\n---\n"
     updated = pack.get("updated")
     if not isinstance(updated, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
         raise ValueError(f"packs/{pack['dir']}/PACK.md: frontmatter needs updated: YYYY-MM-DD")
-    return f"{head}\n{_marker('packs/' + pack['dir'] + '/PACK.md', ver, f', updated {updated}')}\n\n{pack['body']}\n"
+    marker = _marker(source or "packs/" + pack["dir"] + "/PACK.md", ver, f", updated {updated}")
+    return f"{head}\n{marker}\n\n{pack['body']}\n"
 
 
 def render_all(root=ROOT):
     """Return {relative path: text} for every generated file."""
     root = Path(root)
-    policies = _policies_block(root)
+    policies = policies_block(root)
     ver = version(root)
     out = {}
     for role in load_roles(root):
