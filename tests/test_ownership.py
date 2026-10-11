@@ -229,7 +229,7 @@ class LegacyMarkers(unittest.TestCase):
             tra.write_text(legacy_text(".claude/agents/transcriber.md") + "\nmore\n")
             rows = {r["path"]: r["status"] for r in list_managed(d, layout="user")}
             self.assertEqual(rows["agents/reviewer.md"], "edited")
-            self.assertEqual(rows["agents/implementer.md"], "differs")  # legacy marker, same release, owned
+            self.assertEqual(rows["agents/implementer.md"], "stale")  # a verified 0.2.0 file against a newer release: owned, out of date
             self.assertEqual(rows["agents/transcriber.md"], "legacy-unverified")
             self.assertEqual(rows["agents/adversarial-reviewer.md"], "current")
 

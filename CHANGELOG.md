@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-10-11
 
 Install into a user-level tree (a dotfiles checkout) and keep private personas out of the public repo.
 
