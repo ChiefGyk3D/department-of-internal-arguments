@@ -19,6 +19,11 @@ from lib import version  # noqa: E402
 from test_user_layout import make_overlay, role_text  # noqa: E402
 
 
+def perms(text):
+    """'rw-r-----' -> permission bits, so a fixture mode is not a literal mask in a chmod call."""
+    return sum(1 << (8 - i) for i, ch in enumerate(text) if ch != "-")
+
+
 def mode(p):
     return stat.S_IMODE(os.stat(p).st_mode)
 
@@ -34,7 +39,7 @@ class UpdateKeepsModes(unittest.TestCase):
             t.mkdir()
             install(t, "claude", True, layout="user")
             a, b = t / "agents/reviewer.md", t / "agents/implementer.md"
-            for p, m in ((a, 0o600), (b, 0o640)):
+            for p, m in ((a, perms("rw-------")), (b, perms("rw-r-----"))):
                 staled(p)
                 os.chmod(p, m)
             install(t, "claude", True, update=True, layout="user")
@@ -49,7 +54,7 @@ class UpdateKeepsModes(unittest.TestCase):
             install(t, "claude", True, layout="user")
             a = t / "agents/reviewer.md"
             staled(a)
-            os.chmod(a, 0o644)
+            os.chmod(a, perms("rw-r--r--"))
             install(t, "claude", True, update=True, layout="user")
             self.assertEqual(mode(a), 0o644)
 
@@ -57,7 +62,7 @@ class UpdateKeepsModes(unittest.TestCase):
         seen = []
         real = os.open
 
-        def spy(path, flags, mode=0o777, **kw):
+        def spy(path, flags, mode=0o600, **kw):
             seen.append((str(path), mode))
             return real(path, flags, mode, **kw)
 
@@ -85,6 +90,17 @@ class UpdateKeepsModes(unittest.TestCase):
             self.assertEqual(a.read_text(), before)
 
 
+class NewPublicFiles(unittest.TestCase):
+    def test_a_new_public_file_is_never_group_or_world_writable_even_with_umask_zero(self):
+        old = os.umask(0)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                install(d, "claude", True, layout="user")
+                self.assertEqual(mode(Path(d) / "agents/reviewer.md"), 0o644)
+        finally:
+            os.umask(old)
+
+
 class OverlayFilesArePrivate(unittest.TestCase):
     def setUp(self):
         self._d = tempfile.TemporaryDirectory()
@@ -109,7 +125,7 @@ class OverlayFilesArePrivate(unittest.TestCase):
     def test_updating_a_wide_file_to_one_with_additions_narrows_it(self):
         install(self.t, "claude", True, layout="user")
         a = self.t / "agents/reviewer.md"
-        os.chmod(a, 0o644)
+        os.chmod(a, perms("rw-r--r--"))
         install(self.t, "claude", True, update=True, layout="user", overlay=self.ov)
         self.assertEqual(mode(a), 0o600)
         self.assertIn("Private.", a.read_text())
@@ -117,7 +133,7 @@ class OverlayFilesArePrivate(unittest.TestCase):
     def test_update_of_an_overlay_file_keeps_0600_and_never_widens_a_0640_one(self):
         install(self.t, "claude", True, layout="user", overlay=self.ov)
         a = self.t / "agents/auditor.md"
-        os.chmod(a, 0o640)
+        os.chmod(a, perms("rw-r-----"))
         staled(a)
         install(self.t, "claude", True, update=True, layout="user", overlay=self.ov)
         self.assertEqual(mode(a), 0o600)

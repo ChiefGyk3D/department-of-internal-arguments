@@ -344,7 +344,7 @@ def _write_one(dest, action, data, seen, private):
             raise ValueError(f"directory replaced during install: {dest.parent}")
         if old is None:
             try:
-                fd = os.open(name, _CREATE_FLAGS, 0o600 if private else 0o666, dir_fd=dfd)
+                fd = os.open(name, _CREATE_FLAGS, 0o600 if private else 0o644, dir_fd=dfd)
             except OSError:
                 raise _changed(dest) from None
             try:

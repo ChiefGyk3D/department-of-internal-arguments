@@ -19,7 +19,7 @@ from lib import GENERATED_MARK  # noqa: E402
 from test_user_layout import make_overlay, pack_text, role_text  # noqa: E402
 
 HEADING = "## Maintainer additions (private overlay)"
-SECRET = "ZQX-PRIVATE-OVERLAY-SENTINEL"
+SENTINEL = "ZQX-PRIVATE-OVERLAY-SENTINEL"
 
 
 def additions(name, body, extra_fm=""):
@@ -41,14 +41,14 @@ def installed(overlay_roles=None, overlay_packs=None, adapter="claude", layout="
 
 class AppendOnly(unittest.TestCase):
     def test_role_additions_follow_an_unchanged_public_body(self):
-        d, ov, t = installed({"reviewer": additions("reviewer", f"Extra duty {SECRET}.")})
+        d, ov, t = installed({"reviewer": additions("reviewer", f"Extra duty {SENTINEL}.")})
         text = (t / "agents/reviewer.md").read_text()
         m, body = lib.split_marker(text)
         pub = public_body(".claude/agents/reviewer.md")
         self.assertTrue(body.startswith(pub), "public part must be byte-identical and first")
         tail = body[len(pub) :]
         self.assertTrue(tail.startswith(f"\n{HEADING}\n"), tail[:80])
-        self.assertIn(f"Extra duty {SECRET}.", tail)
+        self.assertIn(f"Extra duty {SENTINEL}.", tail)
         self.assertEqual(body.count(HEADING), 1)
         self.assertIn(generate.ADDITIONS_NOTE, tail)
         self.assertIn("overlay", m.group(2))
@@ -64,11 +64,11 @@ class AppendOnly(unittest.TestCase):
             )
 
     def test_pack_additions(self):
-        d, ov, t = installed(overlay_packs={"threat-model": additions("threat-model", f"Local notes {SECRET}.")})
+        d, ov, t = installed(overlay_packs={"threat-model": additions("threat-model", f"Local notes {SENTINEL}.")})
         m, body = lib.split_marker((t / "skills/pack-threat-model/SKILL.md").read_text())
         pub = public_body(".claude/skills/pack-threat-model/SKILL.md")
         self.assertTrue(body.startswith(pub))
-        self.assertIn(f"Local notes {SECRET}.", body[len(pub) :])
+        self.assertIn(f"Local notes {SENTINEL}.", body[len(pub) :])
 
     def test_copilot_agent_gets_the_additions_too(self):
         d, ov, t = installed({"reviewer": additions("reviewer", "Extra.")}, adapter="both", layout="project")
@@ -88,11 +88,11 @@ class AppendOnly(unittest.TestCase):
         self.assertEqual(body[len(pub) :].count(HEADING), 1)
 
     def test_additions_only_in_the_installed_file(self):
-        d, ov, t = installed({"reviewer": additions("reviewer", f"Secret {SECRET}.")})
-        hits = {p for p in Path(d).rglob("*") if p.is_file() and SECRET in p.read_text(errors="ignore")}
+        d, ov, t = installed({"reviewer": additions("reviewer", f"Hidden {SENTINEL}.")})
+        hits = {p for p in Path(d).rglob("*") if p.is_file() and SENTINEL in p.read_text(errors="ignore")}
         self.assertEqual(hits, {t / "agents/reviewer.md", ov / "roles/reviewer.md"})
         self.assertFalse(
-            any(SECRET in p.read_text(errors="ignore") for p in ROOT.rglob("*.md") if ".git" not in p.parts)
+            any(SENTINEL in p.read_text(errors="ignore") for p in ROOT.rglob("*.md") if ".git" not in p.parts)
         )
         marker = next(ln for ln in (t / "agents/reviewer.md").read_text().splitlines() if GENERATED_MARK in ln)
         for forbidden in (d, str(ov), "private-overlay", "/tmp"):
@@ -120,11 +120,11 @@ class AppendOnly(unittest.TestCase):
 
     def test_a_new_pack_still_needs_the_full_format(self):
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, packs={"secret-ops": additions("secret-ops", "body")})
+            ov = make_overlay(d, packs={"private-ops": additions("private-ops", "body")})
             with self.assertRaises(ValueError):
                 overlay_mod.load_overlay(ov)
-            ov2 = make_overlay(Path(d) / "b", packs={"secret-ops": pack_text("secret-ops")})
-            self.assertEqual(overlay_mod.load_overlay(ov2).pack_names, {"secret-ops"})
+            ov2 = make_overlay(Path(d) / "b", packs={"private-ops": pack_text("private-ops")})
+            self.assertEqual(overlay_mod.load_overlay(ov2).pack_names, {"private-ops"})
 
 
 class AdditionsRefused(unittest.TestCase):

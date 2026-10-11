@@ -211,20 +211,20 @@ class OverlayLoading(unittest.TestCase):
                     "reviewer": "---\nname: reviewer\n---\n\nPrivate reviewer text.\n",
                     "auditor": role_text("auditor"),
                 },
-                packs={"secret-ops": pack_text("secret-ops")},
+                packs={"private-ops": pack_text("private-ops")},
             )
             t = Path(d) / "dot"
             t.mkdir()
             files = install(t, "claude", True, layout="user", overlay=ov)
             self.assertIn("agents/auditor.md", files)
-            self.assertIn("skills/pack-secret-ops/SKILL.md", files)
+            self.assertIn("skills/pack-private-ops/SKILL.md", files)
             self.assertEqual(len(files), len(ROLE_NAMES) + 1 + len(PACK_NAMES) + 1)
             self.assertIn("Private reviewer text.", (t / "agents/reviewer.md").read_text())
             self.assertNotIn("Private reviewer text.", (t / "agents/implementer.md").read_text())
             self.assertEqual(
                 (t / "agents/implementer.md").read_bytes(), (ROOT / ".claude/agents/implementer.md").read_bytes()
             )
-            for rel in ("agents/reviewer.md", "agents/auditor.md", "skills/pack-secret-ops/SKILL.md"):
+            for rel in ("agents/reviewer.md", "agents/auditor.md", "skills/pack-private-ops/SKILL.md"):
                 self.assertTrue(is_generated(t / rel), rel)
                 self.assertIn(f"(release {version()})", (t / rel).read_text())
 
@@ -240,11 +240,16 @@ class OverlayLoading(unittest.TestCase):
 
     def test_marker_names_overlay_and_file_but_never_a_path(self):
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, roles={"auditor": role_text("auditor")}, packs={"secret-ops": pack_text("secret-ops")})
+            ov = make_overlay(
+                d, roles={"auditor": role_text("auditor")}, packs={"private-ops": pack_text("private-ops")}
+            )
             t = Path(d) / "dot"
             t.mkdir()
             install(t, "claude", True, layout="user", overlay=ov)
-            for rel, needle in (("agents/auditor.md", "auditor.md"), ("skills/pack-secret-ops/SKILL.md", "secret-ops")):
+            for rel, needle in (
+                ("agents/auditor.md", "auditor.md"),
+                ("skills/pack-private-ops/SKILL.md", "private-ops"),
+            ):
                 text = (t / rel).read_text()
                 marker = next(line for line in text.splitlines() if GENERATED_MARK in line)
                 self.assertIn("overlay", marker)
@@ -279,15 +284,15 @@ class OverlayLoading(unittest.TestCase):
 
     def test_pack_filter_knows_overlay_packs(self):
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, packs={"secret-ops": pack_text("secret-ops")})
-            files = install(Path(d), "claude", packs=["secret-ops"], layout="user", overlay=ov)
-            self.assertEqual([f for f in files if f.startswith("skills/")], ["skills/pack-secret-ops/SKILL.md"])
+            ov = make_overlay(d, packs={"private-ops": pack_text("private-ops")})
+            files = install(Path(d), "claude", packs=["private-ops"], layout="user", overlay=ov)
+            self.assertEqual([f for f in files if f.startswith("skills/")], ["skills/pack-private-ops/SKILL.md"])
             with self.assertRaises(ValueError):
                 install(Path(d), "claude", packs=["nope"], layout="user", overlay=ov)
 
     def test_without_overlay_a_private_pack_name_is_unknown(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(ValueError):
-            install(d, "claude", packs=["secret-ops"], layout="user")
+            install(d, "claude", packs=["private-ops"], layout="user")
 
     def test_privacy_sweep_does_not_apply_to_the_overlay(self):
         private = "Reach the box at 10.20." + "30.40 and read /ho" + "me/someone/notes."
@@ -323,13 +328,13 @@ class OverlayLoading(unittest.TestCase):
 
     def test_overlay_pack_rules_still_apply(self):
         bad = {
-            "no verify section": pack_text("secret-ops").replace("## How to verify", "## Other"),
-            "bad date": pack_text("secret-ops").replace('updated: "2026-10-08"', 'updated: "26"', 1),
+            "no verify section": pack_text("private-ops").replace("## How to verify", "## Other"),
+            "bad date": pack_text("private-ops").replace('updated: "2026-10-08"', 'updated: "26"', 1),
             "name mismatch": pack_text("different"),
         }
         for label, text in bad.items():
             with self.subTest(label), tempfile.TemporaryDirectory() as d:
-                ov = make_overlay(d, packs={"secret-ops": text})
+                ov = make_overlay(d, packs={"private-ops": text})
                 with self.assertRaises(ValueError):
                     install(Path(d), "claude", layout="user", overlay=ov)
 
@@ -420,7 +425,7 @@ class OverlayHostile(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.load(ov)
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, packs={"Secret_Ops": pack_text("Secret_Ops")})
+            ov = make_overlay(d, packs={"Private_Ops": pack_text("Private_Ops")})
             with self.assertRaises(ValueError):
                 self.load(ov)
 
@@ -434,8 +439,8 @@ class OverlayHostile(unittest.TestCase):
 
     def test_pack_directory_permissions_checked(self):
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, packs={"secret-ops": pack_text("secret-ops")})
-            (ov / "packs/secret-ops").chmod(0o777)
+            ov = make_overlay(d, packs={"private-ops": pack_text("private-ops")})
+            (ov / "packs/private-ops").chmod(0o777)
             with self.assertRaisesRegex(ValueError, "writable"):
                 self.load(ov)
 
@@ -546,9 +551,9 @@ class OverlayHostile(unittest.TestCase):
             "dir in roles": lambda ov: (ov / "roles/sub").mkdir(),
             "file in packs": lambda ov: (ov / "packs/stray.md").write_text("x"),
             "extra file in pack dir": lambda ov: (
-                (ov / "packs/secret-ops").mkdir(),
-                (ov / "packs/secret-ops/PACK.md").write_text(pack_text("secret-ops")),
-                (ov / "packs/secret-ops/extra.md").write_text("x"),
+                (ov / "packs/private-ops").mkdir(),
+                (ov / "packs/private-ops/PACK.md").write_text(pack_text("private-ops")),
+                (ov / "packs/private-ops/extra.md").write_text("x"),
             ),
         }
         for label, mutate in cases.items():
