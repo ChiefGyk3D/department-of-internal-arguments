@@ -5,6 +5,11 @@ An overlay is a directory OUTSIDE this repository with the repository's own sour
     <overlay>/roles/<name>.md             same format as roles/ (frontmatter + body, fragments allowed)
     <overlay>/packs/<name>/PACK.md        same format as packs/
 
+A NEW name is installed as a whole persona or pack, held to the public rules. A name that equals a PUBLIC role or pack
+is append-only: the file may carry only `name:` in its frontmatter, its body is ADDITIONS, and the installed file is
+the unchanged public file followed by a labelled "Maintainer additions" section (generate.additions_section). Tools,
+tier, model and description therefore cannot change, and no public rule is ever edited out.
+
 It is read through the same parsers as the public sources (lib.parse_frontmatter, lib.resolve_fragments) and
 checked by the same structural rules (validate.role_errors, validate.pack_errors).
 
@@ -22,8 +27,9 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import ROOT, ensure_safe, load_roles, parse_frontmatter, resolve_fragments
-from validate import override_errors, pack_errors, role_errors
+import generate
+from lib import ROOT, ensure_safe, load_packs, load_roles, parse_frontmatter, resolve_fragments, version
+from validate import additions_errors, pack_errors, role_errors
 
 MAX_FILE_BYTES = 64 * 1024
 MAX_ENTRIES = 64
@@ -42,6 +48,8 @@ class OverlayPermissionError(ValueError):
 class Overlay:
     roles: tuple
     packs: tuple
+    role_additions: dict
+    pack_additions: dict
 
     @property
     def role_names(self):
@@ -150,8 +158,8 @@ def _parse(text, label):
     return meta, body
 
 
-def _load_roles(root_fd, root):
-    out = []
+def _load_roles(root_fd, root, public):
+    out, adds = [], {}
     fd = _open_dir("roles", "roles", dir_fd=root_fd)
     try:
         for name, st in _entries(fd, "roles"):
@@ -164,17 +172,29 @@ def _load_roles(root_fd, root):
             meta = dict(meta)
             if meta.get("name") != name[:-3]:
                 raise ValueError(f"overlay {label}: name must match the file name")
+            if name[:-3] in public:
+                adds[name[:-3]] = _additions_body(meta, body, label)
+                continue
             meta["source"] = body
             meta["body"] = resolve_fragments(body, root, f"overlay {label}")
             meta["file"] = name
             out.append(meta)
     finally:
         os.close(fd)
-    return out
+    return out, adds
 
 
-def _load_packs(root_fd):
-    out = []
+def _additions_body(meta, body, label):
+    extra = sorted(set(meta) - {"name"})
+    if extra:
+        raise ValueError(
+            f"overlay {label}: a public name is append-only; frontmatter may only hold name, not {', '.join(extra)}"
+        )
+    return body
+
+
+def _load_packs(root_fd, public):
+    out, adds = [], {}
     fd = _open_dir("packs", "packs", dir_fd=root_fd)
     try:
         for name, st in _entries(fd, "packs"):
@@ -190,12 +210,17 @@ def _load_packs(root_fd):
             finally:
                 os.close(sub)
             meta = dict(meta)
+            if name in public:
+                if meta.get("name") != name:
+                    raise ValueError(f"overlay {label}: name must match the directory name")
+                adds[name] = _additions_body(meta, body, f"{label}/PACK.md")
+                continue
             meta["body"] = body
             meta["dir"] = name
             out.append(meta)
     finally:
         os.close(fd)
-    return out
+    return out, adds
 
 
 def _outside_repo(path, root):
@@ -227,25 +252,32 @@ def _load(path, root):
         if not present:
             raise ValueError("overlay holds neither roles/ nor packs/")
         try:
-            roles = _load_roles(root_fd, root) if "roles" in present else []
-            packs = _load_packs(root_fd) if "packs" in present else []
+            public_roles = {r["name"] for r in load_roles(root)}
+            public_packs = {p["dir"] for p in load_packs(root)}
+            roles, role_adds = _load_roles(root_fd, root, public_roles) if "roles" in present else ([], {})
+            packs, pack_adds = _load_packs(root_fd, public_packs) if "packs" in present else ([], {})
         except (TypeError, KeyError, RecursionError) as exc:  # hostile-but-parseable frontmatter shapes
             raise ValueError(f"overlay: malformed content ({type(exc).__name__})") from None
     finally:
         os.close(root_fd)
     errors = []
     try:
-        public = {r["name"]: r for r in load_roles(root)}
         for r in roles:
-            own = role_errors(r)
-            errors.extend(own)
-            if not own and r["name"] in public:  # a replacement of a public persona also keeps its hard rules
-                errors.extend(override_errors(r, public[r["name"]]))
+            errors.extend(role_errors(r))
         for p in packs:
             errors.extend(pack_errors(p))
+        policies, ver = generate.policies_block(root), version(root)
+        by_role = {r["name"]: r for r in load_roles(root)}
+        for name, body in role_adds.items():
+            public_text = generate.render_claude_agent(by_role[name], policies, ver)
+            errors.extend(additions_errors(f"roles/{name}", body, public_text))
+        by_pack = {p["dir"]: p for p in load_packs(root)}
+        for name, body in pack_adds.items():
+            public_text = generate.render_skill(by_pack[name], ver)
+            errors.extend(additions_errors(f"packs/{name}", body, public_text))
     except (TypeError, KeyError) as exc:
         raise ValueError(f"overlay: malformed content ({type(exc).__name__})") from None
     # NOTE: validate.privacy_hits is intentionally not called: the sweep protects the PUBLIC tree.
     if errors:
         raise ValueError("overlay invalid: " + "; ".join(errors))
-    return Overlay(tuple(roles), tuple(packs))
+    return Overlay(tuple(roles), tuple(packs), role_adds, pack_adds)

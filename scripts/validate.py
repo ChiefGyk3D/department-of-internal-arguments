@@ -4,7 +4,7 @@ import re
 import sys
 from pathlib import Path
 
-from generate import drift
+from generate import ADDITIONS_HEADING, drift
 from lib import (
     CAPABILITY_ORDER,
     FRAGMENT_NAMES,
@@ -154,45 +154,46 @@ def role_errors(r):
     return errors
 
 
-TIER_RANK = {"cheap": 0, "standard": 1}
+MAX_ADDITIONS_BYTES = 16 * 1024
+_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*$")
 
 
-def hard_rule_lines(source):
-    """The lines under a role's '## Hard rules' heading (fragment lines excluded), stripped."""
-    out, inside = [], False
-    for line in source.splitlines():
-        if line.startswith("## "):
-            inside = line.strip() == "## Hard rules"
-        elif inside and line.strip() and not FRAGMENT_RE.fullmatch(line.strip()):
-            out.append(line.strip())
-    return out
+def _norm_heading(text):
+    return " ".join(text.casefold().split())
 
 
-def override_errors(r, public):
-    """Extra rules for a private overlay role that REPLACES a public role of the same name.
+def public_headings(text):
+    """Normalized text of every ATX heading in a rendered public file (fences and comments are NOT skipped)."""
+    return {_norm_heading(m.group(2)) for ln in text.splitlines() if (m := _HEADING_RE.match(ln))}
 
-    It must keep every fragment, every Hard rules line and every Severity line of the public role (verbatim), may not
-    request tools the public role lacks, and may not raise the tier. Free-form prose that contradicts a kept rule
-    is not machine-detectable; the kept rules are what a reader and the validator can rely on."""
-    n = r["name"]
+
+def additions_errors(name, body, public_text):
+    """Rules for the private text appended to a public persona or pack (see generate.additions_section).
+
+    The public text is never edited, so nothing here protects it; these rules keep the added text from posing as part
+    of it: size cap, no marker text, no fragment lines, no top-level (# or ##) or setext headings, and no heading
+    that repeats a public heading or the additions heading itself. Prose that merely asks for something at odds with
+    the public rules cannot be detected."""
     errors = []
-    have = {m.group(1) for ln in r["source"].splitlines() if (m := FRAGMENT_RE.fullmatch(ln.strip()))}
-    for ln in public["source"].splitlines():
-        m = FRAGMENT_RE.fullmatch(ln.strip())
-        if m and m.group(1) not in have:
-            errors.append(f"{n}: override lacks required fragment {{{{fragment:{m.group(1)}}}}}")
-    mine = {ln.strip() for ln in r["source"].splitlines()}
-    for rule in hard_rule_lines(public["source"]):
-        if rule not in mine:
-            errors.append(f"{n}: override lacks required rule line: {rule[:90]}")
-    for ln in public["source"].splitlines():
-        if ln.strip().startswith("Severity") and ln.strip() not in mine:
-            errors.append(f"{n}: override lacks the required Severity scale line: {ln.strip()[:90]}")
-    widened = [t for t in r["tools"] if t not in public["tools"]]
-    if widened:
-        errors.append(f"{n}: override widens tools beyond the public role: {', '.join(widened)}")
-    if TIER_RANK.get(r["tier"], 99) > TIER_RANK.get(public["tier"], -1):
-        errors.append(f"{n}: override raises tier from {public['tier']} to {r['tier']}")
+    if not body.strip():
+        errors.append(f"{name}: additions are empty")
+    if len(body.encode("utf-8")) > MAX_ADDITIONS_BYTES:
+        errors.append(f"{name}: additions too large (limit {MAX_ADDITIONS_BYTES} bytes)")
+    if GENERATED_MARK in body:
+        errors.append(f"{name}: additions may not contain the generator marker text")
+    taken = public_headings(public_text) | {_norm_heading(ADDITIONS_HEADING[3:])}
+    lines = body.splitlines()
+    for i, ln in enumerate(lines):
+        if FRAGMENT_RE.fullmatch(ln.strip()) or "{{fragment:" in ln:
+            errors.append(f"{name}: additions may not use fragment markers")
+        m = _HEADING_RE.match(ln)
+        if m and len(m.group(1)) <= 2:
+            errors.append(f"{name}: additions heading must be level 3 or deeper: {ln.strip()[:60]}")
+        if m and _norm_heading(m.group(2)) in taken:
+            errors.append(f"{name}: additions heading repeats a public section name: {ln.strip()[:60]}")
+        if i + 1 < len(lines) and ln.strip() and not _SETEXT_RE.match(ln) and _SETEXT_RE.match(lines[i + 1]):
+            errors.append(f"{name}: additions may not use underlined (setext) headings: {ln.strip()[:60]}")
     return errors
 
 

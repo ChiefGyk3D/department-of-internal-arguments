@@ -68,7 +68,19 @@ def _capabilities(role):
     return [c for c in CAPABILITY_ORDER if c in caps]
 
 
-def render_claude_agent(role, policies, ver, source=None):
+ADDITIONS_HEADING = "## Maintainer additions (private overlay)"
+ADDITIONS_NOTE = (
+    "> Everything above this heading is the public persona and its rules. These additions extend it; "
+    "they do not replace or relax anything above."
+)
+
+
+def additions_section(additions):
+    """The only way private overlay text reaches a public persona: appended, labelled, never replacing."""
+    return f"\n{ADDITIONS_HEADING}\n\n{ADDITIONS_NOTE}\n\n{additions.strip()}\n"
+
+
+def render_claude_agent(role, policies, ver, source=None, additions=None):
     tier = role["tier"]
     if tier not in TIER_MODEL:
         raise ValueError(f"roles/{role['file']}: tier {tier!r} has no model mapping")
@@ -81,21 +93,24 @@ def render_claude_agent(role, policies, ver, source=None):
         f"tools: {', '.join(tools)}\n"
         "---\n"
     )
-    return _seal(head, f"{role['body']}\n\n{policies}\n", source or "roles/" + role["file"], ver)
+    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
-def render_copilot_agent(role, policies, ver, source=None):
+def render_copilot_agent(role, policies, ver, source=None, additions=None):
     tools = [COPILOT_TOOLS[c] for c in _capabilities(role) if c in COPILOT_TOOLS]
     head = f"---\nname: {role['name']}\ndescription: {_q(role['description'])}\ntools: {_q(tools)}\n---\n"
-    return _seal(head, f"{role['body']}\n\n{policies}\n", source or "roles/" + role["file"], ver)
+    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
-def render_skill(pack, ver, source=None):
+def render_skill(pack, ver, source=None, additions=None):
     head = f"---\nname: pack-{pack['dir']}\ndescription: {_q(pack['description'])}\n---\n"
     updated = pack.get("updated")
     if not isinstance(updated, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
         raise ValueError(f"packs/{pack['dir']}/PACK.md: frontmatter needs updated: YYYY-MM-DD")
-    return _seal(head, f"{pack['body']}\n", source or "packs/" + pack["dir"] + "/PACK.md", ver, f", updated {updated}")
+    tail = f"{pack['body']}\n" + (additions_section(additions) if additions else "")
+    return _seal(head, tail, source or "packs/" + pack["dir"] + "/PACK.md", ver, f", updated {updated}")
 
 
 def render_all(root=ROOT):

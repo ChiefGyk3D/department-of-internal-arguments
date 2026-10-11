@@ -15,7 +15,8 @@ sha256 in the marker (or it is a known release-0.2.0 file). A file you edited is
 discards your edits. A file without the marker is still a collision.
 
 --overlay DIR is a private directory outside this repository (roles/, packs/; see scripts/overlay.py). An overlay
-entry with a public name replaces the public one; a new name is installed in addition. Overlay files carry the
+entry with a public name is append-only (the public file unchanged, then a labelled additions section); a new name is
+installed as a whole persona. Overlay files carry the
 generator marker with the word "overlay" and the file's own name, never a path.
 
 --list-managed is read-only: it lists files under the target that carry the marker with their release and whether
@@ -26,11 +27,23 @@ import argparse
 import hashlib
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
 import generate
-from lib import GENERATED_MARK, LEGACY_BODY_SHA256, PACK_NAMES, ROOT, body_sha256, ensure_safe, split_marker, version
+from lib import (
+    GENERATED_MARK,
+    LEGACY_BODY_SHA256,
+    PACK_NAMES,
+    ROOT,
+    body_sha256,
+    ensure_safe,
+    load_packs,
+    load_roles,
+    split_marker,
+    version,
+)
 from overlay import load_overlay
 
 ADAPTERS = ("claude", "copilot", "both")
@@ -128,6 +141,10 @@ def _items(adapter, packs, layout, root, ov):
             raise ValueError(f"unknown pack: {name}")
     ver = version(root)
     policies = generate.policies_block(root) if ov else None
+    role_adds = ov.role_additions if ov else {}
+    pack_adds = ov.pack_additions if ov else {}
+    pub_roles = {r["name"]: r for r in load_roles(root)} if role_adds else {}
+    pub_packs = {p["dir"]: p for p in load_packs(root)} if pack_adds else {}
     out = []
 
     def role_names(pattern, suffix):
@@ -141,6 +158,15 @@ def _items(adapter, packs, layout, root, ov):
                 r = ov_roles[name]
                 text = generate.render_claude_agent(r, policies, ver, source=f"overlay role {r['file']}")
                 out.append((f"overlay:{r['file']}", _layout_rel(rel, layout), text.encode("utf-8"), "overlay"))
+            elif name in role_adds:
+                text = generate.render_claude_agent(
+                    pub_roles[name],
+                    policies,
+                    ver,
+                    source=f"overlay additions role {name}.md",
+                    additions=role_adds[name],
+                )
+                out.append((f"overlay-additions:{name}.md", _layout_rel(rel, layout), text.encode("utf-8"), "overlay"))
             else:
                 src = _public_source(root, rel)
                 out.append((src, _layout_rel(rel, layout), src.read_bytes(), "public"))
@@ -150,6 +176,13 @@ def _items(adapter, packs, layout, root, ov):
                 p = ov_packs[name]
                 text = generate.render_skill(p, ver, source=f"overlay pack {p['dir']}")
                 out.append((f"overlay:pack-{name}", _layout_rel(rel, layout), text.encode("utf-8"), "overlay"))
+            elif name in pack_adds:
+                text = generate.render_skill(
+                    pub_packs[name], ver, source=f"overlay additions pack {name}", additions=pack_adds[name]
+                )
+                out.append(
+                    (f"overlay-additions:pack-{name}", _layout_rel(rel, layout), text.encode("utf-8"), "overlay")
+                )
             else:
                 src = _public_source(root, rel)
                 out.append((src, _layout_rel(rel, layout), src.read_bytes(), "public"))
@@ -160,6 +193,15 @@ def _items(adapter, packs, layout, root, ov):
                 r = ov_roles[name]
                 text = generate.render_copilot_agent(r, policies, ver, source=f"overlay role {r['file']}")
                 out.append((f"overlay:{r['file']}", rel, text.encode("utf-8"), "overlay"))
+            elif name in role_adds:
+                text = generate.render_copilot_agent(
+                    pub_roles[name],
+                    policies,
+                    ver,
+                    source=f"overlay additions role {name}.md",
+                    additions=role_adds[name],
+                )
+                out.append((f"overlay-additions:{name}.md", rel, text.encode("utf-8"), "overlay"))
             else:
                 src = _public_source(root, rel)
                 out.append((src, rel, src.read_bytes(), "public"))
@@ -219,6 +261,128 @@ def _refuse_edited(items):
         )
 
 
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _race_seam(stage, dest):
+    """No-op hook run after the pre-write checks ('checked') and after the write ('written'); tests swap paths here."""
+
+
+def _open_dir_chain(path, create):
+    """A descriptor for the directory `path`, opened component by component with no link followed anywhere.
+
+    Every component is opened O_DIRECTORY|O_NOFOLLOW relative to the previous descriptor, so a component that is (or
+    later becomes) a symlink can never redirect what is done through the returned descriptor."""
+    parts = Path(path).absolute().parts
+    if ".." in parts:
+        raise ValueError("path with .. refused")
+    fd = os.open(parts[0], _DIR_FLAGS)
+    try:
+        for part in parts[1:]:
+            try:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o777, dir_fd=fd)  # the umask applies, as it did for Path.mkdir
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _same_dir(dfd, path):
+    """True if `path` (not following a final link) is still the directory the descriptor holds."""
+    try:
+        now = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    held = os.fstat(dfd)
+    return stat.S_ISDIR(now.st_mode) and (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def _changed(dest):
+    return ValueError(f"destination changed during install: {dest.name}")
+
+
+def _write_one(dest, action, data, seen):
+    try:
+        dfd = _open_dir_chain(dest.parent, create=True)
+    except OSError as exc:
+        raise ValueError(f"not a plain directory chain ({exc.strerror}): {dest.parent}") from None
+    tmp = None
+    try:
+        name, old = dest.name, None
+        if action in ("update", "forced"):
+            try:
+                ofd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+            except OSError:
+                raise _changed(dest) from None
+            try:
+                st = os.fstat(ofd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise _changed(dest)
+                content = os.read(ofd, MAX_MANAGED_BYTES + 1)
+            finally:
+                os.close(ofd)
+            if _sha(content) != seen:
+                raise _changed(dest)
+            old = (st.st_dev, st.st_ino)
+        _race_seam("checked", dest)
+        if not _same_dir(dfd, dest.parent):
+            raise ValueError(f"directory replaced during install: {dest.parent}")
+        if old is None:
+            try:
+                fd = os.open(name, _CREATE_FLAGS, 0o666, dir_fd=dfd)
+            except OSError:
+                raise _changed(dest) from None
+            try:
+                _write_all(fd, data)
+            finally:
+                os.close(fd)
+        else:
+            tmp = name + ".doia-tmp"
+            try:
+                fd = os.open(tmp, _CREATE_FLAGS, 0o666, dir_fd=dfd)
+            except OSError as exc:
+                tmp = None
+                raise ValueError(f"cannot create temporary file for {name}: {exc.strerror}") from None
+            try:
+                _write_all(fd, data)
+            finally:
+                os.close(fd)
+            try:
+                cur = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            except OSError:
+                raise _changed(dest) from None
+            if not stat.S_ISREG(cur.st_mode) or (cur.st_dev, cur.st_ino) != old:
+                raise _changed(dest)
+            os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            tmp = None
+        _race_seam("written", dest)
+        if not _same_dir(dfd, dest.parent):
+            raise ValueError(
+                f"directory replaced during install (the file went to the original directory): {dest.parent}"
+            )
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
+
+
 def _apply(items, root=ROOT):
     _refuse_edited(items)
     for _src, dest, action, data, seen in items:
@@ -226,18 +390,7 @@ def _apply(items, root=ROOT):
             continue
         ensure_safe(dest)
         assert_outside_repo(dest, root)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if action in ("update", "forced"):
-            if dest.is_symlink() or not dest.is_file() or _sha(_read_capped(dest)) != seen:
-                raise ValueError(f"destination changed during install: {dest.name}")
-            tmp = dest.with_name(dest.name + ".doia-tmp")
-            with tmp.open("xb") as out:
-                out.write(data)
-            os.replace(tmp, dest)
-        else:
-            # Exclusive creation: a file that appeared after the preflight is never overwritten.
-            with dest.open("xb") as out:
-                out.write(data)
+        _write_one(dest, action, data, seen)
 
 
 def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, layout="project", overlay=None, **kw):

@@ -203,11 +203,14 @@ class UserLayout(unittest.TestCase):
 
 
 class OverlayLoading(unittest.TestCase):
-    def test_wins_and_adds(self):
+    def test_additions_and_new_names(self):
         with tempfile.TemporaryDirectory() as d:
             ov = make_overlay(
                 d,
-                roles={"reviewer": role_text("reviewer", "Private reviewer text."), "auditor": role_text("auditor")},
+                roles={
+                    "reviewer": "---\nname: reviewer\n---\n\nPrivate reviewer text.\n",
+                    "auditor": role_text("auditor"),
+                },
                 packs={"secret-ops": pack_text("secret-ops")},
             )
             t = Path(d) / "dot"
@@ -225,14 +228,15 @@ class OverlayLoading(unittest.TestCase):
                 self.assertTrue(is_generated(t / rel), rel)
                 self.assertIn(f"(release {version()})", (t / rel).read_text())
 
-    def test_overlay_pack_overrides_public_pack(self):
+    def test_overlay_pack_additions_follow_the_public_pack(self):
         with tempfile.TemporaryDirectory() as d:
-            text = pack_text("threat-model").replace("Status:", "Private status:", 1)
-            ov = make_overlay(d, packs={"threat-model": text})
+            ov = make_overlay(d, packs={"threat-model": "---\nname: threat-model\n---\n\nPrivate status note.\n"})
             t = Path(d) / "dot"
             t.mkdir()
             install(t, "claude", True, layout="user", overlay=ov)
-            self.assertIn("Private status:", (t / "skills/pack-threat-model/SKILL.md").read_text())
+            text = (t / "skills/pack-threat-model/SKILL.md").read_text()
+            self.assertIn("Private status note.", text)
+            self.assertTrue(text.index("Status:") < text.index("Private status note."))
 
     def test_marker_names_overlay_and_file_but_never_a_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -250,23 +254,6 @@ class OverlayLoading(unittest.TestCase):
                 self.assertNotIn(d, text)
                 self.assertNotIn("private-overlay", text)
                 self.assertNotIn("/tmp", marker)
-
-    def test_overlay_render_equals_public_render_except_the_marker(self):
-        with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, roles={"reviewer": PUBLIC_REVIEWER}, packs={"threat-model": PUBLIC_PACK})
-            t = Path(d) / "dot"
-            t.mkdir()
-            install(t, "claude", True, layout="user", overlay=ov)
-
-            def unmarked(text):
-                return "\n".join(ln for ln in text.splitlines() if GENERATED_MARK not in ln)
-
-            for rel, pub in (
-                ("agents/reviewer.md", ".claude/agents/reviewer.md"),
-                ("skills/pack-threat-model/SKILL.md", ".claude/skills/pack-threat-model/SKILL.md"),
-            ):
-                self.assertEqual(unmarked((t / rel).read_text()), unmarked((ROOT / pub).read_text()), rel)
-                self.assertIn("overlay", (t / rel).read_text())
 
     def test_apply_rechecks_symlinks_after_planning(self):
         with tempfile.TemporaryDirectory() as d:
@@ -345,13 +332,6 @@ class OverlayLoading(unittest.TestCase):
                 ov = make_overlay(d, packs={"secret-ops": text})
                 with self.assertRaises(ValueError):
                     install(Path(d), "claude", layout="user", overlay=ov)
-
-    def test_transcriber_override_must_stay_cheap(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = (ROOT / "roles/transcriber.md").read_text()
-            ov = make_overlay(d, roles={"transcriber": base.replace('tier: "cheap"', 'tier: "standard"')})
-            with self.assertRaises(ValueError):
-                install(Path(d), "claude", layout="user", overlay=ov)
 
     def test_overlay_must_be_outside_repository(self):
         with tempfile.TemporaryDirectory() as d:
@@ -665,7 +645,9 @@ class ListManaged(unittest.TestCase):
 
     def test_overlay_states(self):
         with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, roles={"auditor": role_text("auditor"), "reviewer": role_text("reviewer", "Private.")})
+            ov = make_overlay(
+                d, roles={"auditor": role_text("auditor"), "reviewer": "---\nname: reviewer\n---\n\nPrivate.\n"}
+            )
             t = Path(d) / "dot"
             t.mkdir()
             install(t, "claude", True, layout="user", overlay=ov)

@@ -18,10 +18,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 import install as installer  # noqa: E402  (path set up above)
 import lib  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
-import validate  # noqa: E402
 from install import install, list_managed, plan  # noqa: E402
 from lib import GENERATED_MARK, version  # noqa: E402
-from test_user_layout import PUBLIC_REVIEWER, make_overlay, role_text  # noqa: E402
+from test_user_layout import make_overlay, role_text  # noqa: E402
 
 LEGACY_MARKER = f"<!-- {GENERATED_MARK} (release 0.2.0) from roles/reviewer.md. Do not edit; run the generator. -->"
 EDITED_LABEL = "edited (refused; --force-edited discards your changes)"
@@ -233,77 +232,6 @@ class LegacyMarkers(unittest.TestCase):
             self.assertEqual(rows["agents/implementer.md"], "differs")  # legacy marker, same release, owned
             self.assertEqual(rows["agents/transcriber.md"], "legacy-unverified")
             self.assertEqual(rows["agents/adversarial-reviewer.md"], "current")
-
-
-def public_role(name):
-    return next(r for r in validate.load_roles(ROOT) if r["name"] == name)
-
-
-def override_of(name, mutate):
-    """Overlay-style role dict derived from the public role, with its source text changed by `mutate`."""
-    pub = public_role(name)
-    src = mutate(pub["source"])
-    r = dict(pub)
-    r["source"] = src
-    r["body"] = lib.resolve_fragments(src, ROOT)
-    return r, pub
-
-
-class OverrideRules(unittest.TestCase):
-    def test_identical_override_is_clean(self):
-        for name in lib.ROLE_NAMES:
-            r, pub = override_of(name, lambda s: s)
-            self.assertEqual(validate.override_errors(r, pub), [], name)
-
-    def test_every_public_hard_rule_is_required(self):
-        for name in lib.ROLE_NAMES:
-            pub = public_role(name)
-            rules = validate.hard_rule_lines(pub["source"])
-            self.assertTrue(rules, name)
-            for rule in rules:
-                r, _ = override_of(name, lambda s, rule=rule: s.replace(rule, "- something harmless", 1))
-                errs = validate.override_errors(r, pub)
-                self.assertTrue(any("required rule" in e for e in errs), (name, rule[:40]))
-
-    def test_dropping_a_required_fragment_names_it(self):
-        for name, frag in (("implementer", "never-weaken"), ("reviewer", "report-header")):
-            r, pub = override_of(name, lambda s, frag=frag: s.replace("{{fragment:" + frag + "}}", ""))
-            errs = validate.override_errors(r, pub)
-            self.assertTrue(any(frag in e for e in errs), (name, errs))
-
-    def test_severity_scale_is_required_for_reviewers(self):
-        for name in ("reviewer", "adversarial-reviewer"):
-            r, pub = override_of(name, lambda s: re.sub(r"(?m)^Severity.*$", "Severity is up to you.", s))
-            errs = validate.override_errors(r, pub)
-            self.assertTrue(any("Severity" in e for e in errs), (name, errs))
-
-    def test_tools_may_not_widen(self):
-        r, pub = override_of("reviewer", lambda s: s)
-        r["tools"] = ["read", "search", "shell", "skills", "edit"]
-        self.assertTrue(any("tools" in e and "edit" in e for e in validate.override_errors(r, pub)))
-        r["tools"] = ["read"]  # narrowing is fine
-        self.assertEqual(validate.override_errors(r, pub), [])
-
-    def test_tier_may_not_rise(self):
-        r, pub = override_of("transcriber", lambda s: s)
-        r["tier"] = "standard"
-        self.assertTrue(any("tier" in e for e in validate.override_errors(r, pub)))
-        r2, pub2 = override_of("reviewer", lambda s: s)
-        r2["tier"] = "cheap"  # lowering is fine
-        self.assertEqual(validate.override_errors(r2, pub2), [])
-
-    def test_through_the_overlay_loader_the_missing_rule_is_named(self):
-        text = PUBLIC_REVIEWER.replace("- Do not dispatch subagents.", "- Dispatch whatever helps.")
-        with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, roles={"reviewer": role_text("reviewer", base=text)})
-            with self.assertRaisesRegex(ValueError, "Do not dispatch subagents"):
-                overlay_mod.load_overlay(ov)
-
-    def test_a_new_name_keeps_todays_rules(self):
-        text = PUBLIC_REVIEWER.replace("- Do not dispatch subagents.\n", "")
-        with tempfile.TemporaryDirectory() as d:
-            ov = make_overlay(d, roles={"auditor": role_text("auditor", base=text)})
-            self.assertEqual([r["name"] for r in overlay_mod.load_overlay(ov).roles], ["auditor"])
 
 
 class OverlayMessages(unittest.TestCase):
