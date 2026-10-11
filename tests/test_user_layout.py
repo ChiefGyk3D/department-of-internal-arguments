@@ -187,9 +187,9 @@ class UserLayout(unittest.TestCase):
             sub = fx / "scratch"
             sub.mkdir()
             for layout in ("user", "project"):
-                with self.assertRaisesRegex(ValueError, "repository"):
+                with self.assertRaisesRegex(ValueError, "target cannot be"):
                     install(sub, "claude", True, root=fx, layout=layout)
-                with self.assertRaisesRegex(ValueError, "repository"):
+                with self.assertRaisesRegex(ValueError, "target cannot be"):
                     install(fx, "claude", root=fx, layout=layout)
             self.assertEqual(list(sub.iterdir()), [])
 
@@ -249,6 +249,35 @@ class OverlayLoading(unittest.TestCase):
                 self.assertNotIn(d, text)
                 self.assertNotIn("private-overlay", text)
                 self.assertNotIn("/tmp", marker)
+
+    def test_overlay_render_equals_public_render_except_the_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            ov = make_overlay(d, roles={"reviewer": PUBLIC_REVIEWER}, packs={"threat-model": PUBLIC_PACK})
+            t = Path(d) / "dot"
+            t.mkdir()
+            install(t, "claude", True, layout="user", overlay=ov)
+
+            def unmarked(text):
+                return "\n".join(ln for ln in text.splitlines() if GENERATED_MARK not in ln)
+
+            for rel, pub in (
+                ("agents/reviewer.md", ".claude/agents/reviewer.md"),
+                ("skills/pack-threat-model/SKILL.md", ".claude/skills/pack-threat-model/SKILL.md"),
+            ):
+                self.assertEqual(unmarked((t / rel).read_text()), unmarked((ROOT / pub).read_text()), rel)
+                self.assertIn("overlay", (t / rel).read_text())
+
+    def test_apply_rechecks_symlinks_after_planning(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / "dot"
+            t.mkdir()
+            elsewhere = Path(d) / "elsewhere"
+            elsewhere.mkdir()
+            items = installer._plan(t, "claude", layout="user")
+            (t / "agents").symlink_to(elsewhere, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                installer._apply(items)
+            self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_overlay_works_in_project_layout_with_copilot(self):
         with tempfile.TemporaryDirectory() as d:
@@ -352,6 +381,67 @@ class OverlayLoading(unittest.TestCase):
 class OverlayHostile(unittest.TestCase):
     def load(self, ov):
         return overlay_mod.load_overlay(ov)
+
+    def read_direct(self, d, name):
+        """_read_file is the last line of defence after the directory scan; exercise it on its own."""
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return overlay_mod._read_file(fd, name, "x")
+        finally:
+            os.close(fd)
+
+    def test_read_file_alone_refuses_symlink_fifo_and_directory(self):
+        import signal
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "real.md").write_text("x")
+            (Path(d) / "real.md").chmod(0o644)
+            (Path(d) / "link.md").symlink_to(Path(d) / "real.md")
+            os.mkfifo(Path(d) / "pipe.md", 0o644)
+            (Path(d) / "sub").mkdir()
+            signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(AssertionError("blocked on a FIFO")))
+            signal.alarm(5)
+            try:
+                for name in ("link.md", "pipe.md", "sub"):
+                    with self.subTest(name), self.assertRaises(ValueError):
+                        self.read_direct(d, name)
+            finally:
+                signal.alarm(0)
+            self.assertEqual(self.read_direct(d, "real.md"), "x")
+
+    def test_read_file_alone_bounds_a_file_that_lies_about_its_size(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "big.md").write_bytes(b"x" * (overlay_mod.MAX_FILE_BYTES + 10))
+            (Path(d) / "big.md").chmod(0o644)
+            real = os.fstat
+
+            def lying(fd):
+                st = real(fd)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid, 0, 0, 0, 0))
+
+            with (
+                mock.patch.object(overlay_mod.os, "fstat", side_effect=lying),
+                self.assertRaisesRegex(ValueError, "large"),
+            ):
+                self.read_direct(d, "big.md")
+
+    def test_non_utf8_body_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            ov = make_overlay(d)
+            (ov / "roles/auditor.md").write_bytes(role_text("auditor").encode() + b"\n\xff\xfe bad\n")
+            (ov / "roles/auditor.md").chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                self.load(ov)
+
+    def test_names_must_be_lowercase_words(self):
+        with tempfile.TemporaryDirectory() as d:
+            ov = make_overlay(d, roles={"Auditor": role_text("Auditor")})
+            with self.assertRaises(ValueError):
+                self.load(ov)
+        with tempfile.TemporaryDirectory() as d:
+            ov = make_overlay(d, packs={"Secret_Ops": pack_text("Secret_Ops")})
+            with self.assertRaises(ValueError):
+                self.load(ov)
 
     def test_group_or_world_writable_refused(self):
         for target, mode in (("", 0o775), ("roles", 0o757), ("roles/auditor.md", 0o664), ("roles/auditor.md", 0o646)):
@@ -555,6 +645,22 @@ class ListManaged(unittest.TestCase):
             rows = self.rows(d, layout="user")
             self.assertNotIn("agents/mine.md", rows)
             self.assertNotIn("agents/linked.md", rows)
+
+    def test_symlinked_scan_directory_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            other = Path(d) / "other"
+            install(other.mkdir() or other, "claude", True, layout="user")
+            t = Path(d) / "dot"
+            t.mkdir()
+            (t / "agents").symlink_to(other / "agents", target_is_directory=True)
+            self.assertEqual(list_managed(t, layout="user"), [])
+
+    def test_hostile_release_text_is_not_echoed(self):
+        with tempfile.TemporaryDirectory() as d:
+            install(d, "claude", True, layout="user")
+            agent = Path(d) / "agents/reviewer.md"
+            agent.write_text(agent.read_text().replace(f"(release {version()})", "(release \x1b[31mEVIL)", 1))
+            self.assertEqual(self.rows(d, layout="user")["agents/reviewer.md"]["release"], "unknown")
 
     def test_overlay_states(self):
         with tempfile.TemporaryDirectory() as d:
