@@ -213,7 +213,7 @@ def _sha(data):
 
 
 def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
-    """[(source, destination Path, action, bytes, sha of the existing file or None)]; raises before writing anything.
+    """[(source, dest Path, action, bytes, sha of the existing file or None, overlay-sourced)]; raises before writing.
 
     action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
     _check_options(adapter, layout)
@@ -222,7 +222,7 @@ def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project"
     ov = load_overlay(overlay, root) if overlay is not None else None
     target = _check_target(target, root)
     items = []
-    for src, rel, data, _origin in _items(adapter, packs, layout, root, ov):
+    for src, rel, data, origin in _items(adapter, packs, layout, root, ov):
         dest = target / rel
         ensure_safe(dest)
         assert_outside_repo(dest, root)
@@ -244,17 +244,19 @@ def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project"
                 break
             if parent.exists() and not parent.is_dir():
                 raise ValueError(f"parent is not a directory: {parent}")
-        items.append((src, dest, action, data, seen))
+        items.append((src, dest, action, data, seen, origin == "overlay"))
     return items
 
 
 def plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
     """[(source, destination, action)]; raises before anything is written. See _plan for the actions."""
-    return [(s, d, a) for s, d, a, _, _ in _plan(target, adapter, packs, root, update, layout, overlay, force_edited)]
+    return [
+        (s, d, a) for s, d, a, _, _, _ in _plan(target, adapter, packs, root, update, layout, overlay, force_edited)
+    ]
 
 
 def _refuse_edited(items):
-    edited = [str(d.name) for _, d, a, _, _ in items if a == "edited"]
+    edited = [str(d.name) for _, d, a, _, _, _ in items if a == "edited"]
     if edited:
         raise ValueError(
             "edited files refused (merge manually, or --force-edited discards your changes): " + ", ".join(edited)
@@ -313,7 +315,7 @@ def _changed(dest):
     return ValueError(f"destination changed during install: {dest.name}")
 
 
-def _write_one(dest, action, data, seen):
+def _write_one(dest, action, data, seen, private):
     try:
         dfd = _open_dir_chain(dest.parent, create=True)
     except OSError as exc:
@@ -331,6 +333,7 @@ def _write_one(dest, action, data, seen):
                 if not stat.S_ISREG(st.st_mode):
                     raise _changed(dest)
                 content = os.read(ofd, MAX_MANAGED_BYTES + 1)
+                keep_mode = stat.S_IMODE(st.st_mode)
             finally:
                 os.close(ofd)
             if _sha(content) != seen:
@@ -341,7 +344,7 @@ def _write_one(dest, action, data, seen):
             raise ValueError(f"directory replaced during install: {dest.parent}")
         if old is None:
             try:
-                fd = os.open(name, _CREATE_FLAGS, 0o666, dir_fd=dfd)
+                fd = os.open(name, _CREATE_FLAGS, 0o600 if private else 0o666, dir_fd=dfd)
             except OSError:
                 raise _changed(dest) from None
             try:
@@ -351,11 +354,13 @@ def _write_one(dest, action, data, seen):
         else:
             tmp = name + ".doia-tmp"
             try:
-                fd = os.open(tmp, _CREATE_FLAGS, 0o666, dir_fd=dfd)
+                fd = os.open(tmp, _CREATE_FLAGS, 0o600, dir_fd=dfd)
             except OSError as exc:
                 tmp = None
                 raise ValueError(f"cannot create temporary file for {name}: {exc.strerror}") from None
             try:
+                # Never widen: keep the old mode; owner-only if the new content carries overlay text.
+                os.fchmod(fd, keep_mode & 0o600 if private else keep_mode)
                 _write_all(fd, data)
             finally:
                 os.close(fd)
@@ -383,12 +388,12 @@ def _write_one(dest, action, data, seen):
 
 def _apply(items, root=ROOT):
     _refuse_edited(items)
-    for _src, dest, action, data, seen in items:
+    for _src, dest, action, data, seen, private in items:
         if action == "unchanged":
             continue
         ensure_safe(dest)
         assert_outside_repo(dest, root)
-        _write_one(dest, action, data, seen)
+        _write_one(dest, action, data, seen, private)
 
 
 def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, layout="project", overlay=None, **kw):
@@ -396,7 +401,7 @@ def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, l
     _refuse_edited(items)
     if apply:
         _apply(items, root)
-    return [str(dest.relative_to(Path(target).absolute())) for _, dest, _, _, _ in items]
+    return [str(dest.relative_to(Path(target).absolute())) for _, dest, _, _, _, _ in items]
 
 
 def _scan_patterns(layout):
@@ -492,7 +497,7 @@ def main(argv=None):
             force_edited=a.force_edited,
         )
         target = Path(a.target).absolute()
-        for _, dest, action, _, _ in items:
+        for _, dest, action, _, _, _ in items:
             print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}")
         _refuse_edited(items)
         if a.apply:

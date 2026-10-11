@@ -156,6 +156,8 @@ def role_errors(r):
 
 MAX_ADDITIONS_BYTES = 16 * 1024
 _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_HTML_RE = re.compile(r"<[A-Za-z/!?]")
+_HASH_REF_RE = re.compile(r"&(?:#0*35|#[xX]0*23|num);")
 _SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*$")
 
 
@@ -172,9 +174,10 @@ def additions_errors(name, body, public_text):
     """Rules for the private text appended to a public persona or pack (see generate.additions_section).
 
     The public text is never edited, so nothing here protects it; these rules keep the added text from posing as part
-    of it: size cap, no marker text, no fragment lines, no top-level (# or ##) or setext headings, and no heading
-    that repeats a public heading or the additions heading itself. Prose that merely asks for something at odds with
-    the public rules cannot be detected."""
+    of it: size cap, no marker text, no raw HTML (a < before a letter, /, ! or ?, autolinks included), no encoded #,
+    no fragment lines, no top-level (# or ##) or setext headings, and no heading that repeats a public heading or
+    the additions heading itself. Prose that merely asks for something at odds with the public rules cannot be
+    detected."""
     errors = []
     if not body.strip():
         errors.append(f"{name}: additions are empty")
@@ -182,6 +185,10 @@ def additions_errors(name, body, public_text):
         errors.append(f"{name}: additions too large (limit {MAX_ADDITIONS_BYTES} bytes)")
     if GENERATED_MARK in body:
         errors.append(f"{name}: additions may not contain the generator marker text")
+    if _HTML_RE.search(body):
+        errors.append(f"{name}: additions may not contain raw HTML (a < that starts a tag, comment or declaration)")
+    if _HASH_REF_RE.search(body):
+        errors.append(f"{name}: additions may not contain a character reference for #")
     taken = public_headings(public_text) | {_norm_heading(ADDITIONS_HEADING[3:])}
     lines = body.splitlines()
     for i, ln in enumerate(lines):
