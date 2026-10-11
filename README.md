@@ -2,7 +2,7 @@
 
 This is my shared home for AI agent personas and the domain knowledge they load, written once and generated for Claude Code, GitHub Copilot, ChatGPT and local models. The name is because the best thing a second agent can do for the first one is disagree with it, and because I wanted somewhere for those arguments to live that was not a pile of prompts copied between repos.
 
-Release 0.2.0. MIT.
+Release 0.3.0. MIT.
 
 ## Why roles and packs, not a dozen personas
 
@@ -78,7 +78,7 @@ The routine, from a checkout pinned to a release tag:
 
 ```
 git -C /path/to/department-of-internal-arguments fetch --tags
-git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.2.0, and a tag is only valid once cut
+git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.3.0
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update --apply
 git -C ~/dotfiles/claude status   # review the diff, then commit
@@ -92,7 +92,7 @@ The first install run is the preview and writes nothing. To see drift without wr
 
 The marker line carries a sha256 of the file with that one line removed. `--update` treats a file as installer-owned only when the marker is well-formed (exactly one, strictly parsed) and the body still hashes to the value in it. A hand-edited file, or one that merely contains the marker text, is `edited` and refused; the whole install stops before writing anything. The preview labels every file `new`, `update`, `unchanged` or `edited (refused; --force-edited discards your changes)`. `--update --force-edited` replaces edited files and discards your local changes (it never touches a file with no marker at all, and never a symlink). Editing only the release in the marker does not count as an edit, so a stale copy still updates. The hash binds content to the marker; it is not a signature, so someone who can write the file can write a matching hash. Review the preview and the diff in the dotfiles repo, which is the real control.
 
-This marker format is new in the next release. Files written by release 0.2.0 have no hash. They are recognised as legacy-owned only when their body is byte for byte one of the 14 outputs 0.2.0 generated (the installer carries those 14 hashes); a hashless marker on any other body is `legacy (unverified)` and needs `--force-edited`.
+This marker format is new in release 0.3.0. Files written by release 0.2.0 have no hash. They are recognised as legacy-owned only when their body is byte for byte one of the 14 outputs 0.2.0 generated (the installer carries those 14 hashes); a hashless marker on any other body is `legacy (unverified)` and needs `--force-edited`.
 
 ### Overlay: personas too sensitive for this public repo
 
