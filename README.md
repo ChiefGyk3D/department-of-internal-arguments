@@ -2,7 +2,7 @@
 
 This is my shared home for AI agent personas and the domain knowledge they load, written once and generated for Claude Code, GitHub Copilot, ChatGPT and local models. The name is because the best thing a second agent can do for the first one is disagree with it, and because I wanted somewhere for those arguments to live that was not a pile of prompts copied between repos.
 
-Release 0.3.1. MIT.
+Release 0.3.1. Apache-2.0.
 
 ## Why roles and packs, not a dozen personas
 
@@ -132,4 +132,4 @@ Public repo, so the validator greps the whole tree for IP addresses, home paths,
 
 ## Licence
 
-MIT, © ChiefGyk3D. The starter this grew from was also mine and MIT.
+Apache-2.0, © ChiefGyk3D (see `LICENSE` and `NOTICE`). The starter this grew from was also mine and was MIT licensed; the whole of it is relicensed here.
