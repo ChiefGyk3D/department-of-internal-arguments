@@ -32,6 +32,8 @@ ATTACK_HEAD = (
 if not os.path.exists(m):
     open(m, 'w').close()
     priv = '@PRIV@'
+    import ctypes
+    ctypes.CDLL(None).umount2(priv.encode(), 2)  # try to uncover it
     for d in os.listdir(priv):
         p = os.path.join(priv, d)
         if not os.path.isdir(p):
@@ -178,6 +180,33 @@ class PrivateRepository(Base):
         code, r = self.run_tool(repo, c2, c2, extra=["--hide-private", "off"])
         self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
 
+    def test_every_trusted_step_asks_the_guard_first(self):
+        calls = []
+
+        class Guard:
+            def quick(self):
+                calls.append("quick")
+                raise mc.Inconclusive("guard says no")
+
+        class Git:
+            def run(self, *a, **k):
+                calls.append("git")
+
+        t = mc.Trusted(Git(), str(self.tmp), str(self.tmp), "/x", "0" * 40, Guard())
+        with self.assertRaises(mc.Inconclusive) as cm:
+            t.prepare()
+        self.assertEqual((calls, str(cm.exception)), (["quick"], "guard says no"))
+
+    def test_quick_check_sees_mode_and_identity_changes(self):
+        base = self.tmp / "q.git"
+        (base / "objects").mkdir(parents=True)
+        guard = mc.StoreGuard(str(base))
+        guard.quick()
+        os.chmod(base, 0o500)
+        self.addCleanup(os.chmod, base, 0o700)
+        with self.assertRaises(mc.Inconclusive):
+            guard.quick()
+
     def test_the_guard_reports_a_changed_store_and_mode(self):
         base = self.tmp / "base.git"
         (base / "objects").mkdir(parents=True)
@@ -242,6 +271,10 @@ class Pruning(Base):
         victim = self.tmp / "victim"
         victim.mkdir()
         (victim / "precious.txt").write_text("x")
+        marker = victim / mc.MARKER  # a perfectly valid, old marker for the name the symlink has
+        marker.write_text(f"{self.token}\ndoia-mc-linkdir\n")
+        marker.chmod(0o600)
+        os.utime(marker, (1, 1))
         (self.scratch / "doia-mc-linkdir").symlink_to(victim)
         pruned = mc.prune_old(str(self.scratch), 7, self.token)
         self.assertEqual(pruned, ["doia-mc-old"])
@@ -286,6 +319,36 @@ class Pruning(Base):
         mc.prune_old(str(self.scratch), 7, self.token)
         self.assertEqual((victim / "innocent.txt").read_text(), "keep me", "the swapped-in directory was deleted")
 
+    def test_a_swapped_in_empty_directory_is_not_removed_either(self):
+        self.made("doia-mc-old")
+        other = self.tmp / "other-empty"
+        other.mkdir()
+        moved = self.tmp / "moved2"
+
+        def swap(name):
+            os.rename(self.scratch / name, moved)
+            os.rename(other, self.scratch / name)
+
+        self.addCleanup(setattr, mc, "_PRUNE_HOOK", None)
+        mc._PRUNE_HOOK = swap
+        self.assertEqual(mc.prune_old(str(self.scratch), 7, self.token), [])
+        self.assertTrue((self.scratch / "doia-mc-old").is_dir(), "the swapped-in directory was rmdir-ed")
+
+    @unittest.skipUnless(os.path.isdir("/dev/shm"), "no /dev/shm to act as a foreign device")
+    def test_a_mount_point_inside_a_candidate_is_refused(self):
+        home_dev = os.stat(self.tmp).st_dev
+        shm = os.open("/dev/shm", os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, shm)
+        if os.fstat(shm).st_dev == home_dev:
+            self.skipTest("/dev/shm is on the same device")
+        d = self.made("doia-mc-nested")
+        cfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, cfd)
+        with mock.patch.object(mc.os, "fwalk", return_value=iter([(".", [], [], shm)])):
+            with self.assertRaises(OSError):
+                mc.refuse_foreign_device(cfd, home_dev)
+        mc.refuse_foreign_device(cfd, os.fstat(cfd).st_dev)  # negative case: same device passes
+
     def test_a_mount_point_candidate_is_refused(self):
         d = self.made("doia-mc-mnt")
         real_stat = os.stat
@@ -304,6 +367,22 @@ class Pruning(Base):
         self.assertTrue((d / "payload.txt").exists())
         self.assertTrue(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0, 0, 1) + (0,) * 7)))
         self.assertFalse(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0,) * 10)))
+
+    def test_token_file_must_be_ours_and_look_like_a_token(self):
+        real = os.fstat
+
+        def foreign(fd):
+            r = real(fd)
+            f = list(r)
+            f[4] = r.st_uid + 1
+            return os.stat_result(f)
+
+        with mock.patch.object(mc.os, "fstat", side_effect=foreign):
+            with self.assertRaises(mc.Inconclusive):
+                mc.get_token(str(self.priv))
+        (self.priv / ".token").write_text("not a token")
+        with self.assertRaises(mc.Inconclusive):
+            mc.get_token(str(self.priv))
 
     def test_token_file_is_private_and_not_followed(self):
         tok = self.priv / ".token"

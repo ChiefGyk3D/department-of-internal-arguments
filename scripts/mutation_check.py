@@ -92,7 +92,7 @@ only as a throwaway user, container or VM. What it does:
     defines (neutralized one by one), and never runs anything the head's .gitattributes could name.
   * hides the private repository from the test: the test runs in a mount namespace where the parent of the
     private directory is covered by a bind mount of an empty directory, and the test's capabilities are dropped
-    (ambient set cleared, no_new_privs) before it starts, so it can neither list nor unmount it
+    (ambient set cleared) before it starts, so it can neither list nor unmount it
     (`isolation.private_dir_hidden`; `--hide-private off` turns it off, and a host that cannot do it reports
     false). The tool's own steps run outside that mount. Where it is not hidden, the repository is also guarded:
     its identity, mode, owner and a digest of every byte are recorded before the test and checked before every
@@ -765,7 +765,6 @@ INIT_HELPER = (
     "    libc = ctypes.CDLL(None, use_errno=True)\n"
     "    if libc.mount(empty.encode(), target.encode(), None, 4096, None) != 0:\n"
     "        sys.exit(97)\n"
-    "    libc.prctl(38, 1, 0, 0, 0)\n"  # PR_SET_NO_NEW_PRIVS
     "    libc.prctl(47, 4, 0, 0, 0)\n"  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL: the test gets no capability
     "pid = os.fork()\n"
     "if pid == 0:\n"
@@ -964,11 +963,16 @@ def is_mount_boundary(parent_st, child_st):
     return parent_st.st_dev != child_st.st_dev
 
 
-def _delete_pinned(cfd, cand_dev):
-    """Empty the directory open as `cfd` using descriptors only, refusing anything on another device first."""
+def refuse_foreign_device(cfd, cand_dev):
+    """Raise when anything under the open directory is on another device (a mount point)."""
     for _dp, _dn, _fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
         if os.fstat(rfd).st_dev != cand_dev:
             raise OSError("a mount point inside the candidate")
+
+
+def _delete_pinned(cfd, cand_dev):
+    """Empty the directory open as `cfd` using descriptors only, refusing anything on another device first."""
+    refuse_foreign_device(cfd, cand_dev)
     dirs = []
     for dp, dn, fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
         os.fchmod(rfd, 0o700)
@@ -1003,7 +1007,7 @@ def prune_old(parent, days, token):
                 st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
                 if not stat.S_ISDIR(st.st_mode) or is_mount_boundary(pst, st):
                     continue
-                cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+                cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=pfd)  # inode compared below
             except OSError:
                 continue
             try:
