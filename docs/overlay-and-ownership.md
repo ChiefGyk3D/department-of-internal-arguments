@@ -4,7 +4,7 @@
 
 The marker line carries a sha256 of the file with that one line removed. `--update` treats a file as installer-owned only when the marker is well-formed (exactly one, strictly parsed) and the body still hashes to the value in it. A hand-edited file, or one that merely contains the marker text, is `edited` and refused; the whole install stops before writing anything. The preview labels every file `new`, `update`, `unchanged` or `edited (refused; --force-edited discards your changes)`. `--update --force-edited` replaces edited files and discards your local changes (it never touches a file with no marker at all, and never a symlink). Editing only the release in the marker does not count as an edit, so a stale copy still updates. The hash binds content to the marker; it is not a signature, so someone who can write the file can write a matching hash. Review the preview and the diff in the dotfiles repo, which is the real control.
 
-This marker format is new in release 0.3.0. Files written by release 0.2.0 have no hash. They are recognised as legacy-owned only when their body is byte for byte one of the 14 outputs 0.2.0 generated (the installer carries those 14 hashes); a hashless marker on any other body is `legacy (unverified)` and needs `--force-edited`.
+This marker format is new in release 0.3.0. Files written by release 0.2.0 have no hash. They are recognized as legacy-owned only when their body is byte for byte one of the 14 outputs 0.2.0 generated (the installer carries those 14 hashes); a hashless marker on any other body is `legacy (unverified)` and needs `--force-edited`.
 
 ## Overlay: personas too sensitive for this public repo
 

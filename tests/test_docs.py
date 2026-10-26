@@ -78,7 +78,11 @@ class DocsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             fx = fixture(t)
             (fx / "docs/home.md").unlink()
-            self.assertTrue(any("docs/home.md" in e for e in validate(fx)))
+            readme = fx / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8").replace("docs/home.md", "docs/install.md"))
+            errors = validate(fx)
+            self.assertIn("docs/home.md is missing: it becomes the wiki Home page", errors)
+            self.assertEqual([e for e in errors if "broken link" in e], [])
 
 
 if __name__ == "__main__":

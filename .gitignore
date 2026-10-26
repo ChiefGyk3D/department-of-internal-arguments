@@ -30,3 +30,7 @@ coverage.xml
 .vscode/
 *.swp
 .DS_Store
+
+# Local gen_wiki output
+wiki-out/
+.wiki-out.gen_wiki

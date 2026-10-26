@@ -31,4 +31,4 @@ The pages live in [docs/](docs/home.md) and are mirrored to the wiki.
 - [Evals and measurements](docs/evals-and-measurements.md): the pilot, what is not measured, behavioral evals.
 - [Relationship to SAFO and GYST](docs/relationship-to-safo-and-gyst.md): hooks and CI.
 
-Privacy and licence are on the [Home page](docs/home.md). To check your own copy: `python3 scripts/generate.py --check`, `python3 scripts/validate.py`, and `python3 -m unittest discover -s tests -v`. See [SECURITY.md](SECURITY.md) for reporting.
+Privacy and license are on the [Home page](docs/home.md). To check your own copy: `python3 scripts/generate.py --check`, `python3 scripts/validate.py`, and `python3 -m unittest discover -s tests -v`. See [SECURITY.md](SECURITY.md) for reporting.
