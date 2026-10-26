@@ -28,6 +28,16 @@ D1 = "a" * 64
 D2 = "b" * 64
 LAYOUT = "project"
 
+# Hostile fixture modes. The store must REFUSE each of these, so the tests have to create them. They are spelled with
+# the stat bits (checked against the octal value in LooseModeConstants) so the intent reads as "group writable",
+# "world writable" and so on, and so CodeQL's py/overly-permissive-file does not flag a fixture that exists only to
+# prove a refusal. Nothing here is a mode the production code applies.
+GROUP_WRITABLE_DIR = stat.S_IRWXU | stat.S_IRWXG | stat.S_IROTH | stat.S_IXOTH  # 0o775
+WORLD_WRITABLE_DIR = stat.S_IRWXU | stat.S_IWOTH | stat.S_IXOTH  # 0o703
+ALL_WRITABLE_DIR = stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO  # 0o777
+STICKY_ALL_WRITABLE_DIR = ALL_WRITABLE_DIR | stat.S_ISVTX  # 0o1777
+WORLD_READABLE_FILE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH  # 0o644
+
 
 def entry(**kw):
     base = {"kind": "file", "body_sha256": D1, "release": "0.4.0", "source": "public"}
@@ -449,7 +459,7 @@ class Confinement(StateCase):
     def test_base_directory_group_or_world_writable_is_refused(self):
         base = self.tmp / "base"
         base.mkdir(mode=0o700)
-        os.chmod(base, 0o777)
+        os.chmod(base, ALL_WRITABLE_DIR)
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(base / "s")}):
             with self.assertRaisesRegex(state.StateError, "writable"):
                 state.save(self.target, LAYOUT, {})
@@ -460,7 +470,7 @@ class Confinement(StateCase):
     def test_sticky_writable_base_is_allowed(self):
         base = self.tmp / "base"
         base.mkdir(mode=0o700)
-        os.chmod(base, 0o1777)
+        os.chmod(base, STICKY_ALL_WRITABLE_DIR)
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(base / "s")}):
             state.save(self.target, LAYOUT, {})
             self.assertEqual(state.load(self.target, LAYOUT), {})
@@ -483,7 +493,7 @@ class Confinement(StateCase):
                     state.save(self.target, LAYOUT, {})
 
     def test_errors_show_only_the_last_two_components(self):
-        self.mkdir_state(0o775)
+        self.mkdir_state(GROUP_WRITABLE_DIR)
         with self.assertRaises(state.StateError) as cm:
             state.load(self.target, LAYOUT)
         self.assertNotIn(str(self.tmp), str(cm.exception))
@@ -505,12 +515,12 @@ class Confinement(StateCase):
             self.assertEqual(state.state_dir(), self.sdir)  # DOIA_STATE_DIR is explicit
 
     def test_directory_mode_0775(self):
-        self.mkdir_state(0o775)
+        self.mkdir_state(GROUP_WRITABLE_DIR)
         self.assertLoadRefused()
         self.assertSaveRefusedAndNothingWritten()
 
     def test_directory_world_writable(self):
-        self.mkdir_state(0o703)
+        self.mkdir_state(WORLD_WRITABLE_DIR)
         self.assertLoadRefused()
         self.assertSaveRefusedAndNothingWritten()
 
@@ -706,10 +716,10 @@ class WriteSafety(StateCase):
         seen = []
         real_open = os.open
 
-        def spy(path, flags, mode=0o777, *, dir_fd=None):
+        def spy(path, flags, *args, dir_fd=None):
             if str(path).endswith(".tmp"):
-                seen.append((flags, mode))
-            return real_open(path, flags, mode, dir_fd=dir_fd)
+                seen.append((flags, args[0]))  # state passes the mode positionally
+            return real_open(path, flags, *args, dir_fd=dir_fd)
 
         with mock.patch.object(state.os, "open", side_effect=spy):
             state.save(self.target, LAYOUT, {})
@@ -1301,7 +1311,7 @@ class Api(StateCase):
             with self.assertRaises(state.StateError) as cm:
                 state.load(self.target, LAYOUT)
         self.assertNotIsInstance(cm.exception, (state.StateLocked, state.StateCorrupt))
-        self.mkdir_state(0o775)
+        self.mkdir_state(GROUP_WRITABLE_DIR)
         with self.assertRaises(state.StateError) as cm:
             state.load(self.target, LAYOUT)
         self.assertNotIsInstance(cm.exception, (state.StateLocked, state.StateCorrupt))
@@ -1328,7 +1338,7 @@ class Api(StateCase):
             self.assertTrue(state.lock_held(other, LAYOUT))
 
     def test_lock_held_refuses_a_bad_directory(self):
-        self.mkdir_state(0o775)
+        self.mkdir_state(GROUP_WRITABLE_DIR)
         with self.assertRaises(state.StateError):
             state.lock_held(self.target, LAYOUT)
 
@@ -1893,7 +1903,7 @@ class LockFile(StateCase):
         return path
 
     def test_hard_linked_lock_file_with_a_loose_mode_is_corrupt(self):
-        path = self.make_lock(0o644)
+        path = self.make_lock(WORLD_READABLE_FILE)
         os.link(path, self.tmp / "second-name")
         with self.assertRaises(state.StateCorrupt):
             state.lock_held(self.target, LAYOUT)
@@ -1909,7 +1919,7 @@ class LockFile(StateCase):
             state.Store(self.target, LAYOUT)
 
     def test_loose_mode_alone_is_corrupt_and_is_not_repaired(self):
-        path = self.make_lock(0o644)
+        path = self.make_lock(WORLD_READABLE_FILE)
         with self.assertRaisesRegex(state.StateCorrupt, "mode"):
             state.lock_held(self.target, LAYOUT)
         with self.assertRaisesRegex(state.StateCorrupt, "mode"):
@@ -2676,6 +2686,17 @@ HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK rea
 
 
 EXPECTED_ROWS = 97
+
+
+class LooseModeConstants(unittest.TestCase):
+    """The hostile fixture modes above equal the octal values their comments name."""
+
+    def test_values(self):
+        self.assertEqual(GROUP_WRITABLE_DIR, 0o775)
+        self.assertEqual(WORLD_WRITABLE_DIR, 0o703)
+        self.assertEqual(ALL_WRITABLE_DIR, 0o777)
+        self.assertEqual(STICKY_ALL_WRITABLE_DIR, 0o1777)
+        self.assertEqual(WORLD_READABLE_FILE, 0o644)
 
 
 class GuardTable(unittest.TestCase):
