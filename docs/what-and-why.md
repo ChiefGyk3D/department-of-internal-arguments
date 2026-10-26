@@ -6,7 +6,7 @@ So there are four roles, and they describe how work gets done, not what the work
 
 ## The fifth persona
 
-The fifth persona is the one dispatching the other four. It is not an agent file, because an agent that can dispatch agents is exactly what the validator forbids; it is [templates/lead.md](../templates/lead.md), copied into the controller session's instructions. It says how to brief, how to read a report, when the adversarial pass is mandatory, when to stop a fix loop, and that pushes and approvals never happen below it. See [Writing a brief](writing-a-brief.md).
+The fifth persona is the one dispatching the other four. It is not an agent file, because an agent that can dispatch agents is exactly what the validator forbids; it is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead`; nothing loads it by itself). It says how to brief, how to read a report, when the adversarial pass is mandatory, when to stop a fix loop, and that pushes and approvals never happen below it. See [Writing a brief](writing-a-brief.md).
 
 ## One report header, one severity scale
 

@@ -22,7 +22,7 @@ Python 3.11 or later, standard library only. Never symlink the installed files i
 The pages live in [docs/](docs/home.md) and are mirrored to the wiki.
 
 - [What and why](docs/what-and-why.md): why roles and packs, not a dozen personas.
-- [Install](docs/install.md): project and user layouts, `--update`, drift checks, never symlink, exporting a prompt.
+- [Install](docs/install.md): project and user layouts, the lead persona (`--lead`), `--update`, drift checks, never symlink, exporting a prompt.
 - [Roles](docs/roles.md): the four roles, repository layout, tiers and tools.
 - [Packs](docs/packs.md): the six packs.
 - [Policies](docs/policies.md): the four policies, one line each.

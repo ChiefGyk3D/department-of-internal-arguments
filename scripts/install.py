@@ -1,8 +1,9 @@
 """Additive installer. Preview by default; replaces only files that identify themselves as generated (see below).
 
 python3 scripts/install.py --target <dir> --adapter claude|copilot|both|codex [--pack NAME ...] [--update] [--apply]
-                           [--layout project|user] [--overlay DIR] [--force-edited]
-python3 scripts/install.py --target <dir> --list-managed [--layout project|user] [--overlay DIR]
+                           [--layout project|user] [--overlay DIR] [--force-edited] [--lead FILE]
+  (--adapter none with --lead FILE installs only the lead block)
+python3 scripts/install.py --target <dir> --list-managed [--layout project|user] [--overlay DIR] [--lead FILE]
 
 Layouts:
   project (default)  <target>/.claude/agents, <target>/.claude/skills, <target>/.github/agents,
@@ -23,6 +24,12 @@ discards your edits. A file without the marker is still a collision.
 entry with a public name is append-only (the public file unchanged, then a labelled additions section); a new name is
 installed as a whole persona. Overlay files carry the
 generator marker with the word "overlay" and the file's own name, never a path.
+
+--lead FILE (a path under the target, e.g. CLAUDE.md or AGENTS.md) installs templates/lead.md, which is not an agent
+file, into that instruction file as a marked block: a begin line carrying the release and the sha256 of the block body,
+the text, an end line. The file is created if absent; otherwise the block is appended and nothing else in the file is
+touched. A re-run with the same text is a no-op; --update replaces a block whose hash still matches; a block you edited
+is refused (--force-edited with --update discards your edits to the block only); a malformed block is refused.
 
 --list-managed is read-only: it lists files under the target that carry the marker with their release and whether
 they match this checkout (exit 0 when all are current, 3 otherwise).
@@ -53,16 +60,114 @@ from lib import (
 )
 from overlay import load_overlay
 
-ADAPTERS = ("claude", "copilot", "both", "codex")
+ADAPTERS = ("claude", "copilot", "both", "codex", "none")
 HOSTS = {
     "claude": ("claude",),
     "copilot": ("copilot",),
     "both": ("claude", "copilot"),  # unchanged meaning; Codex is asked for by name
     "codex": ("codex",),
+    "none": (),  # only --lead
 }
 LAYOUTS = ("project", "user")
 MAX_MANAGED_BYTES = 1024 * 1024
 _RELEASE_RE = re.compile(r"[0-9A-Za-z.+_-]{1,40}")
+
+
+LEAD_BEGIN_RE = re.compile(r"<!-- doia-lead:begin release ([0-9A-Za-z.+_-]{1,40}) sha256:([0-9a-f]{64}) -->")
+LEAD_END = "<!-- doia-lead:end -->"
+LEAD_TOKEN = "doia-lead:"
+
+
+def lead_body(root=ROOT):
+    """The text of templates/lead.md without its leading HTML comment (that comment is for people copying the file)."""
+    src = _public_source(root, "templates/lead.md")
+    text = src.read_text(encoding="utf-8")
+    if text.startswith("<!--"):
+        end = text.find("-->")
+        if end < 0:
+            raise ValueError("templates/lead.md: unterminated leading comment")
+        text = text[end + 3 :]
+    return text.strip() + "\n"
+
+
+def lead_block(root=ROOT):
+    body = lead_body(root)
+    return f"<!-- doia-lead:begin release {version(root)} sha256:{body_sha256(body)} -->\n{body}{LEAD_END}\n"
+
+
+def lead_inspect(text):
+    """(state, release, start, end): where the block sits in the file text.
+
+    state: none (no marker text anywhere) | owned (one well-formed block whose body hashes to the begin line) |
+    edited (marker text present but malformed, duplicated, or the body no longer matches). start and end are character
+    offsets of the whole block including both marker lines (end includes the final newline)."""
+    if LEAD_TOKEN not in text:
+        return "none", None, None, None
+    lines = text.splitlines(keepends=True)
+    idx = [i for i, ln in enumerate(lines) if LEAD_TOKEN in ln]
+    if len(idx) != 2:
+        return "edited", None, None, None
+    b, e = idx  # idx is ascending, so the begin line is the first token line and the end line the second
+    m = LEAD_BEGIN_RE.fullmatch(lines[b].rstrip("\r\n"))
+    if m is None or lines[e].rstrip("\r\n") != LEAD_END:
+        return "edited", None, None, None
+    start = sum(len(x) for x in lines[:b])
+    stop = start + sum(len(x) for x in lines[b : e + 1])
+    # The hash is over the body with LF line endings, so a block an editor converted to CRLF is still the same block.
+    body = "".join(lines[b + 1 : e]).replace("\r\n", "\n")
+    state = "owned" if body_sha256(body) == m.group(2) else "edited"
+    return state, m.group(1), start, stop
+
+
+def _same_block(found, block):
+    """True if the block found in a file is the one this release writes, ignoring CRLF and a missing last newline."""
+    return found.replace("\r\n", "\n").rstrip("\n") == block.rstrip("\n")
+
+
+def _lead_path(target, lead):
+    rel = Path(lead)
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise ValueError("--lead must be a path under the target (no absolute path, no ..)")
+    return Path(target) / rel
+
+
+def _lead_item(target, lead, root, update, force_edited):
+    """The one plan row for the lead block: (source, dest, action, bytes of the whole file, sha of old file, False)."""
+    dest = _lead_path(target, lead)
+    ensure_safe(dest)
+    assert_outside_repo(dest, root)
+    block = lead_block(root)
+    src = Path(root) / "templates/lead.md"
+    if not (dest.exists() or dest.is_symlink()):
+        return src, dest, "new", block.encode("utf-8"), None, False
+    if dest.is_symlink() or not dest.is_file():
+        raise ValueError(f"not a regular file: {dest.relative_to(target)}")
+    raw = _read_capped(dest)
+    if len(raw) > MAX_MANAGED_BYTES:
+        raise ValueError(f"instruction file too large to edit safely: {dest.relative_to(target)}")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"instruction file is not UTF-8: {dest.relative_to(target)}") from None
+    state, _rel, start, stop = lead_inspect(text)
+    seen = _sha(raw)
+    eol = "\r\n" if "\r\n" in text else "\n"  # a CRLF file gets a CRLF block; the hash ignores the difference
+    ours = block.replace("\n", eol)
+    if state == "none":
+        lf = text.replace("\r\n", "\n")
+        sep = "" if not lf or lf.endswith("\n\n") else ("\n" if lf.endswith("\n") else "\n\n")
+        return src, dest, "append", (text + sep.replace("\n", eol) + ours).encode("utf-8"), seen, False
+    if state == "edited":
+        if start is not None and force_edited and update:
+            return src, dest, "forced", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
+        if start is None and force_edited and update:
+            raise ValueError(f"malformed lead block; fix it by hand: {dest.relative_to(target)}")
+        return src, dest, "edited", raw, seen, False
+    if _same_block(text[start:stop], block):
+        return src, dest, "unchanged", raw, seen, False
+    if not update:
+        raise ValueError(f"lead block differs from this release; use --update: {dest.relative_to(target)}")
+    return src, dest, "update", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
 
 
 def inspect(path):
@@ -271,7 +376,9 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
+def _plan(
+    target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False, lead=None
+):
     """[(source, dest Path, action, bytes, sha of the existing file or None, overlay-sourced)]; raises before writing.
 
     action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
@@ -280,6 +387,8 @@ def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project"
         raise ValueError("--force-edited only makes sense with --update")
     ov = load_overlay(overlay, root) if overlay is not None else None
     target = _check_target(target, root)
+    if adapter == "none" and lead is None:
+        raise ValueError("--adapter none installs only the lead block; give --lead FILE")
     items = []
     for src, rel, data, origin in _items(adapter, packs, layout, root, ov):
         dest = target / rel
@@ -304,14 +413,17 @@ def _plan(target, adapter, packs=None, root=ROOT, update=False, layout="project"
             if parent.exists() and not parent.is_dir():
                 raise ValueError(f"parent is not a directory: {parent}")
         items.append((src, dest, action, data, seen, origin == "overlay"))
+    if lead is not None:
+        items.append(_lead_item(target, lead, root, update, force_edited))
     return items
 
 
-def plan(target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False):
+def plan(
+    target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False, lead=None
+):
     """[(source, destination, action)]; raises before anything is written. See _plan for the actions."""
-    return [
-        (s, d, a) for s, d, a, _, _, _ in _plan(target, adapter, packs, root, update, layout, overlay, force_edited)
-    ]
+    items = _plan(target, adapter, packs, root, update, layout, overlay, force_edited, lead)
+    return [(s, d, a) for s, d, a, _, _, _ in items]
 
 
 def _refuse_edited(items):
@@ -374,6 +486,25 @@ def _changed(dest):
     return ValueError(f"destination changed during install: {dest.name}")
 
 
+def _recheck(dfd, dest, old, mode, seen):
+    """Last look before the rename: the file must still be the same inode, with the same mode and the same bytes the
+    new content was built from. An editor that rewrote it in place since the first read would otherwise lose its edit.
+    The rename itself cannot be made conditional, so a write landing between this read and the rename is not caught;
+    the window is that small, and an advisory lock would not stop an editor that does not take one."""
+    try:
+        fd = os.open(dest.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        raise _changed(dest) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != old or stat.S_IMODE(st.st_mode) != mode:
+            raise _changed(dest)
+        if _sha(os.read(fd, MAX_MANAGED_BYTES + 1)) != seen:
+            raise ValueError(f"file changed while installing; re-run: {dest.name}")
+    finally:
+        os.close(fd)
+
+
 def _write_one(dest, action, data, seen, private):
     try:
         dfd = _open_dir_chain(dest.parent, create=True)
@@ -382,7 +513,7 @@ def _write_one(dest, action, data, seen, private):
     tmp = None
     try:
         name, old = dest.name, None
-        if action in ("update", "forced"):
+        if action in ("update", "forced", "append"):
             try:
                 ofd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
             except OSError:
@@ -423,12 +554,7 @@ def _write_one(dest, action, data, seen, private):
                 _write_all(fd, data)
             finally:
                 os.close(fd)
-            try:
-                cur = os.stat(name, dir_fd=dfd, follow_symlinks=False)
-            except OSError:
-                raise _changed(dest) from None
-            if not stat.S_ISREG(cur.st_mode) or (cur.st_dev, cur.st_ino) != old:
-                raise _changed(dest)
+            _recheck(dfd, dest, old, keep_mode, seen)
             os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
             tmp = None
         _race_seam("written", dest)
@@ -477,7 +603,7 @@ def _read_capped(path):
         return f.read(MAX_MANAGED_BYTES + 1)
 
 
-def list_managed(target, layout="project", overlay=None, root=ROOT):
+def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
     """Read-only: one row per file under target whose text carries the marker.
 
     status: current | stale (older release, differs) | differs (this release, content differs) |
@@ -514,7 +640,48 @@ def list_managed(target, layout="project", overlay=None, root=ROOT):
             else:
                 status = "differs" if release == ver else "stale"
             rows.append({"path": rel, "release": release, "source": source, "status": status})
+    if lead is not None:  # an explicitly named file always gets a row, so it can never read as clean by omission
+        rows.append(_lead_row(target, lead, root))
     return rows
+
+
+def _lead_row(target, lead, root):
+    """The row for the file named by --lead: current | stale | differs | edited, or missing (no file, or no block in
+    it) | unsafe (a symlink, not a regular file, over 1 MiB, not UTF-8, unreadable). Anything but current exits 3."""
+    dest = _lead_path(target, lead)
+    rel = str(dest.relative_to(target))
+
+    def row(status, release="-"):
+        return {"path": rel, "release": release, "source": "public", "status": status}
+
+    try:
+        ensure_safe(dest)
+    except ValueError:
+        return row("unsafe")
+    try:  # any filesystem error is a row, never a bare refusal: a named file must not vanish from the report
+        if not (dest.exists() or dest.is_symlink()):
+            return row("missing")
+        if dest.is_symlink() or not dest.is_file():
+            return row("unsafe")
+        raw = _read_capped(dest)
+    except FileNotFoundError:  # it went away after the existence check
+        return row("missing")
+    except OSError:  # unreadable, an I/O error, a loop: nothing about the file can be vouched for
+        return row("unsafe")
+    if len(raw) > MAX_MANAGED_BYTES:
+        return row("unsafe")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return row("unsafe")
+    state, release, start, stop = lead_inspect(text)
+    if state == "none":
+        return row("missing")
+    if state == "edited":
+        return row("edited", release or "unknown")
+    if _same_block(text[start:stop], lead_block(root)):
+        return row("current", release)
+    return row("stale" if release != version(root) else "differs", release)
 
 
 def _safe(text):
@@ -555,6 +722,7 @@ class _SafeParser(argparse.ArgumentParser):
 LABELS = {
     "edited": "edited (refused; --force-edited discards your changes)",
     "forced": "update (forced; discards local edits)",
+    "append": "append (adds the lead block; the rest of the file is untouched)",
 }
 
 
@@ -567,6 +735,9 @@ def main(argv=None):
     ap.add_argument("--pack", action="append", help="install only this pack (repeatable); default all")
     ap.add_argument("--update", action="store_true", help="replace files whose marker and body hash still match")
     ap.add_argument("--force-edited", action="store_true", help="with --update: also replace edited marker files")
+    ap.add_argument(
+        "--lead", type=Path, metavar="FILE", help="install templates/lead.md as a block in FILE under target"
+    )
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--list-managed", action="store_true", help="read-only: list marker files and their drift")
     a = ap.parse_args(argv)
@@ -574,7 +745,7 @@ def main(argv=None):
         if a.list_managed:
             if a.apply or a.update or a.pack or a.force_edited:
                 raise ValueError("--list-managed is read-only and takes no --apply, --update, --force-edited or --pack")
-            rows = list_managed(a.target, a.layout, a.overlay)
+            rows = list_managed(a.target, a.layout, a.overlay, lead=a.lead)
             for r in rows:
                 print(f"{r['status']:17} {r['release']:10} {r['source']:8} {_safe(r['path'])}")
             bad = [r for r in rows if r["status"] != "current"]
@@ -588,8 +759,11 @@ def main(argv=None):
             layout=a.layout,
             overlay=a.overlay,
             force_edited=a.force_edited,
+            lead=a.lead,
         )
         target = Path(a.target).absolute()
+        if a.lead is not None and a.adapter != "none":
+            print(f"note: the {a.adapter} role agents are planned with --lead; use --adapter none for the lead only")
         for _, dest, action, data, _, from_overlay in items:
             # Provenance and digest of what would be written: the preview is the review control for personas and
             # packs, which become model instructions.
