@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 from lib import (
@@ -108,6 +109,11 @@ def render_copilot_agent(role, policies, ver, source=None, additions=None):
 
 CODEX_NOTES_HEADING = "## Codex capability notes"
 TOML_LITERAL_END = "'''"
+CODEX_KEYS = {"name", "description", "developer_instructions"}
+
+
+class CodexTomlError(ValueError):
+    """A role, fragment, policy or overlay text that cannot be written as a valid Codex agent file."""
 
 
 def codex_notes(role):
@@ -170,7 +176,20 @@ def render_codex_agent(role, policies, ver, source=None, additions=None):
     tail += additions_section(additions) if additions else ""
     if TOML_LITERAL_END in tail:
         raise ValueError(f"roles/{role['file']}: text must not contain three single quotes (they end the TOML string)")
-    return _seal(head, tail + TOML_LITERAL_END + "\n", source or "roles/" + role["file"], ver)
+    label = source or "roles/" + role["file"]
+    text = _seal(head, tail + TOML_LITERAL_END + "\n", label, ver)
+    _check_codex_toml(text, role["name"], label)
+    return text
+
+
+def _check_codex_toml(text, name, label):
+    """Parse what was just rendered and hold it to the exact schema before it can be returned or written."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise CodexTomlError(f"{label}: would render invalid TOML ({exc}); remove control characters") from None
+    if set(data) != CODEX_KEYS or data["name"] != name:
+        raise CodexTomlError(f"{label}: rendered TOML does not have exactly {sorted(CODEX_KEYS)} for {name!r}")
 
 
 def render_skill(pack, ver, source=None, additions=None):

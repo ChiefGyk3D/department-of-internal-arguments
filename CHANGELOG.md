@@ -16,6 +16,12 @@ Codex adapter (issue #22). Everything about Codex below comes from OpenAI's Code
 - `scripts/install.py --adapter codex`, with `--update`, `--force-edited`, `--overlay` (append-only for public names), `--list-managed`, symlink and collision refusal as for the other adapters. `--adapter both` keeps its meaning. `--layout user` is accepted for Codex with the home directory as the target (Codex keeps user agents and skills under two roots).
 - `scripts/validate.py` parses each Codex agent with `tomllib`, requires exactly the three keys and checks the release in every generated Codex file.
 - `evals/behavioral-evals.md` row 26 for a hand run in Codex (not executed). `docs/install.md` records what was verified, with the page URLs, and what is UNVERIFIED.
+- Round 2 (external adversarial review of the Codex adapter):
+  - `install.py` refuses a target that is, or resolves to, the filesystem root (for every adapter and layout; `..` is resolved, symlinks were already refused).
+  - A role, fragment, policy or overlay text with a control character other than tab and newline can no longer produce an invalid Codex TOML file: `render_codex_agent` parses what it rendered and checks the exact three-key schema before returning, and raises `CodexTomlError` naming the source.
+  - The install preview prints the source (`public` or `overlay`) and the sha256 of each file it would write.
+  - Documentation states the trust model without overstating the code: an overlay is fully trusted policy authority and the append-only rules do not stop a hostile overlay; packs are model instructions and the preview is the review control; files that self-identify as generated may be overwritten by `--update` (the hash is not a signature; a state-file design is a separate issue). The earlier claim that the installer leaves alone any file it did not generate is withdrawn.
+  - New isolated validator tests prove the TOML parse and the schema check each turn red when removed.
 - Not done here: an `AGENTS.md` (the project's own file; a merged one would not fit the 32 KiB default), and a read-only researcher or planner role (waits for issue #20).
 
 ## [0.3.1] - 2026-10-11

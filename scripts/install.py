@@ -1,4 +1,4 @@
-"""Additive installer. Preview by default; never overwrite a file it did not generate.
+"""Additive installer. Preview by default; replaces only files that identify themselves as generated (see below).
 
 python3 scripts/install.py --target <dir> --adapter claude|copilot|both|codex [--pack NAME ...] [--update] [--apply]
                            [--layout project|user] [--overlay DIR] [--force-edited]
@@ -120,6 +120,9 @@ def _check_options(adapter, layout):
 def _check_target(target, root):
     target = Path(target).absolute()
     ensure_safe(target)
+    # A typo or a ".." must not turn a home or project install into one rooted at "/" (privileged runs especially).
+    if Path(os.path.realpath(target)).parent == Path(os.path.realpath(target)):
+        raise ValueError("target cannot be the filesystem root")
     if not target.is_dir():
         raise ValueError("target must be an existing project directory")
     if Path(os.path.realpath(target)).is_relative_to(Path(os.path.realpath(root))):
@@ -549,8 +552,11 @@ def main(argv=None):
             force_edited=a.force_edited,
         )
         target = Path(a.target).absolute()
-        for _, dest, action, _, _, _ in items:
-            print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}")
+        for _, dest, action, data, _, from_overlay in items:
+            # Provenance and digest of what would be written: the preview is the review control for personas and
+            # packs, which become model instructions.
+            origin = "overlay" if from_overlay else "public"
+            print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}  [{origin}, sha256 {_sha(data)}]")
         _refuse_edited(items)
         if a.apply:
             _apply(items)
