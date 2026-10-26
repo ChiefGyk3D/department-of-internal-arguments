@@ -8,6 +8,17 @@ Benchmark corpus and scoring rubric (issue #47, unit 1 of #3). No model is run a
 - `scripts/benchmark.py`: `--check` (corpus well formed; commits and diffs resolve with local tools only, `not-run` without a full clone), `--reproduce` (re-proves each seed), `--score RESULTS.jsonl` (recall, precision, false findings, fix rounds avoided, wall clock, tokens, refusals per role and model; rejects a family name for an exact model id and a missing client version or cost). Read-only; never touches `policies/model-routing.md`. `scripts/validate.py` checks the corpus structure.
 - `evals/benchmark-schema.md`, a section in `docs/evals-and-measurements.md`, `tests/test_benchmark.py`.
 
+Round 2 of the review of the benchmark corpus (issue #47):
+
+- Matching is a deterministic maximum bipartite assignment (augmenting paths, canonical report order), so the score no longer depends on the order of the report when evidence patterns overlap (the rubric text said it did not; the greedy version did).
+- The evidence match is stated as a keyword heuristic that cannot detect gaming, and is tightened: patterns carry word boundaries, at least two distinct patterns must hit (`evidence_min` lowers it per finding), and on a diff task the evidence must contain a verbatim code line from the head checkout (`quotes`, verified by `--check`). A test builds a report from the label alone and asserts it scores zero recall on every diff task.
+- `diff_sha256` no longer depends on the user's git configuration: every output-changing diff option is pinned on the command line and in `-c`, global and system configuration are not read, and `GIT_*` variables of the caller are dropped. The existing digests are unchanged. A mismatch message names both causes (rewritten history, or a different git version or configuration).
+- Every finding has a `scope` (`in_diff`, `pre_existing`, `brief`); `--check` verifies an `in_diff` finding touches a line of the diff and a finding absent at the base does not have its quote on an added line; the schema says the reviewer gets a checkout at `head` plus the diff; the table reports recall per scope.
+- The test-gap findings are reproduced by the real mutation (a change applied to a copy of the head, unit tests run, expected to stay green); `lead-lost-update` has a probe that races an in-place edit; the one absence-only repro is marked `proxy`.
+- `exact_model_id` rejects `:latest` tags and a bare vendor and major (`claude-3`, `gpt-5`); the `lead_list` probe fails on a crash instead of confirming a finding.
+- Result records: calendar-valid dates, a 40-character commit or a resolvable abbreviation, bounded tokens, seconds, cost, context and run, no control or invisible characters in text fields, a duplicate JSON key is an error, and client versions are separate rows.
+- `tarfile` extraction uses the `data` filter where Python has it (3.11.4 and later) and an equivalent member check on earlier 3.11 patch releases.
+
 ## [0.4.0] - 2026-10-26
 
 The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.

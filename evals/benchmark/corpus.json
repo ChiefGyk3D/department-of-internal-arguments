@@ -18,19 +18,25 @@
           "class": "filesystem-safety",
           "severity": "important",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "The installer accepts the filesystem root as its target directory, so a typo or a .. can root an install at /.",
           "source": "Codex review of #30; fixed before merge",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "filesystem root",
-            "_check_target",
-            "target.{0,40}(/|root)",
-            "realpath"
+            "\\bfilesystem root\\b",
+            "\\b_check_target\\b",
+            "\\btarget\\b[^.\\n]{0,60}(/|\\broot\\b)",
+            "\\brealpath\\b",
+            "\\bis_dir\\(\\)"
           ],
           "fixed": "ac8cbe9addd2eb3e789aac8eccc8691496908fd0",
           "at_base": "observed",
+          "quotes": [
+            "def _check_target(target, root):",
+            "if not target.is_dir():"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "root_target.py",
@@ -42,24 +48,33 @@
           "class": "input-validation",
           "severity": "important",
           "round": 1,
+          "scope": "in_diff",
           "summary": "A role, fragment, policy or overlay text with a control character renders a Codex agent file that is not valid TOML, and nothing checks the rendered text.",
           "source": "Copilot and Codex review of #30; fixed before merge",
           "paths": [
             "scripts/generate.py"
           ],
           "evidence_any": [
-            "tomllib",
-            "valid(ate|ation)?.{0,30}TOML",
-            "TOML.{0,40}(invalid|parse|valid)",
-            "control char"
+            "\\btomllib\\b",
+            "\\bTOML\\b",
+            "\\b(invalid|parse|parses|valid|validate|validated)\\b",
+            "\\bcontrol char(acter)?s?\\b",
+            "\\brender_codex_agent\\b"
           ],
           "fixed": "ac8cbe9addd2eb3e789aac8eccc8691496908fd0",
           "at_base": "n/a",
+          "quotes": [
+            "def render_codex_agent(role, policies, ver, source=None, additions=None):",
+            "return _seal(head, tail + TOML_LITERAL_END + \"\\n\", source or \"roles/\" + role[\"file\"], ver)"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "codex_toml.py",
             "args": []
-          }
+          },
+          "touched": [
+            "def render_codex_agent"
+          ]
         }
       ]
     },
@@ -80,6 +95,7 @@
           "class": "ownership-trust",
           "severity": "important",
           "round": 2,
+          "scope": "pre_existing",
           "summary": "The ownership marker carries a sha256 of the body, which anyone who can write a destination can compute, so a forged file is classified owned and --update replaces it.",
           "source": "Codex adversarial review of #30; tracked in issue #31, still open",
           "paths": [
@@ -87,16 +103,20 @@
             "scripts/install.py"
           ],
           "evidence_any": [
-            "body_sha256",
-            "split_marker",
-            "inspect\\(",
-            "forg",
-            "self-describ",
-            "not a signature",
-            "anyone who can write"
+            "\\bbody_sha256\\b",
+            "\\bsplit_marker\\b",
+            "\\binspect\\(",
+            "\\bforg(e|ed|ery|ing)\\b",
+            "\\bself-describ(e|es|ing)\\b",
+            "\\bnot a signature\\b",
+            "\\banyone who can write\\b"
           ],
           "fixed": null,
           "at_base": "observed",
+          "quotes": [
+            "def body_sha256(body):",
+            "state = \"owned\" if m.group(3) == digest else \"edited\""
+          ],
           "repro": {
             "kind": "probe",
             "probe": "forged_marker.py",
@@ -108,20 +128,26 @@
           "class": "output-injection",
           "severity": "minor",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "Installer usage and error output prints the program name (argv[0]) without escaping, so a hostile name injects terminal escape sequences.",
           "source": "Residual from the #22 reviews, fixed in #34",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "argv\\[0\\]",
-            "prog",
-            "escape",
-            "terminal",
-            "argparse"
+            "\\bargv\\[0\\]",
+            "\\bprog\\b",
+            "\\bescape(s|d)?\\b",
+            "\\bterminal\\b",
+            "\\bargparse\\b",
+            "\\b_SafeParser\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
           "at_base": "observed",
+          "quotes": [
+            "a = ap.parse_args(argv)",
+            "ap.add_argument(\"--target\", type=Path, required=True)"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "argv0_escape.py",
@@ -147,22 +173,27 @@
           "class": "input-validation",
           "severity": "important",
           "round": 1,
+          "scope": "in_diff",
           "summary": "MODEL_RE rejects real Ollama tags (gemma3n:e4b, mixtral:8x7b, llama3.2:latest, namespaced names) and accepts nonsense such as a:1b.",
           "source": "Review of #26; issue #27",
           "paths": [
             "scripts/summarize_log.py"
           ],
           "evidence_any": [
-            "MODEL_RE",
-            "e4b",
-            "8x7b",
-            "latest",
-            "namespace",
-            "a:1b",
-            "gemma3n"
+            "\\bMODEL_RE\\b",
+            "\\be4b\\b",
+            "\\b8x7b\\b",
+            "\\blatest\\b",
+            "\\bnamespace(d)?\\b",
+            "\\ba:1b\\b",
+            "\\bgemma3n\\b"
           ],
           "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
           "at_base": "n/a",
+          "quotes": [
+            "MODEL_RE = re.compile(r\"[A-Za-z0-9._-]+:[0-9]+(?:\\.[0-9]+)?[bB](?:-[A-Za-z0-9_.]+)*\", re.ASCII)",
+            "if not (isinstance(model, str) and len(model) <= MAX_MODEL and MODEL_RE.fullmatch(model)):"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "model_tag.py",
@@ -170,40 +201,54 @@
               "rejects",
               "gemma3n:e4b"
             ]
-          }
+          },
+          "touched": [
+            "MODEL_RE"
+          ]
         },
         {
           "id": "scope-test-count-only",
           "class": "test-gap",
           "severity": "minor",
           "round": 1,
+          "scope": "in_diff",
           "summary": "The scope test only requires the scope phrase to appear four or more times (it appears seven), so removing one from a measured figure stays green.",
           "source": "Review of #26; issue #27",
           "paths": [
             "tests/test_package.py"
           ],
           "evidence_any": [
-            "assertGreaterEqual",
-            "count\\(",
-            "scope",
-            "SCOPE",
-            "per.figure",
-            "each figure"
+            "\\bassertGreaterEqual\\b",
+            "\\bcount\\(",
+            "\\bSCOPE\\b",
+            "\\bscope phrase\\b",
+            "\\bper[- ]figure\\b",
+            "\\beach figure\\b"
           ],
           "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
           "at_base": "n/a",
+          "quotes": [
+            "self.assertGreaterEqual(text.count(self.SCOPE), 4)",
+            "def test_pack_makes_no_class_level_claims_without_scope(self):"
+          ],
           "repro": {
-            "kind": "pattern",
-            "path": "tests/test_package.py",
-            "regex": "def test_every_measured_figure_carries_the_scope",
-            "present": false
-          }
+            "kind": "mutation",
+            "path": "packs/local-llm-routing/PACK.md",
+            "old": "on a 4B-parameter model; model not recorded; measured 2026-10-07; not a finding about local models in general)",
+            "new": "on a 4B-parameter model)",
+            "tests_file": "test_package.py",
+            "k": "LocalLlmRule"
+          },
+          "touched": [
+            "assertGreaterEqual\\(text\\.count\\(self\\.SCOPE\\), 4\\)"
+          ]
         },
         {
           "id": "british-spelling-in-code",
           "class": "convention",
           "severity": "minor",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "The American-English guard scans prose directories only, and code docstrings still hold British spellings (Summarise, Defence).",
           "source": "Review of #26; issue #27",
           "paths": [
@@ -212,14 +257,18 @@
             "tests/test_package.py"
           ],
           "evidence_any": [
-            "Summaris",
-            "Defence",
-            "British",
-            "spelling",
-            "docstring"
+            "\\bSummaris(e|es|ed)\\b",
+            "\\bDefence\\b",
+            "\\bBritish\\b",
+            "\\bspelling\\b",
+            "\\bdocstrings?\\b"
           ],
           "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
-          "at_base": "n/a",
+          "at_base": "observed",
+          "quotes": [
+            "\"\"\"Summarise a pilot log (one JSON object per line, schema in evals/log-schema.md) as a Markdown table.",
+            "\"\"\"Defence in depth: nothing this installer writes may land inside the repository (overlay content included).\"\"\""
+          ],
           "repro": {
             "kind": "pattern",
             "path": "scripts/summarize_log.py",
@@ -246,21 +295,26 @@
           "class": "input-validation",
           "severity": "minor",
           "round": 1,
+          "scope": "in_diff",
           "summary": "valid_model passes odd input: ../x:7b, a/../b:7b, and trailing or doubled hyphens (gemma4:12b-, gemma4:12b--x, gemma4:-7b).",
           "source": "Review of #28; issue #29 item 3; also a Copilot finding on #28",
           "paths": [
             "scripts/summarize_log.py"
           ],
           "evidence_any": [
-            "valid_model",
+            "\\bvalid_model\\b",
             "\\.\\.",
-            "hyphen",
-            "path segment",
+            "\\bhyphens?\\b",
+            "\\bpath segments?\\b",
             "\\.\\./x",
-            "traversal"
+            "\\btraversal\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
-          "at_base": "n/a",
+          "at_base": "not-observed",
+          "quotes": [
+            "if name.lower() in NOT_A_MODEL or name.startswith(\"/\") or name.endswith(\"/\"):",
+            "if len(name) < 2 or not any(c.isalpha() for c in name) or \"//\" in name:"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "model_tag.py",
@@ -268,27 +322,34 @@
               "accepts",
               "../x:7b"
             ]
-          }
+          },
+          "touched": [
+            "def valid_model"
+          ]
         },
         {
           "id": "version-tag-rejected",
           "class": "input-validation",
           "severity": "minor",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "The real tag nomic-embed-text:v1.5 (a version, not a size) is rejected.",
           "source": "Review of #28; issue #29 item 2",
           "paths": [
             "scripts/summarize_log.py"
           ],
           "evidence_any": [
-            "nomic",
-            "v1\\.5",
-            "version tag",
-            "valid_model",
-            "embedding"
+            "\\bnomic(-embed-text)?\\b",
+            "\\bv1\\.5\\b",
+            "\\bversion tags?\\b",
+            "\\bvalid_model\\b",
+            "\\bembedding\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
           "at_base": "observed",
+          "quotes": [
+            "return tag == \"latest\" or any(SIZE_RE.fullmatch(part) for part in tag.split(\"-\"))"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "model_tag.py",
@@ -303,6 +364,7 @@
           "class": "dead-code",
           "severity": "minor",
           "round": 1,
+          "scope": "in_diff",
           "summary": "The redundant `or \"//\" in name` check is dead code: removing it leaves the tests green.",
           "source": "Review of #28; issue #29 item 4",
           "paths": [
@@ -310,73 +372,99 @@
           ],
           "evidence_any": [
             "\"//\"",
-            "dead",
-            "redundant",
-            "mutation",
-            "survivor"
+            "\\bdead\\b",
+            "\\bredundant\\b",
+            "\\bmutation\\b",
+            "\\bsurviv(or|ors|ed|es)\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
           "at_base": "n/a",
+          "quotes": [
+            "if len(name) < 2 or not any(c.isalpha() for c in name) or \"//\" in name:",
+            "if name.lower() in NOT_A_MODEL or name.startswith(\"/\") or name.endswith(\"/\"):"
+          ],
           "repro": {
-            "kind": "pattern",
+            "kind": "mutation",
             "path": "scripts/summarize_log.py",
-            "regex": "or \"//\" in name",
-            "present": true
-          }
+            "old": " or \"//\" in name",
+            "new": "",
+            "tests_file": "test_package.py",
+            "k": null
+          },
+          "touched": [
+            "\"//\" in name"
+          ]
         },
         {
           "id": "async-docstring-untested",
           "class": "test-gap",
           "severity": "minor",
           "round": 1,
+          "scope": "in_diff",
           "summary": "Dropping ast.AsyncFunctionDef from the docstring scan leaves the tests green: no async docstring case.",
           "source": "Review of #28; issue #29 item 4",
           "paths": [
-            "tests/test_package.py",
-            "tests/test_user_layout.py"
+            "tests/test_package.py"
           ],
           "evidence_any": [
-            "AsyncFunctionDef",
-            "async",
-            "mutation",
-            "survivor",
-            "code_prose"
+            "\\bAsyncFunctionDef\\b",
+            "\\basync\\b",
+            "\\bmutation\\b",
+            "\\bsurviv(or|ors|ed|es)\\b",
+            "\\bdocstrings?\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
           "at_base": "n/a",
+          "quotes": [
+            "if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):"
+          ],
           "repro": {
-            "kind": "pattern",
+            "kind": "mutation",
             "path": "tests/test_package.py",
-            "regex": "async def",
-            "present": false
-          }
+            "old": "ast.FunctionDef, ast.AsyncFunctionDef)",
+            "new": "ast.FunctionDef)",
+            "tests_file": "test_package.py",
+            "k": "AmericanSpelling"
+          },
+          "touched": [
+            "AsyncFunctionDef"
+          ]
         },
         {
           "id": "scope-test-line-based",
           "class": "test-gap",
           "severity": "minor",
           "round": 1,
+          "scope": "in_diff",
           "summary": "The per-figure scope test is line-based: a scope phrase wrapped onto the next line is reported unscoped.",
           "source": "Review of #28; issue #29 item 1",
           "paths": [
             "tests/test_package.py"
           ],
           "evidence_any": [
-            "wrap",
-            "line.based",
-            "single.line",
-            "continuation",
-            "next line",
-            "unscoped"
+            "\\bwrap(ped|s)?\\b",
+            "\\bline[- ]based\\b",
+            "\\bsingle[- ]line\\b",
+            "\\bcontinuation\\b",
+            "\\bnext line\\b",
+            "\\bunscoped\\b"
           ],
           "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
           "at_base": "n/a",
+          "quotes": [
+            "lines = [ln for ln in text.splitlines() if key in ln]",
+            "def unscoped(self, text):"
+          ],
           "repro": {
             "kind": "pattern",
             "path": "tests/test_package.py",
             "regex": "def blocks",
             "present": false
-          }
+          },
+          "touched": [
+            "def unscoped"
+          ],
+          "proxy": "the absence of the wrap-tolerant helper stands in for the behavior; the stated behavior is a false fail, which no mutation of the head shows"
         }
       ]
     },
@@ -397,86 +485,100 @@
           "class": "error-reporting",
           "severity": "important",
           "round": 1,
+          "scope": "in_diff",
           "summary": "list-managed --lead returns no row for a directory or another non-regular file, so an unsafe instruction file reads as clean by omission.",
           "source": "Codex adversarial review of #35, round 1",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "_lead_row",
-            "return None",
-            "no row",
-            "omit",
-            "symlink",
-            "clean",
-            "list_managed"
+            "\\bsymlinks?\\b",
+            "\\bnot dest\\.is_file\\(\\)|\\bnon-regular\\b|\\bdirector(y|ies)\\b",
+            "\\breturn None\\b",
+            "\\b_lead_row\\b|\\blist_managed\\b",
+            "\\b(omit|omits|omitted|no row|missing row)\\b"
           ],
           "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
           "at_base": "n/a",
+          "quotes": [
+            "if dest.is_symlink() or not dest.is_file():"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "lead_list.py",
             "args": [
               "directory"
             ]
-          }
+          },
+          "touched": [
+            "def _lead_row"
+          ]
         },
         {
           "id": "lead-list-hides-oversized",
           "class": "error-reporting",
           "severity": "important",
           "round": 1,
+          "scope": "in_diff",
           "summary": "list-managed --lead silently drops an oversized (over 1 MiB) lead file from the listing.",
           "source": "Copilot review of #35",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "MAX_MANAGED_BYTES",
-            "oversize",
-            "1 MiB",
-            "return None",
-            "silently",
-            "omit",
-            "_lead_row"
+            "\\bMAX_MANAGED_BYTES\\b",
+            "\\b(oversize|oversized|1 MiB|1 MB|too large|over the cap)\\b",
+            "\\breturn None\\b",
+            "\\b_lead_row\\b|\\blist_managed\\b",
+            "\\b(omit|omits|omitted|silently|no row)\\b"
           ],
           "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
           "at_base": "n/a",
+          "quotes": [
+            "if len(raw) > MAX_MANAGED_BYTES:"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "lead_list.py",
             "args": [
               "oversized"
             ]
-          }
+          },
+          "touched": [
+            "def _lead_row"
+          ]
         },
         {
           "id": "lead-lost-update",
           "class": "concurrency",
           "severity": "important",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "The writer checks only the inode before rename, not the content it built the new file from, so an in-place edit made after the first read is lost.",
           "source": "Codex adversarial review of #35, round 1",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "lost.update",
-            "race",
-            "TOCTOU",
-            "st_ino",
-            "re-?check",
-            "rename",
-            "changed (during|while)",
-            "(stat|inode)"
+            "\\blost[- ]update\\b",
+            "\\brace\\b",
+            "\\bTOCTOU\\b",
+            "\\bst_ino\\b",
+            "\\bre-?check(s|ed)?\\b",
+            "\\brename\\b",
+            "\\b(inode|in place)\\b",
+            "\\bedit(s|or)?\\b"
           ],
           "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
           "at_base": "n/a",
+          "quotes": [
+            "if not stat.S_ISREG(cur.st_mode) or (cur.st_dev, cur.st_ino) != old:",
+            "os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)"
+          ],
           "repro": {
-            "kind": "pattern",
-            "path": "scripts/install.py",
-            "regex": "def _recheck",
-            "present": false
+            "kind": "probe",
+            "probe": "lead_lost_update.py",
+            "args": []
           }
         }
       ]
@@ -498,23 +600,28 @@
           "class": "error-reporting",
           "severity": "important",
           "round": 1,
+          "scope": "pre_existing",
           "summary": "A filesystem error while reading the named lead file (an unreadable file, a file that vanished) escapes list-managed instead of becoming a row.",
           "source": "Codex adversarial review of #35, round 2",
           "paths": [
             "scripts/install.py"
           ],
           "evidence_any": [
-            "_lead_row",
-            "OSError",
-            "PermissionError",
-            "unreadable",
-            "exception",
-            "raise",
-            "row",
-            "filesystem error"
+            "\\b_lead_row\\b",
+            "\\bOSError\\b",
+            "\\bPermissionError\\b",
+            "\\bunreadable\\b",
+            "\\bexception\\b",
+            "\\braise[sd]?\\b",
+            "\\brow\\b",
+            "\\bfilesystem error\\b"
           ],
           "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
           "at_base": "n/a",
+          "quotes": [
+            "raw = _read_capped(dest)",
+            "if len(raw) > MAX_MANAGED_BYTES:"
+          ],
           "repro": {
             "kind": "probe",
             "probe": "lead_list.py",
@@ -540,17 +647,18 @@
           "class": "brief-gap",
           "severity": "important",
           "round": 1,
+          "scope": "brief",
           "summary": "The brief must require that --list-managed gives the named lead file a row in every state (missing, unsafe, oversized, edited), never an omission.",
           "source": "Gap behind lead-install-first-head/lead-list-hides-unsafe and lead-list-hides-oversized",
           "paths": [
             "brief"
           ],
-          "evidence_any": [
-            "(?i)list-managed.{0,200}(row|every state|never omit|omission|silent)",
-            "(?i)(symlink|oversize|unsafe).{0,120}(row|reported|listed)"
-          ],
           "fixed": null,
           "at_base": "n/a",
+          "evidence_any": [
+            "(?i)list-managed.{0,200}(\\brow\\b|every state|never omit|omission|silent)",
+            "(?i)\\b(symlink|oversize|oversized|unsafe|non-regular)\\b.{0,120}\\b(row|reported|listed|status)\\b"
+          ],
           "repro": {
             "kind": "ref",
             "finding": "lead-install-first-head/lead-list-hides-unsafe"
@@ -566,17 +674,18 @@
           "class": "brief-gap",
           "severity": "important",
           "round": 2,
+          "scope": "brief",
           "summary": "The brief must name the concurrent-edit case: the file may change between the read and the replace, and the writer must re-check the content before it renames.",
           "source": "Gap behind lead-install-first-head/lead-lost-update",
           "paths": [
             "brief"
           ],
-          "evidence_any": [
-            "(?i)(race|concurren|lost.update|changed (during|while)|re-?check|re-?read).{0,200}(rename|replace|write|edit)",
-            "(?i)editor.{0,80}(edit|rewrote|in place)"
-          ],
           "fixed": null,
           "at_base": "n/a",
+          "evidence_any": [
+            "(?i)\\b(race|concurrent|lost.update|changed (during|while)|re-?check|re-?read)\\b.{0,200}\\b(rename|replace|write|edit)",
+            "(?i)\\beditor\\b.{0,80}\\b(edit|rewrote|in place)\\b"
+          ],
           "repro": {
             "kind": "ref",
             "finding": "lead-install-first-head/lead-lost-update"
@@ -590,17 +699,18 @@
           "class": "brief-gap",
           "severity": "important",
           "round": 3,
+          "scope": "brief",
           "summary": "The brief must say that a filesystem error on the named file (unreadable, vanished) is reported as a row and not as a crash or a bare refusal.",
           "source": "Gap behind lead-install-after-round-1/lead-list-fs-error",
           "paths": [
             "brief"
           ],
-          "evidence_any": [
-            "(?i)(unreadable|permission|vanish|filesystem error|OSError|I/O error).{0,200}(row|report|status)",
-            "(?i)error.{0,60}(is a row|as a row)"
-          ],
           "fixed": null,
           "at_base": "n/a",
+          "evidence_any": [
+            "(?i)\\b(unreadable|permission|vanish(ed)?|filesystem error|OSError|I/O error)\\b.{0,200}\\b(row|report|reported|status)\\b",
+            "(?i)\\berror\\b.{0,60}\\b(is a row|as a row)\\b"
+          ],
           "repro": {
             "kind": "ref",
             "finding": "lead-install-after-round-1/lead-list-fs-error"

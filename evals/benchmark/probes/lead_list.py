@@ -1,7 +1,8 @@
 """Probe: `list_managed(..., lead=FILE)` gives no row to a lead file that is a directory, oversized or unreadable.
 
 Usage: python3 -I lead_list.py TREE SCRATCH directory|oversized|unreadable. OBSERVED means the named file got no
-row at all (it reads as clean by omission) or the call raised instead of returning a row."""
+row at all (it reads as clean by omission) or, for `unreadable` only, the call raised PermissionError instead of
+returning a row. Any other exception is a crash and fails the probe."""
 
 import os
 import sys
@@ -28,7 +29,9 @@ else:
     raise SystemExit("unknown kind")
 try:
     rows = install.list_managed(target, lead="LEAD.md", root=tree)
-except OSError as exc:
+except PermissionError as exc:
+    if kind != "unreadable":  # any other exception is a crash of the probe, not the finding
+        raise
     print(f"OBSERVED: list_managed raised {type(exc).__name__} instead of returning a row")
 else:
     got = [r["status"] for r in rows if r["path"] == "LEAD.md"]

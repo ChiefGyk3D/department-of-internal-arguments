@@ -5,11 +5,13 @@ import contextlib
 import copy
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,20 +37,42 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env).stdout
 
 
-def finding(fid="f1", cls="input-validation", rnd=1, paths=("src/a.py",), evidence=("unchecked",), **extra):
+def finding(
+    fid="f1", cls="input-validation", rnd=1, paths=("src/a.py",), evidence=("unchecked", "value"), quotes=None, **extra
+):
     f = {
         "id": fid,
         "class": cls,
         "severity": "important",
         "round": rnd,
+        "scope": "in_diff",
         "summary": "A synthetic finding.",
         "source": "synthetic",
         "paths": list(paths),
         "evidence_any": list(evidence),
         "fixed": None,
         "at_base": "not-observed",
+        "quotes": list(quotes) if quotes is not None else ["unchecked value"],
+        "touched": ["unchecked"],
         "repro": {"kind": "pattern", "path": "src/a.py", "regex": "unchecked", "present": True},
     }
+    f.update(extra)
+    return f
+
+
+def pre_existing(fid, **kw):
+    f = finding(fid, **kw)
+    f["scope"] = "pre_existing"
+    del f["touched"]
+    return f
+
+
+def brief_finding(fid="g1", **extra):
+    f = finding(fid, cls="brief-gap", paths=("brief",), evidence=("race", "rename"))
+    f["scope"] = "brief"
+    f["repro"] = {"kind": "ref", "finding": "t1/f1"}
+    f["absent_from_input"] = ["lost update"]
+    del f["quotes"], f["touched"]
     f.update(extra)
     return f
 
@@ -81,10 +105,12 @@ def record(**over):
         "client_version": "2.1.0",
         "model": "claude-sonnet-5-5",
         "date": "2026-11-01",
-        "commit": "abcdef1",
+        "commit": "a" * 40,
         "tools_enabled": ["read"],
         "outcome": "completed",
-        "findings": [{"class": "input-validation", "path": "src/a.py", "evidence": "the value is unchecked here"}],
+        "findings": [
+            {"class": "input-validation", "path": "src/a.py", "evidence": "the unchecked value is never validated"}
+        ],
         "wall_clock_s": 12.5,
         "tokens": {"input": 1000, "output": 200},
         "approval_ref": "synthetic",
@@ -94,13 +120,25 @@ def record(**over):
     return r
 
 
-def parse(rec, c=None):
-    return benchmark.parse_result(json.dumps(rec), 1, c or corpus())
+def parse(rec, c=None, repo=None):
+    return benchmark.parse_result(json.dumps(rec), 1, c or corpus(), repo)
 
 
 class ModelId(unittest.TestCase):
     def test_exact_ids_pass(self):
-        for m in ("claude-sonnet-5-5", "claude-haiku-5-5", "gpt-5.1-codex", "gemma4:12b", "llama3.2:latest"):
+        for m in (
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-sonnet-5",
+            "gpt-5.1-codex",
+            "gpt-4-turbo",
+            "gemini-2.5-pro",
+            "o3-mini",
+            "gemma4:12b",
+            "llama3.2:8b",
+            "nomic-embed-text:v1.5",
+            "hf.co/org/m:7b",
+        ):
             self.assertTrue(benchmark.exact_model_id(m), m)
 
     def test_family_names_and_aliases_fail(self):
@@ -109,6 +147,9 @@ class ModelId(unittest.TestCase):
             "opus",
             "claude",
             "claude-sonnet",
+            "claude-3",
+            "claude-3-5",
+            "gpt-5",
             "claude-opus-latest",
             "claude-sonnet-5-latest",
             "gpt-5-inherit",
@@ -124,50 +165,109 @@ class ModelId(unittest.TestCase):
         ):
             self.assertFalse(benchmark.exact_model_id(m), repr(m))
 
+    def test_an_explicit_latest_tag_is_a_moving_alias(self):
+        for m in ("gemma:latest", "llama3:latest", "llama3.2:latest", "hf.co/org/m:latest"):
+            self.assertFalse(benchmark.exact_model_id(m), m)
+
+    def test_a_local_tag_must_itself_be_a_valid_ollama_tag(self):
+        # pins the local branch: it must defer to the tag rules, not accept anything with a colon
+        for m in ("a:1b", "gemma4:", "gemma4:12b-", "../x:7b", "ollama:12b", "gemma4:big", ":7b", "x y:7b"):
+            self.assertFalse(benchmark.exact_model_id(m), m)
+
 
 class Matching(unittest.TestCase):
     def setUp(self):
         self.t = task(
             findings=[
-                finding("f1", "input-validation", 1, ("src/a.py",), ("unchecked",)),
-                finding("f2", "ownership-trust", 2, ("src/b.py",), ("forg(ed|ery)",)),
+                finding("f1", "input-validation", 1, ("src/a.py",), ("unchecked", "value"), ["unchecked value"]),
+                pre_existing(
+                    "f2",
+                    cls="ownership-trust",
+                    rnd=2,
+                    paths=("src/b.py",),
+                    evidence=("forg(ed|ery)", "marker"),
+                    quotes=["forged marker"],
+                ),
             ]
         )
 
-    def m(self, reported):
-        return benchmark.match_findings(self.t, reported)
+    def m(self, reported, t=None):
+        return benchmark.match_findings(t or self.t, reported)
 
-    def test_match_needs_class_path_and_evidence(self):
-        good = {"class": "input-validation", "path": "src/a.py", "evidence": "x is unchecked"}
-        self.assertEqual(self.m([good])["matched"], ["f1"])
-        for key, bad in (("class", "ownership-trust"), ("path", "src/zzz.py"), ("evidence", "looks fine to me")):
-            r = self.m([{**good, key: bad}])
-            self.assertEqual(r["matched"], [], key)
-            self.assertEqual(r["false"], 1, key)
+    GOOD = {"class": "input-validation", "path": "src/a.py", "evidence": "the unchecked value is never validated"}
+
+    def test_match_needs_class_path_quote_and_two_evidence_hits(self):
+        self.assertEqual(self.m([self.GOOD])["matched"], ["f1"])
+        for key, bad in (
+            ("class", "ownership-trust"),
+            ("path", "src/zzz.py"),
+            ("evidence", "looks fine to me"),
+            ("evidence", "this is unchecked"),  # one distinct pattern only
+            ("evidence", "unchecked and the value"),  # two patterns but not the quoted code
+        ):
+            r = self.m([{**self.GOOD, key: bad}])
+            self.assertEqual(r["matched"], [], (key, bad))
+            self.assertEqual(r["false"], 1, (key, bad))
+
+    def test_evidence_min_override_lowers_the_hit_count_for_one_finding(self):
+        one_hit = {**self.GOOD, "evidence": "this unchecked thing"}  # hits one of the two patterns
+        t = task(findings=[finding("f1", evidence=("unchecked", "zzz"), quotes=["unchecked thing"])])
+        self.assertEqual(self.m([one_hit], t)["matched"], [])
+        t = task(findings=[finding("f1", evidence=("unchecked", "zzz"), quotes=["unchecked thing"], evidence_min=1)])
+        self.assertEqual(self.m([one_hit], t)["matched"], ["f1"])
+        t = task(findings=[finding("f1", evidence=("unchecked", "zzz"), quotes=["quoted code"], evidence_min=1)])
+        self.assertEqual(self.m([one_hit], t)["matched"], [])
+
+    def test_a_brief_finding_needs_no_quote(self):
+        b = task("b1", roles=("brief-writer",), kind="brief", findings=[brief_finding()])
+        r = self.m([{"class": "brief-gap", "path": "brief", "evidence": "name the race before the rename"}], b)
+        self.assertEqual(r["matched"], ["g1"])
 
     def test_duplicate_is_not_a_second_match_and_not_false(self):
-        good = {"class": "input-validation", "path": "src/a.py", "evidence": "unchecked"}
-        r = self.m([good, good])
+        r = self.m([self.GOOD, self.GOOD])
         self.assertEqual((r["matched"], r["duplicates"], r["false"]), (["f1"], 1, 0))
 
     def test_unevidenced_and_malformed_findings_are_false(self):
         r = self.m(
             [
                 {"class": "input-validation", "path": "src/a.py", "evidence": ""},
-                {"class": "made-up-class", "path": "src/a.py", "evidence": "unchecked"},
+                {"class": "made-up-class", "path": "src/a.py", "evidence": "unchecked value"},
                 {"class": "input-validation", "path": "src/a.py"},
             ]
         )
         self.assertEqual((r["matched"], r["false"], r["unevidenced"]), ([], 3, 3))
 
-    def test_result_does_not_depend_on_report_order(self):
-        a = {"class": "input-validation", "path": "src/a.py", "evidence": "unchecked"}
-        b = {"class": "ownership-trust", "path": "src/b.py", "evidence": "a forged marker"}
-        junk = {"class": "dead-code", "path": "src/a.py", "evidence": "nothing"}
-        one = self.m([a, junk, b])
-        two = self.m([b, a, junk])
-        self.assertEqual(sorted(one["matched"]), sorted(two["matched"]))
-        self.assertEqual((one["false"], one["duplicates"]), (two["false"], two["duplicates"]))
+    def overlapping(self):
+        shared = ("alpha", "beta")
+        return task(
+            findings=[
+                finding("e1", "dead-code", 1, ("src/a.py",), shared, ["code one", "code both"]),
+                finding("e2", "dead-code", 1, ("src/a.py",), shared, ["code two", "code both"]),
+            ]
+        )
+
+    def test_overlapping_candidates_are_assigned_by_maximum_matching_in_every_order(self):
+        t = self.overlapping()
+        both = {"class": "dead-code", "path": "src/a.py", "evidence": "aaa alpha beta, code one and code two"}
+        only_one = {"class": "dead-code", "path": "src/a.py", "evidence": "zzz alpha beta, code one"}
+        for order in itertools.permutations([both, only_one]):
+            r = self.m(list(order), t)
+            self.assertEqual(sorted(r["matched"]), ["e1", "e2"], order)
+            self.assertEqual((r["false"], r["duplicates"]), (0, 0))
+
+    def test_permutations_of_a_larger_overlapping_set_all_agree(self):
+        t = self.overlapping()
+        reports = [
+            {"class": "dead-code", "path": "src/a.py", "evidence": "a alpha beta, code one and code two"},
+            {"class": "dead-code", "path": "src/a.py", "evidence": "b alpha beta, code one"},
+            {"class": "dead-code", "path": "src/a.py", "evidence": "c alpha beta, code both"},
+            {"class": "dead-code", "path": "src/a.py", "evidence": "d unrelated"},
+        ]
+        seen = {
+            (tuple(sorted(r["matched"])), r["false"], r["duplicates"])
+            for r in (self.m(list(p), t) for p in itertools.permutations(reports))
+        }
+        self.assertEqual(seen, {(("e1", "e2"), 1, 1)})
 
     def test_rounds_avoided_counts_only_fully_matched_rounds(self):
         self.assertEqual(benchmark.rounds_avoided(self.t, ["f1"]), (1, 2))
@@ -177,17 +277,83 @@ class Matching(unittest.TestCase):
         self.assertEqual(benchmark.rounds_avoided(both, ["a"]), (0, 1))
 
 
+def first_word(pattern):
+    """What a lazy reviewer would echo: the first literal word of a pattern."""
+    plain = re.sub(r"\(\?i\)|\\[a-zA-Z]", "", pattern)
+    words = re.findall(r"[A-Za-z_][A-Za-z_-]{2,}", plain)
+    return words[0] if words else plain.replace("\\", "")
+
+
+class RealCorpusMatching(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.c = benchmark.load_corpus()
+
+    def task(self, tid):
+        return next(t for t in self.c["tasks"] if t["id"] == tid)
+
+    def test_report_order_does_not_change_the_score_on_the_real_overlapping_findings(self):
+        t = self.task("lead-install-first-head")
+        a = {
+            "class": "error-reporting",
+            "path": "scripts/install.py",
+            "evidence": "if dest.is_symlink() or not dest.is_file(): the directory is omitted, "
+            "no row, return None in _lead_row",
+        }
+        b = {
+            "class": "error-reporting",
+            "path": "scripts/install.py",
+            "evidence": "if len(raw) > MAX_MANAGED_BYTES: an oversized file is silently omitted "
+            "by _lead_row, return None",
+        }
+        one = benchmark.match_findings(t, [a, b])
+        two = benchmark.match_findings(t, [b, a])
+        self.assertEqual(sorted(one["matched"]), ["lead-list-hides-oversized", "lead-list-hides-unsafe"])
+        self.assertEqual(sorted(two["matched"]), sorted(one["matched"]))
+
+    def test_echoing_the_label_scores_zero_recall(self):
+        # Built the way the independent reviewer built it: class and path copied from the label, evidence the first
+        # literal word of the first pattern. Without having seen the diff this must match nothing.
+        for t in self.c["tasks"]:
+            reports = [
+                {"class": f["class"], "path": f["paths"][0], "evidence": first_word(f["evidence_any"][0])}
+                for f in t["findings"]
+            ]
+            self.assertEqual(benchmark.match_findings(t, reports)["matched"], [], t["id"])
+
+    def test_echoing_every_pattern_word_still_needs_the_quoted_code_on_diff_tasks(self):
+        for t in self.c["tasks"]:
+            if t["kind"] != "diff":
+                continue
+            reports = [
+                {
+                    "class": f["class"],
+                    "path": f["paths"][0],
+                    "evidence": " ".join(first_word(p) for p in f["evidence_any"]),
+                }
+                for f in t["findings"]
+            ]
+            self.assertEqual(benchmark.match_findings(t, reports)["matched"], [], t["id"])
+
+    def test_a_report_with_the_label_words_and_the_real_line_does_match(self):
+        t = self.task("codex-adapter-first-head")
+        f = t["findings"][0]
+        text = f"The filesystem root is accepted: {f['quotes'][0]} never refuses it; see _check_target"
+        r = benchmark.match_findings(t, [{"class": f["class"], "path": f["paths"][0], "evidence": text}])
+        self.assertEqual(r["matched"], [f["id"]])
+
+
 class ResultRecords(unittest.TestCase):
-    def rejects(self, rec, fragment, c=None):
+    def rejects(self, rec, fragment, c=None, repo=None):
         with self.assertRaises(ValueError) as cm:
-            parse(rec, c)
+            parse(rec, c, repo)
         self.assertIn(fragment, str(cm.exception))
 
     def test_good_record_parses(self):
         self.assertEqual(parse(record())["model"], "claude-sonnet-5-5")
 
     def test_family_name_instead_of_exact_model_id_is_rejected(self):
-        for m in ("sonnet", "claude-sonnet", "opus", "inherit"):
+        for m in ("sonnet", "claude-sonnet", "claude-3", "opus", "inherit", "gemma:latest"):
             self.rejects(record(model=m), "model")
 
     def test_missing_model_version_or_cost_is_rejected(self):
@@ -214,15 +380,50 @@ class ResultRecords(unittest.TestCase):
         c = corpus(task(roles=("reviewer",)))
         self.rejects(record(role="adversarial-reviewer"), "not scored for role", c)
 
-    def test_wall_clock_must_be_a_positive_number(self):
-        for bad in (0, -1, "12", True, float("nan")):
+    def test_wall_clock_must_be_a_positive_bounded_number(self):
+        for bad in (0, -1, "12", True, float("nan"), float("inf"), 10**9):
             self.rejects(record(wall_clock_s=bad), "wall_clock_s")
+
+    def test_tokens_cost_and_run_are_bounded(self):
+        self.rejects(record(tokens={"input": 10**400, "output": 1}), "tokens")
+        self.rejects(record(tokens={"input": 1, "output": benchmark.MAX_TOKENS + 1}), "tokens")
+        self.assertEqual(parse(record(tokens={"input": benchmark.MAX_TOKENS, "output": 0}))["tokens"]["output"], 0)
+        self.rejects(record(cost_usd=float("inf")), "cost_usd")
+        self.rejects(record(cost_usd=-1), "cost_usd")
+        self.rejects(record(run=benchmark.MAX_RUN + 1), "run")
+
+    def test_the_date_must_be_a_real_calendar_date(self):
+        for bad in ("2026-02-30", "2026-13-01", "2026-00-10", "2026-1-01", "20261101", "2026-11-31"):
+            self.rejects(record(date=bad), "date")
+        self.assertEqual(parse(record(date="2028-02-29"))["date"], "2028-02-29")
+
+    def test_commit_is_40_hex_or_an_abbreviation_that_resolves(self):
+        self.rejects(record(commit="abcdef1"), "abbreviated")  # no clone given
+        self.rejects(record(commit="xyz"), "commit")
+        self.rejects(record(commit="A" * 40), "commit")
+        self.rejects(record(commit="a" * 41), "commit")
+        self.assertEqual(parse(record(commit="0123456789abcdef0123456789abcdef01234567"))["run"], 1)
+
+    def test_control_and_invisible_characters_are_rejected_in_text_fields(self):
+        for ch in ("\x1b[31m", "\n", "\x00", "​", "‮", "\x7f", " "):
+            for key in ("client", "client_version", "approval_ref", "notes"):
+                self.rejects(record(**{key: "ok" + ch + "ok"}), key)
+            self.rejects(record(tools_enabled=["read" + ch]), "tools_enabled")
+            self.rejects(record(findings=[{"class": "dead-code", "path": "a" + ch, "evidence": "e"}]), "control")
+        self.rejects(record(refusals=[{"kind": "refusal", "note": "x\x1b"}]), "refusal")
+        self.rejects(record(model="gemma4:12b", quantization="q4\x1b", context=8192), "quantization")
+
+    def test_evidence_may_hold_line_breaks_and_tabs_but_no_other_control(self):
+        ok = record(findings=[{"class": "dead-code", "path": "a.py", "evidence": "line one\n\tline two\r\n"}])
+        self.assertEqual(len(parse(ok)["findings"]), 1)
+        self.rejects(record(findings=[{"class": "dead-code", "path": "a.py", "evidence": "x\x1b[2Jy"}]), "control")
 
     def test_local_models_carry_quantization_and_context(self):
         self.rejects(record(model="gemma4:12b"), "quantization")
         ok = record(model="gemma4:12b", quantization="q4_K_M", context=8192)
         self.assertEqual(parse(ok)["context"], 8192)
         self.rejects(record(model="gemma4:12b", quantization="q4_K_M", context=0), "context")
+        self.rejects(record(model="gemma4:12b", quantization="q4_K_M", context=benchmark.MAX_CONTEXT + 1), "context")
         self.rejects(record(quantization="q4_K_M", context=8192), "only local")
 
     def test_refusals_are_counted_and_must_match_the_outcome(self):
@@ -237,10 +438,22 @@ class ResultRecords(unittest.TestCase):
         self.rejects(record(findings=[{"class": "x", "path": "p", "evidence": "e", "extra": 1}]), "findings")
         self.rejects(record(findings=[{"class": "input-validation", "path": "p", "evidence": "e" * 3000}]), "evidence")
 
+    def test_at_most_max_findings_per_record(self):
+        one = {"class": "dead-code", "path": "p", "evidence": "e"}
+        self.assertEqual(len(parse(record(findings=[one] * 50))["findings"]), 50)
+        self.rejects(record(findings=[one] * 51), "findings")
+
     def test_malformed_json_and_not_an_object(self):
         for line in ("{", "[]", '"x"', "1"):
             with self.assertRaises(ValueError):
                 benchmark.parse_result(line, 1, corpus())
+
+    def test_a_duplicate_json_key_is_rejected_not_last_wins(self):
+        line = json.dumps(record()).replace('"run": 1', '"run": 1, "run": 2')
+        self.assertIn('"run": 2', line)
+        with self.assertRaises(ValueError) as cm:
+            benchmark.parse_result(line, 1, corpus())
+        self.assertIn("duplicate", str(cm.exception))
 
     def test_duplicate_run_is_rejected(self):
         line = json.dumps(record())
@@ -254,25 +467,43 @@ class ResultRecords(unittest.TestCase):
             with self.assertRaises(ValueError):
                 benchmark.load_results(p, corpus())
 
+    def test_a_duplicate_key_in_the_corpus_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "corpus.json"
+            p.write_text('{"version": 1, "version": 1, "tasks": [], "dropped": []}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                benchmark.load_corpus(p)
+
 
 class Scoring(unittest.TestCase):
     def setUp(self):
         self.c = corpus(
             task(
                 findings=[
-                    finding("f1", "input-validation", 1, ("src/a.py",), ("unchecked",)),
-                    finding("f2", "ownership-trust", 2, ("src/b.py",), ("forged",)),
+                    finding("f1", "input-validation", 1, ("src/a.py",), ("unchecked", "value"), ["unchecked value"]),
+                    pre_existing(
+                        "f2",
+                        cls="ownership-trust",
+                        rnd=2,
+                        paths=("src/b.py",),
+                        evidence=("forged", "marker"),
+                        quotes=["forged marker"],
+                    ),
                 ]
             ),
-            task("t2", roles=("reviewer",), findings=[finding("g1", "dead-code", 1, ("src/c.py",), ("dead",))]),
+            task(
+                "t2",
+                roles=("reviewer",),
+                findings=[finding("g1", "dead-code", 1, ("src/c.py",), ("dead", "code"), ["dead code"])],
+            ),
         )
 
     def test_metrics_for_one_record(self):
         rec = parse(
             record(
                 findings=[
-                    {"class": "input-validation", "path": "src/a.py", "evidence": "unchecked"},
-                    {"class": "dead-code", "path": "src/a.py", "evidence": "dead"},
+                    {"class": "input-validation", "path": "src/a.py", "evidence": "unchecked value"},
+                    {"class": "dead-code", "path": "src/a.py", "evidence": "dead code"},
                 ]
             ),
             self.c,
@@ -280,16 +511,18 @@ class Scoring(unittest.TestCase):
         m = benchmark.score_record(rec, self.c)
         self.assertEqual((m["expected"], m["matched"], m["false"], m["reported"]), (2, 1, 1, 2))
         self.assertEqual((m["rounds_avoided"], m["rounds_total"]), (1, 2))
+        self.assertEqual(m["by_scope"]["in_diff"], [1, 1])
+        self.assertEqual(m["by_scope"]["pre_existing"], [1, 0])
 
-    def test_table_for_synthetic_records(self):
-        recs = [
+    def recs(self):
+        return [
             parse(record(), self.c),
             parse(
                 record(
                     task="t2",
                     wall_clock_s=7.5,
                     tokens={"input": 500, "output": 100},
-                    findings=[{"class": "dead-code", "path": "src/c.py", "evidence": "is dead"}],
+                    findings=[{"class": "dead-code", "path": "src/c.py", "evidence": "this dead code is unused"}],
                 ),
                 self.c,
             ),
@@ -303,26 +536,55 @@ class Scoring(unittest.TestCase):
                 self.c,
             ),
         ]
+
+    def test_table_for_synthetic_records_with_recall_per_scope(self):
+        recs = self.recs()
         table = benchmark.summarize(recs, self.c)
-        self.assertIn("| Role | Model | Tasks | Recall % | Precision % | False findings |", table)
         self.assertIn(
-            "| reviewer | claude-haiku-5-5 | 1 of 2 | 0.0 | n/a | 0 | 0 of 2 | 12.5 | 1000 | 200 | 1 |", table
+            "| Role | Model | Client | Tasks | Recall % | In-diff recall % | Pre-existing recall % | Precision % |",
+            table,
         )
         self.assertIn(
-            "| reviewer | claude-sonnet-5-5 | 2 of 2 | 66.7 | 100.0 | 0 | 2 of 3 | 10.0 | 1500 | 300 | 0 |", table
+            "| reviewer | claude-haiku-5-5 | claude-code 2.1.0 | 1 of 2 | 0.0 | 0.0 | 0.0 | n/a | 0 | 0 of 2 "
+            "| 12.5 | 1000 | 200 | 1 |",
+            table,
+        )
+        self.assertIn(
+            "| reviewer | claude-sonnet-5-5 | claude-code 2.1.0 | 2 of 2 | 66.7 | 100.0 | 0.0 | 100.0 | 0 | 2 of 3 "
+            "| 10.0 | 1500 | 300 | 0 |",
+            table,
         )
         self.assertEqual(table, benchmark.summarize(list(reversed(recs)), self.c))
+
+    def test_precision_is_matched_over_matched_plus_false(self):
+        rec = parse(
+            record(
+                findings=[
+                    {"class": "input-validation", "path": "src/a.py", "evidence": "the unchecked value"},
+                    {"class": "dead-code", "path": "src/a.py", "evidence": "nothing"},
+                    {"class": "dead-code", "path": "src/b.py", "evidence": "nothing"},
+                ]
+            ),
+            self.c,
+        )
+        row = [ln for ln in benchmark.summarize([rec], self.c).splitlines() if "claude-sonnet" in ln][0]
+        cells = [x.strip() for x in row.strip("|").split("|")]
+        self.assertEqual((cells[4], cells[7], cells[8]), ("50.0", "33.3", "2"))
+
+    def test_different_client_versions_are_different_rows(self):
+        a = parse(record(), self.c)
+        b = parse(record(client_version="2.2.0"), self.c)
+        lines = [ln for ln in benchmark.summarize([a, b], self.c).splitlines() if "claude-sonnet" in ln]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(any("claude-code 2.1.0" in ln for ln in lines))
+        self.assertTrue(any("claude-code 2.2.0" in ln for ln in lines))
 
     def test_cli_prints_table_fails_on_bad_record_and_changes_nothing(self):
         routing = ROOT / "policies" / "model-routing.md"
         before = hashlib.sha256(routing.read_bytes()).hexdigest()
         real = benchmark.load_corpus()
         first = real["tasks"][0]
-        rec = record(
-            task=first["id"],
-            role=first["roles"][0],
-            findings=[],
-        )
+        rec = record(task=first["id"], role=first["roles"][0], findings=[])
         with tempfile.TemporaryDirectory() as d:
             good = Path(d) / "good.jsonl"
             good.write_text(json.dumps(rec) + "\n", encoding="utf-8")
@@ -350,55 +612,97 @@ class CorpusStructure(unittest.TestCase):
             fn(c)
             return self.errors(c)
 
+        def f0(c):
+            return c["tasks"][0]["findings"][0]
+
         cases = {
             "duplicate task id": lambda c: c["tasks"].append(copy.deepcopy(c["tasks"][0])),
-            "duplicate finding id": lambda c: c["tasks"][0]["findings"].append(
-                copy.deepcopy(c["tasks"][0]["findings"][0])
-            ),
-            "unknown class": lambda c: c["tasks"][0]["findings"][0].update({"class": "vibes"}),
-            "bad regex": lambda c: c["tasks"][0]["findings"][0].update({"evidence_any": ["("]}),
-            "no evidence": lambda c: c["tasks"][0]["findings"][0].update({"evidence_any": []}),
+            "duplicate finding id": lambda c: c["tasks"][0]["findings"].append(copy.deepcopy(f0(c))),
+            "unknown class": lambda c: f0(c).update({"class": "vibes"}),
+            "bad regex": lambda c: f0(c).update({"evidence_any": ["(", "x"]}),
+            "no evidence": lambda c: f0(c).update({"evidence_any": []}),
+            "one pattern and no evidence_min": lambda c: f0(c).update({"evidence_any": ["unchecked"]}),
+            "evidence_min too big": lambda c: f0(c).update({"evidence_min": 3}),
+            "evidence_min zero": lambda c: f0(c).update({"evidence_min": 0}),
             "unknown role": lambda c: c["tasks"][0].update({"roles": ["implementer"]}),
             "no findings": lambda c: c["tasks"][0].update({"findings": []}),
             "bad sha": lambda c: c["tasks"][0].update({"base": "xyz"}),
             "bad digest": lambda c: c["tasks"][0].update({"diff_sha256": "abc"}),
-            "bad pattern regex": lambda c: c["tasks"][0]["findings"][0].update(
+            "bad pattern regex": lambda c: f0(c).update(
                 {"repro": {"kind": "pattern", "path": "a", "regex": "(", "present": True}}
             ),
-            "unknown repro": lambda c: c["tasks"][0]["findings"][0].update({"repro": {"kind": "magic"}}),
-            "missing key": lambda c: c["tasks"][0]["findings"][0].pop("summary"),
-            "private path": lambda c: c["tasks"][0]["findings"][0].update({"summary": "see /ho" + "me/someone/x"}),
+            "unknown repro": lambda c: f0(c).update({"repro": {"kind": "magic"}}),
+            "missing key": lambda c: f0(c).pop("summary"),
+            "private path": lambda c: f0(c).update({"summary": "see /ho" + "me/someone/x"}),
             "dropped without reason": lambda c: c["dropped"].append({"id": "d1"}),
+            "unknown scope": lambda c: f0(c).update({"scope": "somewhere"}),
+            "in_diff without touched": lambda c: f0(c).pop("touched"),
+            "in_diff with a bad touched regex": lambda c: f0(c).update({"touched": ["("]}),
+            "in_diff but observed at the base": lambda c: f0(c).update({"at_base": "observed"}),
+            "pre_existing with touched": lambda c: f0(c).update({"scope": "pre_existing"}),
+            "no quotes": lambda c: f0(c).pop("quotes"),
+            "empty quotes": lambda c: f0(c).update({"quotes": []}),
+            "quote too short": lambda c: f0(c).update({"quotes": ["x"]}),
+            "quote too long": lambda c: f0(c).update({"quotes": ["x" * 300]}),
+            "absence repro without proxy note": lambda c: f0(c).update(
+                {"repro": {"kind": "pattern", "path": "a", "regex": "x", "present": False}}
+            ),
+            "proxy note on a direct repro": lambda c: f0(c).update({"proxy": "why"}),
+            "bad mutation repro": lambda c: f0(c).update(
+                {"repro": {"kind": "mutation", "path": "a", "old": "x", "new": "x", "tests_file": "t.py", "k": None}}
+            ),
         }
         for name, fn in cases.items():
             self.assertTrue(mutate(fn), name)
 
-    def test_brief_task_needs_input_and_absent_from_input_patterns(self):
+    def test_proxy_and_mutation_repros_are_accepted_when_well_formed(self):
+        c = corpus()
+        f = c["tasks"][0]["findings"][0]
+        f["repro"] = {"kind": "pattern", "path": "a", "regex": "x", "present": False}
+        f["proxy"] = "stands in for the behavior"
+        self.assertEqual(self.errors(c), [])
+        del f["proxy"]
+        f["repro"] = {"kind": "mutation", "path": "a", "old": "x", "new": "y", "tests_file": "t.py", "k": None}
+        self.assertEqual(self.errors(c), [])
+
+    def test_a_pre_existing_finding_needs_quotes_but_no_touched_line(self):
+        c = corpus(task(findings=[pre_existing("f1")]))
+        self.assertEqual(self.errors(c), [])
+
+    def brief_corpus(self):
         brief = task(
             "b1",
             roles=("brief-writer",),
             kind="brief",
-            findings=[
-                finding(
-                    "g1",
-                    paths=("brief",),
-                    repro={"kind": "ref", "finding": "t1/f1"},
-                    absent_from_input=["race"],
-                )
-            ],
+            findings=[brief_finding()],
             input_file="inputs/x.md",
             input_sha256="d" * 64,
         )
-        brief.pop("diff_sha256")
-        brief.pop("base")
-        brief.pop("head")
-        c = corpus(task(), brief)
+        for k in ("diff_sha256", "base", "head"):
+            brief.pop(k)
+        return corpus(task(), brief)
+
+    def test_brief_task_needs_input_and_absent_from_input_patterns(self):
+        c = self.brief_corpus()
         self.assertEqual(self.errors(c), [])
         broken = copy.deepcopy(c)
         broken["tasks"][1]["findings"][0]["repro"] = {"kind": "ref", "finding": "t1/zzz"}
         self.assertTrue(self.errors(broken))
         broken = copy.deepcopy(c)
         del broken["tasks"][1]["input_file"]
+        self.assertTrue(self.errors(broken))
+        broken = copy.deepcopy(c)
+        del broken["tasks"][1]["findings"][0]["absent_from_input"]
+        self.assertTrue(self.errors(broken))
+
+    def test_a_brief_finding_is_about_the_brief_and_has_the_brief_scope(self):
+        c = self.brief_corpus()
+        for key, value in (("paths", ["scripts/install.py"]), ("scope", "in_diff")):
+            broken = copy.deepcopy(c)
+            broken["tasks"][1]["findings"][0][key] = value
+            self.assertTrue(self.errors(broken), key)
+        broken = copy.deepcopy(c)
+        broken["tasks"][1]["findings"][0]["quotes"] = ["not for a brief"]
         self.assertTrue(self.errors(broken))
 
 
@@ -414,6 +718,21 @@ class RealCorpus(unittest.TestCase):
         self.assertGreaterEqual(len(self.c["tasks"]), 6)
         roles = {r for t in self.c["tasks"] for r in t["roles"]}
         self.assertTrue({"reviewer", "adversarial-reviewer", "brief-writer"} <= roles)
+
+    def test_both_scopes_are_present_and_labelled(self):
+        scopes = {f["scope"] for t in self.c["tasks"] for f in t["findings"]}
+        self.assertEqual(scopes, {"in_diff", "pre_existing", "brief"})
+        for t in self.c["tasks"]:
+            for f in t["findings"]:
+                if f["at_base"] == "observed":
+                    self.assertEqual(f["scope"], "pre_existing", f["id"])
+
+    def test_every_absence_only_repro_says_it_is_a_proxy(self):
+        for t in self.c["tasks"]:
+            for f in t["findings"]:
+                r = f["repro"]
+                if r["kind"] == "pattern" and r["present"] is False:
+                    self.assertTrue(f.get("proxy"), f["id"])
 
     def test_dropped_seeds_are_recorded_with_a_reason(self):
         for d in self.c["dropped"]:
@@ -450,9 +769,18 @@ class GitBacked(unittest.TestCase):
         self.repo.mkdir()
         git(self.repo, "init", "-q", "-b", "main")
         (self.repo / "src").mkdir()
+        self.long = [f"line {i}\n" if i % 4 else "\n" for i in range(1, 41)]
         self.shas = {}
-        for name, text in (("base", "ok\n"), ("defect", "unchecked value\n"), ("fixed", "checked value\n")):
+        for name, text, tweak in (
+            ("base", "ok\n", {}),
+            ("defect", "unchecked value\n", {10: "changed ten\n", 14: "changed fourteen\n", 30: "changed thirty\n"}),
+            ("fixed", "checked value\n", {}),
+        ):
             (self.repo / "src" / "a.py").write_text(text, encoding="utf-8")
+            lines = list(self.long)
+            for n, new in tweak.items():
+                lines[n - 1] = new
+            (self.repo / "src" / "long.txt").write_text("".join(lines), encoding="utf-8")
             git(self.repo, "add", "-A")
             git(self.repo, "commit", "-q", "-m", name)
             self.shas[name] = git(self.repo, "rev-parse", "HEAD").strip()
@@ -473,8 +801,8 @@ class GitBacked(unittest.TestCase):
     def pattern_finding(self, **kw):
         return finding(fixed=self.shas["fixed"], **kw)
 
-    def run_reproduce(self, c):
-        return benchmark.reproduce(self.repo, c, probes_dir=self.probes)
+    def run_reproduce(self, c, **kw):
+        return benchmark.reproduce(self.repo, c, probes_dir=self.probes, **kw)
 
     def test_check_commits_ok_missing_and_no_clone(self):
         c = self.corpus_for(self.pattern_finding())
@@ -484,12 +812,91 @@ class GitBacked(unittest.TestCase):
         status, errs = benchmark.check_commits(self.repo, bad)
         self.assertEqual(status, "fail")
         self.assertTrue(any("f" * 12 in e for e in errs))
-        bad = copy.deepcopy(c)
-        bad["tasks"][0]["diff_sha256"] = "0" * 64
-        self.assertEqual(benchmark.check_commits(self.repo, bad)[0], "fail")
         with tempfile.TemporaryDirectory() as empty:
             status, errs = benchmark.check_commits(Path(empty), c)
             self.assertEqual((status, errs), ("not-run", []))
+
+    def test_a_digest_mismatch_names_both_possible_causes(self):
+        c = self.corpus_for(self.pattern_finding())
+        c["tasks"][0]["diff_sha256"] = "0" * 64
+        status, errs = benchmark.check_commits(self.repo, c)
+        self.assertEqual(status, "fail")
+        self.assertIn("rewritten", errs[0])
+        self.assertIn("configuration", errs[0])
+        self.assertIn("version", errs[0])
+
+    def test_the_digest_does_not_depend_on_git_configuration(self):
+        before = benchmark.diff_digest(self.repo, self.shas["base"], self.shas["defect"])
+        options = {
+            "diff.algorithm": "histogram",
+            "diff.context": "10",
+            "diff.interHunkContext": "5",
+            "diff.noprefix": "true",
+            "diff.mnemonicPrefix": "true",
+            "diff.suppressBlankEmpty": "true",
+            "diff.renames": "copies",
+            "diff.indentHeuristic": "false",
+            "core.quotePath": "false",
+        }
+        # a plain diff with these options differs from the pinned one (the options are not inert in this repository)
+        for k, v in options.items():
+            git(self.repo, "config", k, v)
+        plain = subprocess.run(
+            ["git", "-C", str(self.repo), "diff", self.shas["base"], self.shas["defect"]],
+            capture_output=True,
+            env={**os.environ, **GIT_ENV},
+        ).stdout
+        self.assertNotEqual(hashlib.sha256(plain).hexdigest(), before)
+        glob = Path(self._tmp.name) / "global.cfg"
+        glob.write_text(
+            "[diff]\n\tcontext = 12\n\talgorithm = patience\n\tsuppressBlankEmpty = true\n", encoding="utf-8"
+        )
+        saved = os.environ.get("GIT_CONFIG_GLOBAL")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(glob)
+        try:
+            after = benchmark.diff_digest(self.repo, self.shas["base"], self.shas["defect"])
+        finally:
+            if saved is None:
+                del os.environ["GIT_CONFIG_GLOBAL"]
+            else:
+                os.environ["GIT_CONFIG_GLOBAL"] = saved
+        self.assertEqual(after, before)
+        self.assertEqual(benchmark.check_commits(self.repo, self.corpus_for(self.pattern_finding()))[0], "ok")
+
+    def test_git_environment_variables_of_the_caller_do_not_leak_in(self):
+        env = benchmark._git_env()
+        for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+            self.assertEqual(env[k], os.devnull)
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        saved = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = "/nonexistent-dir-for-the-test"
+        try:
+            self.assertNotIn("GIT_DIR", benchmark._git_env())
+            self.assertEqual(benchmark.check_commits(self.repo, self.corpus_for(self.pattern_finding()))[0], "ok")
+        finally:
+            if saved is None:
+                del os.environ["GIT_DIR"]
+            else:
+                os.environ["GIT_DIR"] = saved
+
+    def test_scope_labels_are_checked_against_the_diff(self):
+        ok = self.corpus_for(self.pattern_finding())
+        self.assertEqual(benchmark.check_commits(self.repo, ok)[0], "ok")
+        untouched = self.corpus_for(self.pattern_finding(touched=["never appears"]))
+        status, errs = benchmark.check_commits(self.repo, untouched)
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("in_diff" in e for e in errs))
+        # a finding whose quote is a line the diff adds cannot be pre_existing unless it was already there at the base
+        added = pre_existing("f1", quotes=["unchecked value"], fixed=self.shas["fixed"])
+        status, errs = benchmark.check_commits(self.repo, self.corpus_for(added))
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("pre_existing" in e for e in errs))
+        already = pre_existing("f1", quotes=["unchecked value"], fixed=self.shas["fixed"], at_base="observed")
+        self.assertEqual(benchmark.check_commits(self.repo, self.corpus_for(already))[0], "ok")
+        absent = self.corpus_for(self.pattern_finding(quotes=["a line that is not in the code"]))
+        status, errs = benchmark.check_commits(self.repo, absent)
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("quote not found" in e for e in errs))
 
     def test_a_shallow_clone_is_not_a_clone_for_the_check(self):
         shallow = Path(self._tmp.name) / "shallow"
@@ -502,12 +909,26 @@ class GitBacked(unittest.TestCase):
         c = self.corpus_for(self.pattern_finding())
         self.assertEqual(benchmark.check_commits(shallow, c), ("not-run", []))
 
+    def test_an_abbreviated_commit_in_a_record_must_resolve_in_a_full_clone(self):
+        short = self.shas["defect"][:10]
+        self.assertEqual(parse(record(commit=short), repo=self.repo)["commit"], short)
+        with self.assertRaises(ValueError):
+            parse(record(commit="0" * 10), repo=self.repo)
+        shallow = Path(self._tmp.name) / "shallow2"
+        subprocess.run(
+            ["git", "clone", "-q", "--depth", "1", "file://" + str(self.repo), str(shallow)],
+            check=True,
+            capture_output=True,
+            env={**os.environ, **GIT_ENV},
+        )
+        with self.assertRaises(ValueError):
+            parse(record(commit=short), repo=shallow)
+
     def test_check_commits_needs_no_network(self):
         c = self.corpus_for(self.pattern_finding())
-        env = {**os.environ, "GIT_ALLOW_PROTOCOL": "none"}
         saved = os.environ.copy()
         try:
-            os.environ.update(env)
+            os.environ["GIT_ALLOW_PROTOCOL"] = "none"
             self.assertEqual(benchmark.check_commits(self.repo, c)[0], "ok")
         finally:
             os.environ.clear()
@@ -529,6 +950,14 @@ class GitBacked(unittest.TestCase):
         )
         self.assertFalse(self.run_reproduce(c)[0]["ok"])
 
+    def test_an_absence_repro_observes_the_defect_when_the_pattern_is_missing(self):
+        # defect: "unchecked value" has no line starting "checked"; the fix has one. present=False is the defect.
+        repro = {"kind": "pattern", "path": "src/a.py", "regex": "^checked", "present": False}
+        c = self.corpus_for(self.pattern_finding(repro=repro, proxy="stands in", at_base="n/a"))
+        res = self.run_reproduce(c)
+        self.assertTrue(res[0]["ok"], res)
+        self.assertIn("proxy: stands in", res[0]["notes"])
+
     def test_base_expectation_is_enforced(self):
         c = self.corpus_for(self.pattern_finding(at_base="observed"))
         self.assertFalse(self.run_reproduce(c)[0]["ok"])
@@ -546,6 +975,28 @@ class GitBacked(unittest.TestCase):
     def test_unfixed_finding_needs_only_the_defect_state(self):
         c = self.corpus_for(finding())
         self.assertTrue(self.run_reproduce(c)[0]["ok"])
+
+    def test_brief_finding_must_be_absent_from_the_recorded_input(self):
+        with tempfile.TemporaryDirectory() as bench:
+            (Path(bench) / "in.md").write_text("The brief says nothing about the topic.\n", encoding="utf-8")
+            c = self.corpus_for(finding())
+            b = task(
+                "b1",
+                roles=("brief-writer",),
+                kind="brief",
+                findings=[brief_finding(absent_from_input=["topic"])],
+                input_file="in.md",
+                input_sha256="d" * 64,
+            )
+            for k in ("diff_sha256", "base", "head"):
+                b.pop(k)
+            c["tasks"].append(b)
+            res = {r["finding"]: r for r in self.run_reproduce(c, bench_dir=Path(bench))}
+            self.assertFalse(res["g1"]["ok"])  # "topic" is in the input
+            self.assertIn("already covers", res["g1"]["notes"])
+            b["findings"][0]["absent_from_input"] = ["unrelated words"]
+            res = {r["finding"]: r for r in self.run_reproduce(c, bench_dir=Path(bench))}
+            self.assertTrue(res["g1"]["ok"], res)
 
     def test_cli_check_and_reproduce_exit_codes(self):
         c = self.corpus_for(self.pattern_finding())
@@ -566,6 +1017,126 @@ class GitBacked(unittest.TestCase):
         self.assertEqual(a, benchmark.diff_digest(self.repo, self.shas["base"], self.shas["defect"]))
         self.assertNotEqual(a, benchmark.diff_digest(self.repo, self.shas["base"], self.shas["fixed"]))
         self.assertRegex(a, re.compile(r"[0-9a-f]{64}"))
+
+
+class MutationRepro(unittest.TestCase):
+    """A mutation repro: the defect is a survivor, a change the tests do not notice."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "repo"
+        (self.repo / "tests").mkdir(parents=True)
+        (self.repo / "src").mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        self.shas = {}
+        states = (
+            (
+                "base",
+                "VALUE = 1\n",
+                "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_ok(self):\n        self.assertTrue(True)\n",
+            ),
+            (
+                "defect",
+                "VALUE = 1\n",
+                "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_ok(self):\n        self.assertTrue(True)\n",
+            ),
+            (
+                "fixed",
+                "VALUE = 1\n",
+                "import sys\nimport unittest\nfrom pathlib import Path\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        src = Path(__file__).parents[1] / 'src' / 'a.py'\n"
+                "        self.assertIn('VALUE = 1', src.read_text())\n",
+            ),
+        )
+        for name, src, test in states:
+            (self.repo / "src" / "a.py").write_text(src + f"# {name}\n", encoding="utf-8")
+            (self.repo / "tests" / "test_a.py").write_text(test, encoding="utf-8")
+            git(self.repo, "add", "-A")
+            git(self.repo, "commit", "-q", "-m", name)
+            self.shas[name] = git(self.repo, "rev-parse", "HEAD").strip()
+
+    def corpus_for(self, repro, fixed=True):
+        t = task(
+            base=self.shas["base"],
+            head=self.shas["defect"],
+            diff_sha256=benchmark.diff_digest(self.repo, self.shas["base"], self.shas["defect"]),
+            findings=[finding(repro=repro, at_base="n/a", fixed=self.shas["fixed"] if fixed else None)],
+        )
+        return corpus(t)
+
+    def repro(self, **kw):
+        r = {
+            "kind": "mutation",
+            "path": "src/a.py",
+            "old": "VALUE = 1",
+            "new": "VALUE = 2",
+            "tests_file": "test_a.py",
+            "k": None,
+        }
+        r.update(kw)
+        return r
+
+    def test_a_surviving_mutation_is_the_defect_and_a_killed_one_is_the_fix(self):
+        res = benchmark.reproduce(self.repo, self.corpus_for(self.repro()))
+        self.assertTrue(res[0]["ok"], res)
+
+    def test_a_mutation_that_the_tests_catch_at_the_head_is_not_a_reproduction(self):
+        c = self.corpus_for(self.repro(), fixed=False)
+        c["tasks"][0]["head"] = self.shas["fixed"]
+        c["tasks"][0]["diff_sha256"] = benchmark.diff_digest(self.repo, self.shas["base"], self.shas["fixed"])
+        self.assertFalse(benchmark.reproduce(self.repo, c)[0]["ok"])
+
+    def test_code_that_is_no_longer_there_means_the_defect_is_gone(self):
+        gone = self.repro(old="VALUE = 99", new="VALUE = 98")
+        res = benchmark.reproduce(self.repo, self.corpus_for(gone, fixed=False))  # only the head is checked
+        self.assertFalse(res[0]["ok"])
+
+    def test_red_tests_on_the_unmutated_tree_is_an_error_not_a_pass(self):
+        (self.repo / "tests" / "test_a.py").write_text(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.fail('red')\n",
+            encoding="utf-8",
+        )
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "red")
+        red = git(self.repo, "rev-parse", "HEAD").strip()
+        c = self.corpus_for(self.repro(), fixed=False)
+        c["tasks"][0]["head"] = red
+        c["tasks"][0]["diff_sha256"] = benchmark.diff_digest(self.repo, self.shas["base"], red)
+        res = benchmark.reproduce(self.repo, c)
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("not green", res[0]["notes"])
+
+
+class Extraction(unittest.TestCase):
+    def archive(self, name):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            tf.addfile(info, io.BytesIO(b"x"))
+        return buf.getvalue()
+
+    def test_members_that_escape_the_destination_are_refused(self):
+        for name in ("../evil", "a/../../evil", "/abs/evil"):
+            with tarfile.open(fileobj=io.BytesIO(self.archive(name))) as tf:
+                with self.assertRaises(RuntimeError):
+                    list(benchmark._safe_members(tf))
+        with tarfile.open(fileobj=io.BytesIO(self.archive("ok/file.txt"))) as tf:
+            self.assertEqual([m.name for m in benchmark._safe_members(tf)], ["ok/file.txt"])
+
+    def test_links_and_devices_are_not_extracted(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            link = tarfile.TarInfo("link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            tf.addfile(link)
+        with tarfile.open(fileobj=io.BytesIO(buf.getvalue())) as tf:
+            self.assertEqual(list(benchmark._safe_members(tf)), [])
 
 
 if __name__ == "__main__":
