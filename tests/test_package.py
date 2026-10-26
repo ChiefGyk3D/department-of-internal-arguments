@@ -1,9 +1,12 @@
+import ast
+import io
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 import unittest
 from pathlib import Path
 
@@ -545,6 +548,29 @@ class LocalLlmRule(unittest.TestCase):
 
     SCOPE = "model not recorded; measured 2026-10-07; not a finding about local models in general"
 
+    FIGURES = ("85%", "46%", "55 to 215 seconds", "436 evaluation tokens", "8192 but not 16384")
+
+    def unscoped(self, text):
+        """Measured figures whose own line lacks the scope phrase (a missing or repeated figure counts as unscoped)."""
+        bad = []
+        for key in self.FIGURES:
+            lines = [ln for ln in text.splitlines() if key in ln]
+            if not lines or any(self.SCOPE not in ln for ln in lines):
+                bad.append(key)
+        return bad
+
+    def test_every_measured_figure_carries_the_scope_on_its_own_line(self):
+        self.assertEqual(self.unscoped(self.pack()), [])
+
+    def test_figure_scope_check_bites(self):
+        text = self.pack()
+        self.assertEqual(self.unscoped(text.replace(self.SCOPE, "")), list(self.FIGURES))
+        for key in self.FIGURES:
+            line = next(ln for ln in text.splitlines() if key in ln)
+            one = text.replace(line, line.replace(self.SCOPE, "unscoped"))
+            self.assertNotEqual(one, text, key)
+            self.assertIn(key, self.unscoped(one))
+
     def test_pack_makes_no_class_level_claims_without_scope(self):
         text = self.pack()
         self.assertGreaterEqual(text.count(self.SCOPE), 4)
@@ -602,6 +628,47 @@ class AmericanSpelling(unittest.TestCase):
         ]
         self.assertEqual(hits, [])
 
+    @staticmethod
+    def code_prose(source):
+        """(line, text) for every comment and docstring in Python source; identifiers and string data are skipped."""
+        found = []
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT:
+                found.append((tok.start[0], tok.string))
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = node.body
+                first = body[0] if body else None
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    found.append((first.lineno, first.value.value))
+        return found
+
+    def code_hits(self, source):
+        return [(line, m.group(0)) for line, text in self.code_prose(source) for m in self.BRITISH.finditer(text)]
+
+    def test_no_british_spellings_in_code_docstrings_and_comments(self):
+        files = sorted((ROOT / "scripts").glob("*.py")) + sorted((ROOT / "tests").glob("*.py"))
+        self.assertGreater(len(files), 10)
+        hits = [f"{f.relative_to(ROOT)}:{line}: {word}" for f in files for line, word in self.code_hits(f.read_text())]
+        self.assertEqual(hits, [])
+
+    def test_code_guard_bites_on_comments_and_docstrings_but_not_identifiers(self):
+        src = (
+            '"""Summarise the log."""\n'
+            "def summarise(rows):\n"
+            '    """Defence in depth."""\n'
+            "    x = 'colour'  # the neighbour\n"
+            "class Summariser:\n"
+            "    pass\n"
+        )
+        self.assertEqual(sorted(w.lower() for _, w in self.code_hits(src)), ["defence", "neighbour", "summarise"])
+        clean = '"""Summarize."""\ndef summarise(rows):\n    """Defense."""\n    return "colour"  # color\n'
+        self.assertEqual(self.code_hits(clean), [])
+
     def test_guard_bites(self):
         for word in ("sanitised", "Quantisation", "Licence", "neighbour", "summariser", "defence", "catalogues"):
             self.assertIsNotNone(self.BRITISH.search(f"a {word} here"), word)
@@ -652,6 +719,54 @@ class Summariser(unittest.TestCase):
             for row in bad_rows:
                 p.write_text(json.dumps(row) + "\n")
                 with self.assertRaises(ValueError, msg=row):
+                    load(p)
+
+    def test_real_ollama_tags_are_accepted_and_nonsense_is_not(self):
+        good = json.loads((ROOT / "evals/example-log.jsonl").read_text().splitlines()[0])
+        accepted = [
+            "gemma4:12b",
+            "gemma3n:e4b",
+            "mixtral:8x7b",
+            "llama3.2:latest",
+            "hf.co/org/m:7b",
+            "qwen3.5:4b",
+            "gemma3:270m",
+            "llama3.2:1b-instruct-q4_K_M",
+            "qwen3:0.6b",
+        ]
+        rejected = [
+            "a:1b",
+            "1:1b",
+            "gemma4:",
+            ":12b",
+            "gemma4:latestx",
+            "gemma4:Latest ",
+            "gemma4:q4_K_M",
+            "gemma4:instruct",
+            "ollama:latest",
+            "inherit:latest",
+            "hf.co/org/m",
+            "hf.co//m:7b",
+            "gemma4:12b\u200b",
+            "gemma4\u200b:12b",
+            "gem\u043cma4:12b",  # Cyrillic em
+            "gemma4:\uff11\uff12b",  # fullwidth digits
+            "gemma4:12b\x00",
+            "gemma4:12b\r",
+            "\tgemma4:12b",
+            "gemma4:12b:12b",
+            "x" * 61 + ":12b",
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "log.jsonl"
+            for model in accepted:
+                row = {**good, "local_model": model, "local_discrepancies": 0}
+                p.write_text(json.dumps(row) + "\n")
+                self.assertEqual(load(p)[0]["local_model"], model)
+            for model in rejected:
+                row = {**good, "local_model": model, "local_discrepancies": 0}
+                p.write_text(json.dumps(row) + "\n")
+                with self.assertRaises(ValueError, msg=model):
                     load(p)
 
     def test_malformed_line_fails_the_run(self):

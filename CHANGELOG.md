@@ -9,6 +9,7 @@ Local-model output is a draft, and the report says whether and how it was checke
 - Pilot log: optional `local_model` and `local_discrepancies` fields (both or neither); `scripts/summarize_log.py` validates them and prints a "Local-model runs" row; the synthetic example log gains a local-model fixture.
 - `evals/behavioral-evals.md`: rows 24 and 25 for the new line.
 - A SAFO hook or audit check for the line is a separate SAFO issue.
+- Review follow-ups (issue #27). The pack-scope test now asserts the scope phrase on the same line as each measured figure (85%, 46%, 55 to 215 seconds, 436 evaluation tokens, the 8192 context), with a negative case. `local_model` accepts real Ollama tags (`gemma3n:e4b`, `mixtral:8x7b`, `llama3.2:latest`, `hf.co/org/m:7b`, `gemma3:270m`) and still requires a size or an explicit `latest`; one-character names, bare family names, lookalike and zero-width characters are refused (rule in `evals/log-schema.md`). The American-spelling guard now also scans comments and docstrings in `scripts/` and `tests/` (identifiers such as `summarise` are not scanned); three British words fixed.
 
 ## [0.3.1] - 2026-10-11
 

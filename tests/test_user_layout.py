@@ -369,7 +369,7 @@ class OverlayHostile(unittest.TestCase):
         return overlay_mod.load_overlay(ov)
 
     def read_direct(self, d, name):
-        """_read_file is the last line of defence after the directory scan; exercise it on its own."""
+        """_read_file is the last line of defense after the directory scan; exercise it on its own."""
         fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
         try:
             return overlay_mod._read_file(fd, name, "x")
