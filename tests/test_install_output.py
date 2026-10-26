@@ -215,5 +215,61 @@ class FilesystemIdentity(unittest.TestCase):
                 self.assertEqual(installer._check_target(d, ROOT), Path(d).absolute())
 
 
+class HostileProgName(unittest.TestCase):
+    """A prog name taken from sys.argv[0] reaches argparse's error prefix, usage line and -h output; none may carry
+    a raw control character. Only version-independent properties are asserted (no argparse wording)."""
+
+    PROGS = ("tool\x1b[31m", "tool\nFORGED: error: x", "tool\r\u202e", "tool%(prog)s%s")
+
+    def run_main(self, prog, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", [prog, *args]),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            installer.main(list(args))
+        return cm.exception.code, out.getvalue(), err.getvalue()
+
+    def assert_clean(self, text):
+        self.assertTrue(text.isascii(), repr(text))
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\r", text)
+        self.assertFalse(any(ln.startswith("FORGED") for ln in text.splitlines()), repr(text))
+
+    def test_error_prefix_and_usage_line_are_escaped(self):
+        for prog in self.PROGS:
+            with self.subTest(prog=prog):
+                code, _, err = self.run_main(prog, "--bogus")
+                self.assertEqual(code, 2)
+                self.assert_clean(err)
+                self.assertTrue(err.startswith("usage:"), repr(err))
+                prefix = installer._safe(prog) + ": error:"
+                self.assertEqual(sum(ln.startswith(prefix) for ln in err.splitlines()), 1, repr(err))
+
+    def test_help_output_is_escaped(self):
+        for prog in self.PROGS:
+            with self.subTest(prog=prog):
+                code, out, _ = self.run_main(prog, "-h")
+                self.assertEqual(code, 0)
+                self.assert_clean(out)
+
+    def test_a_plain_prog_name_is_unchanged(self):
+        code, _, err = self.run_main("install.py", "--bogus")
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("usage: install.py"), repr(err))
+        self.assertIn("install.py: error:", err)
+
+    def test_a_lone_surrogate_argument_prints_as_safe_ascii(self):
+        # argparse repr()-escapes a surrogate in a bad choice and _safe() escapes that backslash again, so the
+        # text is doubly escaped. That is accepted: readable, ASCII, one line. Only these properties are asserted.
+        with tempfile.TemporaryDirectory() as d:
+            code, _, err = self.run_main("install.py", "--target", d, "--adapter", "\ud800")
+        self.assertEqual(code, 2)
+        self.assertTrue(err.isascii(), repr(err))
+        self.assertEqual(sum(": error:" in ln for ln in err.splitlines()), 1, repr(err))
+
+
 if __name__ == "__main__":
     unittest.main()

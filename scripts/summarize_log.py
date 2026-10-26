@@ -34,24 +34,33 @@ OPTIONAL = ("notes", "local_model", "local_discrepancies")
 MAX_MODEL = 64
 MAX_LINE = 4096
 # An Ollama tag: [namespace/]name:tag, ASCII only. The tag must name a size (12b, 0.6b, 270m, e4b, 8x7b, optionally
-# followed by a quantization such as -q4_K_M) or be exactly "latest". fullmatch, so no surrounding whitespace, newline,
-# control or zero-width character gets through; [0-9] and re.ASCII keep fullwidth digits and lookalikes out.
+# followed by a quantization such as -q4_K_M), be a plain version (v1.5, as in nomic-embed-text:v1.5: a version is as
+# exact as a size) or be exactly "latest". No ".." or "." path segment, and no leading, trailing or doubled hyphen.
+# fullmatch, so no surrounding whitespace, newline, control or zero-width character gets through; [0-9] and re.ASCII
+# keep fullwidth digits and lookalikes out.
 MODEL_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+", re.ASCII)
 SIZE_RE = re.compile(r"(?:e|[0-9]+x)?[0-9]+(?:\.[0-9]+)?[bBmM]", re.ASCII)
+VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+)*", re.ASCII)
 # Words that name no model. A single-character name is also refused; nothing short of a registry can say more.
 NOT_A_MODEL = frozenset({"ollama", "local", "model", "models", "inherit", "latest", "default"})
 
 
 def valid_model(model):
-    """True for an exact Ollama tag: a plausible name plus a size tag or an explicit latest."""
+    """True for an exact Ollama tag: a plausible name plus a size tag, a plain version tag or an explicit latest."""
     if not (isinstance(model, str) and len(model) <= MAX_MODEL and MODEL_RE.fullmatch(model)):
         return False
     name, tag = model.rsplit(":", 1)
-    if len(name) < 2 or not any(c.isalpha() for c in name) or "//" in name:
+    if len(name) < 2 or not any(c.isalpha() for c in name):
         return False
-    if name.lower() in NOT_A_MODEL or name.startswith("/") or name.endswith("/"):
+    if ".." in model or "--" in model or any(seg == "." for seg in name.split("/")):
         return False
-    return tag == "latest" or any(SIZE_RE.fullmatch(part) for part in tag.split("-"))
+    if any(seg.startswith("-") or seg.endswith("-") for seg in (*name.split("/"), tag)):
+        return False
+    if name.lower() in NOT_A_MODEL:
+        return False
+    if tag == "latest" or VERSION_RE.fullmatch(tag):
+        return True
+    return any(SIZE_RE.fullmatch(part) for part in tag.split("-"))
 
 
 def parse_line(line, n):

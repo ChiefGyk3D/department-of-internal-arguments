@@ -550,16 +550,51 @@ class LocalLlmRule(unittest.TestCase):
 
     FIGURES = ("85%", "46%", "55 to 215 seconds", "436 evaluation tokens", "8192 but not 16384")
 
+    # Any line starting like this opens its own block: list markers (with or without a space), ordered markers (1. and
+    # 1)), headings, table rows, quotes, html, bold or italic lines and horizontal rules.
+    BOUNDARY = re.compile(r"\s*(?:[-*+_]|\d+[.)]|#|\||>|<)")
+    # Only these open a block that a following plain line may continue: a bullet or numbered item with a space.
+    LIST_ITEM = re.compile(r"\s*(?:[-*+] |\d+\. )")
+
+    @classmethod
+    def blocks(cls, text):
+        """Logical lines. A bullet, numbered item or plain paragraph line absorbs the plain, non-marker lines that
+        directly follow it (a hard wrap), joined by a space. Everything else is a block of its own and absorbs
+        nothing: blank lines, fences and their content, headings, table rows, quotes, html, rules, bold lines, nested
+        bullets and `1)` or `-x` lines. A plain line after any of those starts a new block, so a scope phrase can
+        never be borrowed from a line that is not part of the figure's own logical line."""
+        out, cur, fence = [], None, False
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.startswith(("```", "~~~")):
+                fence, cur = not fence, None
+                out.append(s)
+            elif fence:
+                if s:
+                    out.append(s)
+            elif not s:
+                cur = None
+            elif cls.BOUNDARY.match(ln):
+                out.append(s)
+                cur = len(out) - 1 if cls.LIST_ITEM.match(ln) else None
+            elif cur is not None:
+                out[cur] += " " + s
+            else:
+                out.append(s)
+                cur = len(out) - 1
+        return out
+
     def unscoped(self, text):
-        """Measured figures whose own line lacks the scope phrase (a missing or repeated figure counts as unscoped)."""
+        """Measured figures whose own bullet lacks the scope phrase (a missing or repeated figure counts as unscoped).
+        Wrap-tolerant: a bullet hard-wrapped onto continuation lines is tested as one logical line."""
         bad = []
         for key in self.FIGURES:
-            lines = [ln for ln in text.splitlines() if key in ln]
+            lines = [ln for ln in self.blocks(text) if key in ln]
             if not lines or any(self.SCOPE not in ln for ln in lines):
                 bad.append(key)
         return bad
 
-    def test_every_measured_figure_carries_the_scope_on_its_own_line(self):
+    def test_every_measured_figure_carries_the_scope_in_its_own_bullet(self):
         self.assertEqual(self.unscoped(self.pack()), [])
 
     def test_figure_scope_check_bites(self):
@@ -570,6 +605,53 @@ class LocalLlmRule(unittest.TestCase):
             one = text.replace(line, line.replace(self.SCOPE, "unscoped"))
             self.assertNotEqual(one, text, key)
             self.assertIn(key, self.unscoped(one))
+
+    def test_a_wrapped_scoped_bullet_passes_and_an_unscoped_one_still_fails(self):
+        head, tail = self.SCOPE.split("; measured", 1)
+        wrapped = f"- Labels were right about 85% of the time ({head};\n  measured{tail}).\n- Other note.\n"
+        scoped = f"- Labels were right about 85% of the time ({self.SCOPE}).\n"
+        only = lambda text: [k for k in self.unscoped(text) if k == "85%"]  # noqa: E731  (other figures absent here)
+        self.assertEqual(only(wrapped), [])
+        self.assertEqual(only(scoped), [])
+        # the scope sits in the NEXT bullet or paragraph, not in this one: still unscoped
+        self.assertEqual(only(f"- Labels were right about 85% of the time.\n- Other ({self.SCOPE}).\n"), ["85%"])
+        self.assertEqual(only(f"- Labels were right about 85%.\n\n  {self.SCOPE}\n"), ["85%"])
+        self.assertEqual(only("- Labels were right about 85%\n  of the time (wrapped, no scope).\n"), ["85%"])
+
+    def test_scope_on_a_line_that_is_not_part_of_the_figure_line_never_counts(self):
+        sc = self.SCOPE
+        fig = "- Labels were right about 85% of the time."
+        cases = {
+            "code fence": f"```\nLabels were right about 85%\n```\n{sc}\n",
+            "scope inside a fence": f"```\nLabels were right about 85%\n{sc}\n```\n",
+            "scope inside a tilde fence": f"~~~\nLabels were right about 85%\n{sc}\n~~~\n",
+            "tilde fence": f"~~~\nLabels were right about 85%\n~~~\n{sc}\n",
+            "heading": f"## Labels were right about 85%\n{sc}\n",
+            "horizontal rule": f"{fig}\n---\n{sc}\n",
+            "underscore rule": f"{fig}\n___\n{sc}\n",
+            "spaced star rule": f"{fig}\n* * *\n{sc}\n",
+            "spaced dash rule": f"{fig}\n- - -\n{sc}\n",
+            "bold line": f"{fig}\n**{sc}**\n",
+            "html comment": f"{fig}\n<!-- {sc} -->\n",
+            "paren ordered marker": f"{fig}\n1) {sc}\n",
+            "dash without space": f"{fig}\n-{sc}\n",
+            "table rows": f"| Labels 85% |\n| {sc} |\n",
+            "table then plain": f"| Labels 85% |\n{sc}\n",
+            "nested bullet": f"{fig}\n  - {sc}\n",
+            "next bullet": f"{fig}\n- {sc}\n",
+            "blockquote": f"{fig}\n> {sc}\n",
+            "blank line": f"{fig}\n\n{sc}\n",
+            "indented continuation of the next bullet": f"{fig}\n- Other\n  {sc}\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertEqual([k for k in self.unscoped(text) if k == "85%"], ["85%"], label)
+        # a plain wrapped continuation of a paragraph or an indented one still joins
+        para = f"Labels were right about 85% of the time\n({sc}).\n"
+        self.assertNotIn("85%", self.unscoped(para))
+
+    def test_the_real_pack_passes_the_block_rules(self):
+        self.assertEqual(self.unscoped(self.pack()), [])
 
     def test_pack_makes_no_class_level_claims_without_scope(self):
         text = self.pack()
@@ -666,6 +748,8 @@ class AmericanSpelling(unittest.TestCase):
             "    pass\n"
         )
         self.assertEqual(sorted(w.lower() for _, w in self.code_hits(src)), ["defence", "neighbour", "summarise"])
+        asynchronous = 'async def fetch():\n    """Defence in depth."""\n'
+        self.assertEqual([w.lower() for _, w in self.code_hits(asynchronous)], ["defence"])
         clean = '"""Summarize."""\ndef summarise(rows):\n    """Defense."""\n    return "colour"  # color\n'
         self.assertEqual(self.code_hits(clean), [])
 
@@ -733,8 +817,27 @@ class Summariser(unittest.TestCase):
             "gemma3:270m",
             "llama3.2:1b-instruct-q4_K_M",
             "qwen3:0.6b",
+            "nomic-embed-text:v1.5",
+            "all-minilm:v2",
+            "gemma:4b",  # a size tag; only a registry could say there is no such tag
         ]
         rejected = [
+            "../x:7b",
+            "a/../b:7b",
+            "a/./b:7b",
+            "./x:7b",
+            "x..y:7b",
+            "gemma4:12b-",
+            "gemma4:12b--x",
+            "gemma4:-7b",
+            "-gemma4:12b",
+            "gemma4-:12b",
+            "a/-b:7b",
+            "gemma4:v",
+            "gemma4:v1.",
+            "gemma4:v1..5",
+            "gemma4:vx",
+            "gemma4:v1.5x",
             "a:1b",
             "1:1b",
             "gemma4:",
