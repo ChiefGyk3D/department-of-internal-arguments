@@ -28,6 +28,7 @@ jobs:
         pip install pytest
       test-command: |
         python scripts/generate.py --check
+        python scripts/gen_wiki.py --check
         python scripts/validate.py
         pytest
       lint-install-command: |

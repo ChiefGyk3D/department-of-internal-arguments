@@ -5,9 +5,10 @@
 - The gate for this repository, exactly as CI runs it:
 
 ```
-python3 scripts/generate.py --check && python3 scripts/validate.py && python3 -m unittest discover -s tests -v
+python3 scripts/generate.py --check && python3 scripts/gen_wiki.py --check && python3 scripts/validate.py && python3 -m unittest discover -s tests -v
 ```
 
+- `docs/` is the source of the GitHub wiki (a generated mirror, published by `.github/workflows/wiki.yml`). Edit `docs/`, never the wiki; `gen_wiki.py --check` fails on a broken link.
 - Lint is `ruff check .` and `ruff format --check .` (line length 120). Standard library only, Python 3.11 or later.
 - Keep hostnames, addresses, home paths, serials, callsigns and real grid squares out of every file; the validator sweeps the tree and fails on a hit. Use the placeholders the policies name.
 - Release: bump `VERSION` and `pyproject.toml` together, add the CHANGELOG entry, regenerate (the generated marker carries the release), and run the gate.

@@ -297,6 +297,9 @@ def validate(root=ROOT):
 
         errors.extend(workflow_errors(root))
 
+        # docs/ is mirrored to the wiki; the privacy sweep and link check below already walk it.
+        require((root / "docs/home.md").is_file(), "docs/home.md is missing: it becomes the wiki Home page")
+
         # Local Markdown links must resolve (URLs and anchors excluded).
         for f in tree_files(root):
             if f.suffix != ".md" or f.is_symlink():
