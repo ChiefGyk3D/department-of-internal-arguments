@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-26
+
+The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.
+
 The lead persona is installable and carries the orchestrator rules (issues #32 and #33).
 
 - `templates/lead.md`: new rules, kept short (the installed text is about 6 KB, up from 4.3 KB): "You do not wait" (waits go to a background task or a monitor agent, one watch per thing); two dispatch items (the tracking item on an `issue:` line with its card moved in the same response, and a `cd` into the issue's repository in the same command as a worktree dispatch); "Before you tell the human to do something" (project notes, then the vendor page, then the live read-only API; verified versus inferred); "Access" (ask once for the union, no broader fallback); "Done" (observed through the path the user will use); and three never-do lines (an approval token held for the human, an unfixed weakness in a public place, a rejected option). The long form with the reasons is in `docs/writing-a-brief.md`.

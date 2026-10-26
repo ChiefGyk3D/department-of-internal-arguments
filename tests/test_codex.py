@@ -132,10 +132,12 @@ class Docs(unittest.TestCase):
         self.assertIn("https://learn.chatgpt.com/docs/agent-configuration/agents-md", install_doc)
         self.assertIn("retrieved 2026-10-26", install_doc)
 
-    def test_changelog_has_an_unreleased_codex_entry(self):
+    def test_changelog_has_a_codex_entry_after_0_3_1(self):
+        # Everything newer than 0.3.1 (Unreleased plus the 0.4.0 section, which is
+        # where Unreleased moves at release time); older sections do not count.
         log = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = log.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
-        self.assertIn("Codex adapter", unreleased)
+        newer = log.split("## [Unreleased]", 1)[1].split("\n## [0.3.1]", 1)[0]
+        self.assertIn("Codex adapter", newer)
 
 
 class Installer(unittest.TestCase):

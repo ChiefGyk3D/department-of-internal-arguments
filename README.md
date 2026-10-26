@@ -2,7 +2,7 @@
 
 This is my shared home for AI agent personas and the domain knowledge they load, written once and generated for Claude Code, GitHub Copilot, ChatGPT and local models. The name is because the best thing a second agent can do for the first one is disagree with it, and because I wanted somewhere for those arguments to live that was not a pile of prompts copied between repos.
 
-Release 0.3.1. Apache-2.0.
+Release 0.4.0. Apache-2.0.
 
 Four roles (`implementer`, `reviewer`, `adversarial-reviewer`, `transcriber`) describe how work gets done, and six packs hold the domain knowledge you name in a brief when the task needs it.
 
