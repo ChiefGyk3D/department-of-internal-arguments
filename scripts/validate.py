@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 from benchmark import corpus_errors, load_corpus
+from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
 from generate import ADDITIONS_HEADING, drift
 from lib import (
     CAPABILITY_ORDER,
@@ -248,6 +249,24 @@ def pack_errors(p):
     return errors
 
 
+def evals_errors(root):
+    """The case registry reads strictly, the synthetic example results read against it, and neither holds an
+    identifier-shaped string. Drift between the registry and evals/behavioral-evals.md is reported by generate.drift."""
+    errors = []
+    try:
+        cases = load_registry(Path(root) / CASES_PATH)
+    except (OSError, ValueError) as exc:
+        return [f"{CASES_PATH}: {exc}"]
+    text = (Path(root) / CASES_PATH).read_text(encoding="utf-8")
+    # code names such as yaml.load are host-shaped, so the registry skips the host check; the tree sweep covers hosts
+    errors.extend(f"{CASES_PATH}: {p}" for p in identifier_problems(text, hostnames=False))
+    try:
+        load_results(Path(root) / EXAMPLE_PATH, cases)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{EXAMPLE_PATH}: {exc}")
+    return errors
+
+
 def validate(root=ROOT):
     root = Path(root)
     errors = []
@@ -336,6 +355,7 @@ def validate(root=ROOT):
         )
 
         errors.extend(workflow_errors(root))
+        errors.extend(evals_errors(root))
 
         # docs/ is mirrored to the wiki; the privacy sweep and link check below already walk it.
         bench = root / "evals/benchmark"
