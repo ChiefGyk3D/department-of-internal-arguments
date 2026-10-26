@@ -550,21 +550,39 @@ class LocalLlmRule(unittest.TestCase):
 
     FIGURES = ("85%", "46%", "55 to 215 seconds", "436 evaluation tokens", "8192 but not 16384")
 
-    BLOCK_START = re.compile(r"\s*(?:[-*+] |\d+\. |#|\||>)")
+    # Any line starting like this opens its own block: list markers (with or without a space), ordered markers (1. and
+    # 1)), headings, table rows, quotes, html, bold or italic lines and horizontal rules.
+    BOUNDARY = re.compile(r"\s*(?:[-*+_]|\d+[.)]|#|\||>|<)")
+    # Only these open a block that a following plain line may continue: a bullet or numbered item with a space.
+    LIST_ITEM = re.compile(r"\s*(?:[-*+] |\d+\. )")
 
     @classmethod
     def blocks(cls, text):
-        """Logical lines: a bullet, numbered item or paragraph with its wrapped continuation lines joined by a space,
-        so a scope phrase that a hard wrap split across two lines is still found in its own bullet."""
-        out = []
+        """Logical lines. A bullet, numbered item or plain paragraph line absorbs the plain, non-marker lines that
+        directly follow it (a hard wrap), joined by a space. Everything else is a block of its own and absorbs
+        nothing: blank lines, fences and their content, headings, table rows, quotes, html, rules, bold lines, nested
+        bullets and `1)` or `-x` lines. A plain line after any of those starts a new block, so a scope phrase can
+        never be borrowed from a line that is not part of the figure's own logical line."""
+        out, cur, fence = [], None, False
         for ln in text.splitlines():
-            if not ln.strip():
-                out.append(None)
-            elif out and out[-1] is not None and not cls.BLOCK_START.match(ln):
-                out[-1] += " " + ln.strip()
+            s = ln.strip()
+            if s.startswith(("```", "~~~")):
+                fence, cur = not fence, None
+                out.append(s)
+            elif fence:
+                if s:
+                    out.append(s)
+            elif not s:
+                cur = None
+            elif cls.BOUNDARY.match(ln):
+                out.append(s)
+                cur = len(out) - 1 if cls.LIST_ITEM.match(ln) else None
+            elif cur is not None:
+                out[cur] += " " + s
             else:
-                out.append(ln.strip())
-        return [b for b in out if b]
+                out.append(s)
+                cur = len(out) - 1
+        return out
 
     def unscoped(self, text):
         """Measured figures whose own bullet lacks the scope phrase (a missing or repeated figure counts as unscoped).
@@ -599,6 +617,41 @@ class LocalLlmRule(unittest.TestCase):
         self.assertEqual(only(f"- Labels were right about 85% of the time.\n- Other ({self.SCOPE}).\n"), ["85%"])
         self.assertEqual(only(f"- Labels were right about 85%.\n\n  {self.SCOPE}\n"), ["85%"])
         self.assertEqual(only("- Labels were right about 85%\n  of the time (wrapped, no scope).\n"), ["85%"])
+
+    def test_scope_on_a_line_that_is_not_part_of_the_figure_line_never_counts(self):
+        sc = self.SCOPE
+        fig = "- Labels were right about 85% of the time."
+        cases = {
+            "code fence": f"```\nLabels were right about 85%\n```\n{sc}\n",
+            "scope inside a fence": f"```\nLabels were right about 85%\n{sc}\n```\n",
+            "scope inside a tilde fence": f"~~~\nLabels were right about 85%\n{sc}\n~~~\n",
+            "tilde fence": f"~~~\nLabels were right about 85%\n~~~\n{sc}\n",
+            "heading": f"## Labels were right about 85%\n{sc}\n",
+            "horizontal rule": f"{fig}\n---\n{sc}\n",
+            "underscore rule": f"{fig}\n___\n{sc}\n",
+            "spaced star rule": f"{fig}\n* * *\n{sc}\n",
+            "spaced dash rule": f"{fig}\n- - -\n{sc}\n",
+            "bold line": f"{fig}\n**{sc}**\n",
+            "html comment": f"{fig}\n<!-- {sc} -->\n",
+            "paren ordered marker": f"{fig}\n1) {sc}\n",
+            "dash without space": f"{fig}\n-{sc}\n",
+            "table rows": f"| Labels 85% |\n| {sc} |\n",
+            "table then plain": f"| Labels 85% |\n{sc}\n",
+            "nested bullet": f"{fig}\n  - {sc}\n",
+            "next bullet": f"{fig}\n- {sc}\n",
+            "blockquote": f"{fig}\n> {sc}\n",
+            "blank line": f"{fig}\n\n{sc}\n",
+            "indented continuation of the next bullet": f"{fig}\n- Other\n  {sc}\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertEqual([k for k in self.unscoped(text) if k == "85%"], ["85%"], label)
+        # a plain wrapped continuation of a paragraph or an indented one still joins
+        para = f"Labels were right about 85% of the time\n({sc}).\n"
+        self.assertNotIn("85%", self.unscoped(para))
+
+    def test_the_real_pack_passes_the_block_rules(self):
+        self.assertEqual(self.unscoped(self.pack()), [])
 
     def test_pack_makes_no_class_level_claims_without_scope(self):
         text = self.pack()

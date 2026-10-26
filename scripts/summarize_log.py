@@ -52,7 +52,7 @@ def valid_model(model):
     name, tag = model.rsplit(":", 1)
     if len(name) < 2 or not any(c.isalpha() for c in name):
         return False
-    if ".." in model or "--" in model or any(seg in ("", ".") for seg in name.split("/")):
+    if ".." in model or "--" in model or any(seg == "." for seg in name.split("/")):
         return False
     if any(seg.startswith("-") or seg.endswith("-") for seg in (*name.split("/"), tag)):
         return False
