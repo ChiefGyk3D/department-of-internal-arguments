@@ -11,6 +11,7 @@ a null, absent, mistyped, duplicated or unknown key or value is an error, never 
 
 import argparse
 import datetime
+import functools
 import hashlib
 import json
 import re
@@ -73,15 +74,43 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 # Identifier sweep for text that a record or the registry carries. Placeholders from the packs are allowed; any other
-# callsign-, grid-, address-, home-path- or host-shaped string is refused.
+# callsign-, grid-, address-, home-path- or host-shaped string is refused. The shapes are deliberately broad (any case,
+# digit-first prefixes, 4- and 6-character grids): a false alarm costs a rewrite, a miss publishes something private.
 PLACEHOLDERS = frozenset({"N0CALL", "N0TST", "FN31pr"})
-FILE_SUFFIXES = frozenset({"md", "json", "jsonl", "txt", "py", "toml", "log", "yml", "yaml", "sh", "diff", "patch"})
-HOST_RE = re.compile(r"(?<![\w-])(?:[A-Za-z0-9-]+\.)+([A-Za-z]{2,})(?![\w-])")
+NON_HOST_SUFFIXES = frozenset({"json", "jsonl", "txt", "toml", "log", "yml", "yaml", "diff", "patch"})  # no such TLD
+REPO_SUFFIXES = frozenset({"md", "sh", "py"})  # also country TLDs, so a name counts as a file only if the repo has it
 IPV4_RE = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
 HOME_RE = re.compile("/ho" + "me/|/Us" + "ers/")
-CALLSIGN_RE = re.compile(r"\b[A-Z]{1,2}[0-9][A-Z]{1,3}\b")
-GRID_RE = re.compile(r"\b[A-R]{2}[0-9]{2}[a-x]{2}\b")
+CALLSIGN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](?![A-Za-z0-9])", re.IGNORECASE)
+GRID_RE = re.compile(r"(?<![A-Za-z0-9])[A-R]{2}[0-9]{2}(?:[A-X]{2})?(?![A-Za-z0-9])", re.IGNORECASE)
+SIZE_RE = re.compile(r"e?[0-9]+(?:x[0-9]+)?[bm]", re.IGNORECASE)  # 12b, e4b, 8x7b and 270m are sizes, not callsigns
 TOKEN_RE = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
+WORD_RE = re.compile(r"[\w.-]+")
+HOST_LABEL_RE = re.compile(r"[A-Za-z0-9-]+")
+TLD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+@functools.lru_cache(maxsize=1)
+def _repo_names():
+    """Repository-relative paths and base names of the files in this checkout (for the file-suffix exemption)."""
+    names = set()
+    for p in ROOT.rglob("*"):
+        rel = p.relative_to(ROOT)
+        if p.is_file() and not any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
+            names.update({rel.as_posix(), p.name})
+    return frozenset(names)
+
+
+def _host_shaped(word):
+    """Linear check: dotted labels, a letters-only last label, and not a file of this repository."""
+    word = word.strip(".-")
+    labels = word.split(".")
+    if len(labels) < 2 or not TLD_RE.fullmatch(labels[-1]) or not all(HOST_LABEL_RE.fullmatch(x) for x in labels):
+        return False
+    suffix = labels[-1].lower()
+    if suffix in NON_HOST_SUFFIXES:
+        return False
+    return not (suffix in REPO_SUFFIXES and word in _repo_names())
 
 
 def identifier_problems(text, hostnames=True):
@@ -91,9 +120,9 @@ def identifier_problems(text, hostnames=True):
         found.append("address-shaped string")
     if HOME_RE.search(text):
         found.append("home-path-shaped string")
-    if hostnames and any(m.group(1).lower() not in FILE_SUFFIXES for m in HOST_RE.finditer(text)):
+    if hostnames and any(_host_shaped(w) for w in WORD_RE.findall(text)):
         found.append("hostname-shaped string")
-    if any(m.group(0) not in PLACEHOLDERS for m in CALLSIGN_RE.finditer(text)):
+    if any(m.group(0) not in PLACEHOLDERS and not SIZE_RE.fullmatch(m.group(0)) for m in CALLSIGN_RE.finditer(text)):
         found.append("callsign-shaped string")
     if any(m.group(0) not in PLACEHOLDERS for m in GRID_RE.finditer(text)):
         found.append("grid-square-shaped string")
@@ -149,16 +178,30 @@ def _unique_members(value, allowed):
 # ---------------------------------------------------------------- registry
 
 
+class Registry(list):
+    """The cases, plus `headless`: client -> whether a runner can drive it without a person (the registry says so)."""
+
+    headless = {}
+
+
 def parse_registry(text):
     data = strict_json(text)
-    if not isinstance(data, dict) or set(data) != {"cases"}:
-        raise ValueError('registry must be an object with exactly one key, "cases"')
+    if not isinstance(data, dict) or set(data) != {"clients", "cases"}:
+        raise ValueError('registry must be an object with exactly the keys "clients" and "cases"')
+    clients = data["clients"]
+    if not isinstance(clients, dict) or set(clients) != set(CLIENTS):
+        raise ValueError(f"clients must have exactly the keys {list(CLIENTS)}")
+    for name, entry in clients.items():
+        if not isinstance(entry, dict) or set(entry) != {"headless"} or type(entry["headless"]) is not bool:
+            raise ValueError(f'clients.{name} must be {{"headless": true or false}}')
     cases = data["cases"]
     if not isinstance(cases, list) or not cases:
         raise ValueError("cases must be a non-empty list")
     for index, case in enumerate(cases, 1):
         _check_case(case, index)
-    return cases
+    registry = Registry(cases)
+    registry.headless = {name: clients[name]["headless"] for name in CLIENTS}
+    return registry
 
 
 def _check_case(case, expected_id):
@@ -289,15 +332,27 @@ def persona_hash(root=ROOT):
 # ---------------------------------------------------------------- records
 
 
+CLAUDE_MODEL_RE = re.compile(
+    r"claude-(?:(?:opus|sonnet|haiku|fable|mythos)-[0-9]{1,2}-(?:[0-9]{1,2}|[0-9]{8})(?:-[0-9]{8})?"
+    r"|[0-9]-(?:[0-9]-)?(?:opus|sonnet|haiku)-[0-9]{8})"
+)
+GPT_MODEL_RE = re.compile(
+    r"(?:gpt-[0-9]+(?:\.[0-9]+)?[a-z]?|o[0-9]+)(?:-(?!(?:latest|default|inherit|auto)(?:-|$))[a-z0-9]+(?:\.[0-9]+)?)*"
+)
+MODEL_SHAPES = {
+    "claude-code": (CLAUDE_MODEL_RE,),
+    "codex": (GPT_MODEL_RE,),
+    "copilot": (CLAUDE_MODEL_RE, GPT_MODEL_RE),
+}
+
+
 def exact_model(client, model):
+    """An exact id has a documented shape for its client (see results-schema.md); a digit alone proves nothing."""
     if not isinstance(model, str) or not MODEL_CHARS_RE.fullmatch(model):
         return False
     if client == "local":
-        return valid_model(model)
-    return (
-        any(c.isdigit() for c in model)  # a family name (sonnet, inherit, latest) has no digit
-        and not identifier_problems(model.replace("/", " "))
-    )
+        return valid_model(model) and model.rsplit(":", 1)[1] != "latest"
+    return any(shape.fullmatch(model) for shape in MODEL_SHAPES.get(client, ()))
 
 
 def parse_record(line, n, cases):
@@ -330,6 +385,11 @@ def parse_record(line, n, cases):
         fail(f"case {case['id']} does not apply to {client}")
     if outcome not in OUTCOMES:
         fail(f"outcome must be one of {OUTCOMES}")
+    headless = getattr(cases, "headless", {}).get(client, True)
+    if outcome == "unsupported" and headless:
+        fail(f"{client} has a headless interface (evals/cases.json), so a case cannot be unsupported there")
+    if not headless and outcome not in ("unsupported", "not-run", "needs-human"):
+        fail(f"{client} has no headless interface (evals/cases.json): only unsupported, not-run or needs-human")
     if outcome == "pass" and case["grading"] == "judged":
         fail(f"case {case['id']} is judged: a pass needs a human, record needs-human")
 
@@ -355,6 +415,9 @@ def parse_record(line, n, cases):
         datetime.date.fromisoformat(row["date"])
     except ValueError:
         fail("date is not a real calendar day")
+    latest_allowed = datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=1)
+    if datetime.date.fromisoformat(row["date"]) > latest_allowed:
+        fail("date is in the future")
     if not _unique_members(row["tools_enabled"], CAPABILITY_ORDER):
         fail(f"tools_enabled must be a list of unique names from {CAPABILITY_ORDER}")
     evidence = row["evidence"]
@@ -362,6 +425,8 @@ def parse_record(line, n, cases):
         isinstance(evidence, str) and 0 < len(evidence) <= MAX_EVIDENCE and EVIDENCE_RE.fullmatch(evidence) is not None
     ):
         fail(f"evidence must be a short pointer: 1 to {MAX_EVIDENCE} characters from the set in results-schema.md")
+    if "://" in evidence or ".." in evidence or any(word.startswith("/") for word in evidence.split()):
+        fail("evidence may not hold a URL, an absolute path or a .. segment; name the file relative to the run")
     problems = identifier_problems(evidence)
     if problems:
         fail(f"evidence holds a {problems[0]}; use the placeholders N0CALL, N0TST and FN31pr")
@@ -414,17 +479,29 @@ def _label(outcome):
     return "not run" if outcome == "not-run" else outcome.replace("-", " ")
 
 
+def _column(record):
+    """A matrix column: client and model, plus the quantization and context a local model ran with."""
+    return (record["client"], record["model"], record.get("quantization", ""), record.get("context", 0))
+
+
+def _head(col):
+    client, model, quantization, context = col
+    if model is None:
+        return client
+    return f"{client} / {model}" + (f" ({quantization}, {context})" if quantization else "")
+
+
 def render_matrix(records, cases, current_hash):
     latest = {}
     for index, r in enumerate(records):
-        key = (r["case"], r["client"], r["model"])
+        key = (r["case"], *_column(r))
         rank = (r["date"], index)
         if key not in latest or rank > latest[key][0]:
             latest[key] = (rank, r)
-    columns = {(r["client"], r["model"]) for r in records}
-    columns |= {(c, None) for c in CLIENTS if not any(col[0] == c for col in columns)}
-    ordered = sorted(columns, key=lambda col: (CLIENTS.index(col[0]), col[1] or ""))
-    heads = [esc(c if m is None else f"{c} / {m}") for c, m in ordered]
+    columns = {_column(r) for r in records}
+    columns |= {(c, None, "", 0) for c in CLIENTS if not any(col[0] == c for col in columns)}
+    ordered = sorted(columns, key=lambda col: (CLIENTS.index(col[0]), col[1] or "", col[2], col[3]))
+    heads = [esc(_head(col)) for col in ordered]
     lines = [
         "| " + " | ".join(["#", "Case", "Grading", *heads]) + " |",
         "| " + " | ".join(["---"] * (3 + len(ordered))) + " |",
@@ -432,11 +509,12 @@ def render_matrix(records, cases, current_hash):
     stale = 0
     for case in cases:
         cells = []
-        for client, model in ordered:
+        for col in ordered:
+            client = col[0]
             if client not in case["clients"]:
                 cells.append("n/a")
                 continue
-            hit = latest.get((case["id"], client, model))
+            hit = latest.get((case["id"], *col))
             if hit is None:
                 cells.append("not run")
                 continue

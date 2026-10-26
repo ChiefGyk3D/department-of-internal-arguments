@@ -41,8 +41,11 @@ def base_case(n, **over):
     return case
 
 
-def registry_text(cases):
-    return json.dumps({"cases": cases})
+CLIENT_FLAGS = {c: {"headless": c != "copilot"} for c in em.CLIENTS}
+
+
+def registry_text(cases, clients=None):
+    return json.dumps({"clients": clients or CLIENT_FLAGS, "cases": cases})
 
 
 def mini_cases():
@@ -66,7 +69,7 @@ def record(**over):
         "tools_enabled": ["read", "shell"],
         "commit": COMMIT,
         "persona_hash": HASH,
-        "date": "2026-10-27",
+        "date": "2026-10-26",
         "outcome": "pass",
         "evidence": "transcript line 12 shows the gate run",
     }
@@ -127,7 +130,7 @@ class RegistryReading(unittest.TestCase):
             "not json": "{",
             "no cases key": "{}",
             "empty cases": registry_text([]),
-            "extra top key": json.dumps({"cases": [base_case(1)], "x": 1}),
+            "extra top key": json.dumps({"clients": CLIENT_FLAGS, "cases": [base_case(1)], "x": 1}),
             "extra case key": registry_text([base_case(1, extra="x")]),
             "missing key": registry_text(drop("expect")),
             "null field": registry_text([base_case(1, expect=None)]),
@@ -270,7 +273,7 @@ class RecordReading(unittest.TestCase):
             "unknown tool": line(record(tools_enabled=["read", "teleport"])),
             "duplicate tool": line(record(tools_enabled=["read", "read"])),
             "bad date": line(record(date="2026-13-40")),
-            "date with time": line(record(date="2026-10-27T10:00")),
+            "date with time": line(record(date="2026-10-26T10:00")),
             "short commit": line(record(commit="abc1234")),
             "upper commit": line(record(commit=COMMIT.upper())),
             "short hash": line(record(persona_hash="a" * 63)),
@@ -287,7 +290,7 @@ class RecordReading(unittest.TestCase):
     def test_pass_on_a_judged_case_is_refused(self):
         with self.assertRaisesRegex(ValueError, "judged"):
             parse(record(case=2, outcome="pass"))
-        for outcome in ("fail", "needs-human", "refused", "error", "unsupported", "not-run"):
+        for outcome in ("fail", "needs-human", "refused", "error", "not-run"):
             parse(record(case=2, outcome=outcome))
 
     def test_pass_needs_an_exact_model_version_and_commit(self):
@@ -309,10 +312,10 @@ class RecordReading(unittest.TestCase):
                     parse(record(outcome=outcome, **over))
 
     def test_unsupported_and_not_run_may_leave_model_and_version_unspecified(self):
-        for outcome in ("unsupported", "not-run"):
-            parse(record(outcome=outcome, model="unspecified", client_version="unspecified"))
+        for outcome, client in (("unsupported", "copilot"), ("not-run", "claude-code")):
+            parse(record(client=client, outcome=outcome, model="unspecified", client_version="unspecified"))
             with self.assertRaises(ValueError):  # unspecified, not blank and not a family name
-                parse(record(outcome=outcome, model="sonnet"))
+                parse(record(client=client, outcome=outcome, model="sonnet"))
 
     def test_local_model_needs_a_tag_quantization_and_context(self):
         for name, over in {
@@ -350,7 +353,7 @@ class RecordReading(unittest.TestCase):
             "short hostname": "ssh to lab.internal",
             "ipv4": "saw 10.1." + "2.3 in the log",
             "home path": "see /ho" + "me/someone/x",
-            "callsign": "operator W1AW keyed up",
+            "callsign": "operator AB1CDE keyed up",
             "grid square": "grid EM15fd",
             "long token": "key " + "A1b2C3d4" * 5,
             "over the cap": ("ab " * 70)[: em.MAX_EVIDENCE + 1],
@@ -373,7 +376,7 @@ class RecordReading(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse(record(client_version="9.9.9 build-box.corp.example.com"))
         with self.assertRaises(ValueError):
-            parse(local_record(quantization="W1AW"))
+            parse(local_record(quantization="AB1CDE"))
 
 
 class MatrixRendering(unittest.TestCase):
@@ -394,7 +397,7 @@ class MatrixRendering(unittest.TestCase):
         want = "\n".join(
             [
                 "| # | Case | Grading | claude-code / claude-sonnet-5-5 | codex | copilot / unspecified |"
-                " local / gemma4:12b |",
+                " local / gemma4:12b (Q4\\_K\\_M, 8192) |",
                 "| --- | --- | --- | --- | --- | --- | --- |",
                 "| 1 | reviewer | mechanical | pass | not run | unsupported | fail (stale) |",
                 "| 2 | any | judged | needs human | not run | not run | not run |",
@@ -443,7 +446,7 @@ class MatrixRendering(unittest.TestCase):
         self.assertIn("| 1 | reviewer | mechanical | not run |", out)
 
     def test_latest_record_wins_and_a_later_line_breaks_a_date_tie(self):
-        out = self.render([record(date="2026-10-28", outcome="fail"), record(date="2026-10-27", outcome="pass")])
+        out = self.render([record(date="2026-10-26", outcome="fail"), record(date="2026-10-25", outcome="pass")])
         self.assertIn("mechanical | fail |", out)
         out = self.render([record(outcome="fail"), record(outcome="pass")])
         self.assertIn("mechanical | pass |", out)
@@ -609,7 +612,7 @@ class Privacy(unittest.TestCase):
         self.assertEqual([h for h in privacy_hits(ROOT) if h[0].startswith("evals/")], [])
 
     def test_the_sweep_bites(self):
-        for text in ("build-box.corp.example.com", "10.1." + "2.3", "W1AW", "EM15fd", "/ho" + "me/someone/x"):
+        for text in ("build-box.corp.example.com", "10.1." + "2.3", "AB1CDE", "EM15fd", "/ho" + "me/someone/x"):
             with self.subTest(text):
                 self.assertTrue(em.identifier_problems(f"seen {text} here"))
         for text in ("N0CALL", "N0TST", "FN31pr", "scripts/export_prompt.py", "evals/cases.json", "v1.2.3"):
