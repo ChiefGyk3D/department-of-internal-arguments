@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+Docs: stop claiming SAFO installs personas, and pin the documented checkout by commit (issue #54, part of SAFO#161).
+
+- `docs/relationship-to-safo-and-gyst.md` said SAFO will install personas from this repository. It does not: the page now says "SAFO does not install personas" and points to this repository's own installer, run from a checkout pinned by commit with the release tag as a comment. No other page or the README made the claim.
+- `docs/install.md`: the dotfiles routine now shows `checkout <commit>   # <release tag>` instead of `checkout <tag>` (a tag can be moved, a commit cannot), and says how to read the commit once with `rev-parse <tag>^{commit}`.
+- `tests/test_docs.py`: the relationship page must contain the sentence, no page under `docs/` or `README.md` may say "SAFO will install" or "SAFO installs" (case-insensitive; an unreadable or missing page fails), and the routine block must use `checkout <commit>   # <tag>` and never `checkout <tag>`, each with a negative case.
+
 Behavioral-eval case registry, result schema and matrix renderer (issue #45, unit 1 of #24). No model is called and nothing touches the network; nothing has been run against a model.
 
 - `evals/cases.json`: the 26 exercises as the single source (id, subject, roles, packs, clients, fixture name, input, expected behavior, `mechanical` or `judged` grading with a reason, cost class). `evals/behavioral-evals.md` is now generated from it, gains a Grading column, and `scripts/generate.py --check` fails on drift. Reading is strict: null, absent, mistyped, duplicated or unknown keys and values are errors.
