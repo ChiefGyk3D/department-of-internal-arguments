@@ -330,8 +330,11 @@ class Reader(Scratch):
             "crlf": good.replace("\n", "\r\n"),
         }.items():
             with self.subTest(label):
-                with self.assertRaises(em.ModelPinsError):
+                with self.assertRaises(em.ModelPinsError) as cm:
                     em.read_pins(self.put(text=text))
+                reason = {"duplicate key": "duplicate key", "NaN": "non-finite"}.get(label)
+                if reason:  # pin the specific layer, not just "some check failed"
+                    self.assertIn(reason, str(cm.exception))
 
     def test_file_level_refusals(self):
         with self.assertRaises(em.ModelPinsError):
@@ -345,8 +348,9 @@ class Reader(Scratch):
             em.read_pins(self.root)
         big = self.root / "big.json"
         big.write_text(" " * (em.MAX_BYTES + 1))
-        with self.assertRaises(em.ModelPinsError):
+        with self.assertRaises(em.ModelPinsError) as cm:
             em.read_pins(big)
+        self.assertIn("is over", str(cm.exception))
         bad = self.root / "bad.json"
         bad.write_bytes(b"\xff\xfe")
         with self.assertRaises(em.ModelPinsError):
