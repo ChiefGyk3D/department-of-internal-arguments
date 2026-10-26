@@ -6,23 +6,53 @@ installer wrote, kept OUTSIDE the target and outside this repository, so nothing
 for itself.
 
 Location: $DOIA_STATE_DIR (absolute) else ${XDG_STATE_HOME:-$HOME/.local/state}/department-of-internal-arguments/.
+HOME must name a real directory (empty and "/" are refused) unless DOIA_STATE_DIR or XDG_STATE_HOME is set.
 One file per target and layout: <first 32 hex of sha256(realpath(target) NUL layout)>.json, mode 0600.
 
     {"schema": 1, "target": <realpath>, "layout": <layout>,
-     "entries": {<relative path>: {"kind": "file"|"lead", "body_sha256": <64 hex>, "release": <str>,
-                                   "source": "public"|"overlay", "pending_sha256": <64 hex, optional>}}}
+     "entries": {<relative path>: {"kind": "file"|"lead", "release": <str>, "source": "public"|"overlay",
+                                   "body_sha256": <64 hex>, "pending_sha256": <64 hex>}}}
+
+body_sha256 and pending_sha256 are each optional but an entry carries at least one. A target path must be valid UTF-8
+(a path the JSON file cannot hold is refused by load and save alike, so save never writes a file load cannot read).
+
+Threat model. The defended case: a marker-valid file that arrived by clone, synced dotfiles, a copy or a lower
+privileged writer is not treated as owned, because nothing it ships can add an entry here. Not defended, by design:
+anyone who can write the state file as this user or as root; a rollback of the state file to an older one; the content
+of the installed text itself; and anyone who controls the process environment, HOME or DOIA_STATE_DIR. That last route
+is named on purpose: pointing DOIA_STATE_DIR at a directory the attacker built (the file name is predictable, being a
+hash of the realpath and layout) makes a forged file read as genuine. A per-directory salt was considered and not
+added: whoever builds the directory writes the salt too, so it would add a failure mode (a lost salt orphans every
+record) and no protection. The same holds for a same-user attacker, who can read any salt.
 
 What this is not: no device or inode (checkouts, restores and rename-saves change them), no keyed MAC (the key
-lifecycle costs more than a local installer earns), no timestamps (stable bytes). It does not defend against
-anyone who can write the file as this user or as root, or against a rollback to an older state file.
+lifecycle costs more than a local installer earns), no timestamps (stable bytes).
+
+Path trust. The BASE directory (the parent of the state directory: the XDG or HOME-derived directory, or the parent of
+DOIA_STATE_DIR) is the user's own choice and is resolved once with realpath, so a symlinked ~/.local, a /home link or a
+macOS /var link works. Everything below the resolved base is walked with O_NOFOLLOW through directory descriptors and
+no link is ever followed there. The base must be owned by the user or root and not group or world writable unless
+sticky; the state directory must be owned by the user and not group or world writable. Created directories are 0700.
 
 Reading is strict and fails closed. Absent, null or mistyped is an error; there is no fallback to anything weaker. A
 missing file is the one non-error "no" answer: load returns None (every marked file is then merely unverified).
+Relative paths in entries are text only: a consumer must still lstat-verify each path through a no-follow walk of its
+own before trusting what is at it. Names are refused if they hold any Unicode C* character (controls including C1,
+format and bidi characters, private use, unassigned) or a line or paragraph separator, and two entries whose
+NFC and case-folded forms are equal are refused (one file on a case-insensitive or normalizing filesystem).
 
 Writes are atomic: a temporary 0600 file created with O_EXCL through the directory descriptor, fsync, rename, fsync
-of the directory, all under an exclusive non-blocking flock so two installers cannot interleave. An update that
-rewrites files is two-phase: save the new digests as pending (with_pending), write the files, save again settled
-(settle). A crash in between leaves both digests accepted (accepts) and a re-run converges.
+of the directory, all under an exclusive non-blocking flock so two installers cannot interleave. If the directory
+fsync fails after the rename, save raises StateError saying the state may already have been replaced: re-load to learn
+the truth.
+
+Two-phase update. Phase 1: with_pending records the digest each file is about to get (an existing path gets a
+pending_sha256 next to its body_sha256; a NEW path is added with only pending_sha256, via `new=`). Save. Write the
+files. Phase 2: settle(entries, written) with the set of relative paths actually written, then save. Settling promotes
+the pending digest of written paths, keeps the old digest of paths not written, removes a new path that was not written,
+and clears every pending field. accepts() takes the recorded digest or the pending one, and only those: a crash after
+phase 1 leaves a file with exactly the intended content owned, and nothing else, including a file that was never
+written for a new path.
 """
 
 import contextlib
@@ -32,6 +62,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -45,11 +76,14 @@ APP_DIR = "department-of-internal-arguments"
 KINDS = ("file", "lead")
 SOURCES = ("public", "overlay")
 _TOP_KEYS = {"schema", "target", "layout", "entries"}
-_ENTRY_REQUIRED = {"kind", "body_sha256", "release", "source"}
-_ENTRY_KEYS = _ENTRY_REQUIRED | {"pending_sha256"}
+_ENTRY_REQUIRED = {"kind", "release", "source"}
+_ENTRY_KEYS = _ENTRY_REQUIRED | {"body_sha256", "pending_sha256"}
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _RELEASE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,31}")
 _LAYOUT = re.compile(r"[a-z][a-z0-9-]{0,31}")
+# Unicode general categories refused in a relative path: all of C* (control incl. C1, format incl. bidi and
+# zero-width, surrogate, private use, unassigned) plus the line and paragraph separators.
+_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -91,9 +125,13 @@ def state_dir():
                 raise StateError("XDG_STATE_HOME must be an absolute path")
             root = xdg
         else:
-            home = os.path.expanduser("~")
-            if not os.path.isabs(home):
-                raise StateError("cannot determine the home directory for the state store")
+            home = os.environ.get("HOME")
+            if home is None:
+                home = os.path.expanduser("~")
+            if not os.path.isabs(home) or home.rstrip("/") == "":
+                raise StateError(
+                    "cannot determine a usable home directory for the state store; set DOIA_STATE_DIR or XDG_STATE_HOME"
+                )
             root = os.path.join(home, ".local", "state")
         base = os.path.join(root, APP_DIR)
     if "\0" in base or ".." in Path(base).parts:
@@ -120,14 +158,23 @@ def state_key(target, layout):
     if not isinstance(layout, str) or not _LAYOUT.fullmatch(layout):
         raise StateError(f"invalid layout: {_shown(layout)}")
     real = os.path.realpath(target)
-    stem = hashlib.sha256(f"{real}\0{layout}".encode("utf-8", "surrogateescape")).hexdigest()[:32]
+    if not _text_ok(real):
+        raise StateError("target path must be valid UTF-8 (the state file could not hold it)")
+    stem = hashlib.sha256(f"{real}\0{layout}".encode()).hexdigest()[:32]
     return real, layout, stem
 
 
 # --- descriptor walk -------------------------------------------------------------------------------------------
 
 
+def _tail(path):
+    """Echo-safe last two components of a path; the rest (a home directory, a user name) is not repeated."""
+    parts = [p for p in Path(str(path)).parts if p != "/"]
+    return "/".join(_shown(p, 40) for p in parts[-2:])
+
+
 def _check_dir(fd, label):
+    """The state directory itself: a directory, owned by the current user, not group or world writable."""
     st = os.fstat(fd)
     if not stat.S_ISDIR(st.st_mode):
         raise StateError(f"{label}: not a directory")
@@ -137,11 +184,34 @@ def _check_dir(fd, label):
         raise StateError(f"{label}: group- or world-writable")
 
 
-def _open_state_dir(path, create):
-    """A descriptor for the state directory, opened component by component with no link followed anywhere.
+def _check_base(fd, label):
+    """The directory that holds the state directory: owned by the user or root, and not group or world writable
+    unless sticky."""
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise StateError(f"{label}: not a directory")
+    if st.st_uid not in (_euid(), 0):
+        raise StateError(f"{label}: not owned by the current user or root")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not st.st_mode & stat.S_ISVTX:
+        raise StateError(f"{label}: group- or world-writable")
 
-    Returns None when `create` is false and the directory does not exist. Created components get mode 0700. The final
-    directory is checked for owner and mode on the open descriptor."""
+
+def _mkdir_private(name, dir_fd):
+    """Open `name` below dir_fd, creating it 0700 when missing; returns (fd, created)."""
+    made = True
+    try:
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+    except FileExistsError:
+        made = False
+    fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    if made:
+        os.fchmod(fd, 0o700)  # a tight umask must not leave the directory unusable
+    return fd
+
+
+def _open_chain(path, create):
+    """A descriptor for the absolute, already resolved directory `path`, opened component by component with no link
+    followed. None when a component is missing and `create` is false; created components are 0700."""
     parts = path.parts
     fd = os.open(parts[0], _DIR_FLAGS)
     try:
@@ -152,23 +222,43 @@ def _open_state_dir(path, create):
                 if not create:
                     os.close(fd)
                     return None
-                made = True
-                try:
-                    os.mkdir(part, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    made = False
-                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
-                if made:
-                    os.fchmod(nxt, 0o700)  # a tight umask must not leave the directory unusable
+                nxt = _mkdir_private(part, fd)
             os.close(fd)
             fd = nxt
-        _check_dir(fd, f"state directory {_shown(path)}")
-    except OSError as exc:
-        os.close(fd)
-        raise StateError(f"state directory {_shown(path)}: cannot open as a plain directory ({exc.strerror})") from None
     except BaseException:
         os.close(fd)
         raise
+    return fd
+
+
+def _open_state_dir(path, create):
+    """A descriptor for the state directory. The base (its parent) is resolved once with realpath; the state
+    directory is opened below it with O_NOFOLLOW. None when `create` is false and something is missing."""
+    name = path.name
+    if not name:
+        raise StateError("the state directory must not be the filesystem root")
+    base = Path(os.path.realpath(path.parent))
+    try:
+        bfd = _open_chain(base, create)
+        if bfd is None:
+            return None
+        try:
+            _check_base(bfd, f"state base {_tail(base)}")
+            try:
+                fd = os.open(name, _DIR_FLAGS, dir_fd=bfd)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                fd = _mkdir_private(name, bfd)
+        finally:
+            os.close(bfd)
+        try:
+            _check_dir(fd, f"state directory {_tail(path)}")
+        except BaseException:
+            os.close(fd)
+            raise
+    except OSError as exc:
+        raise StateError(f"state directory {_tail(path)}: cannot open as a plain directory ({exc.strerror})") from None
     return fd
 
 
@@ -195,10 +285,15 @@ def check_rel_path(rel):
         raise StateError("invalid path: empty or not text")
     if len(rel.encode("utf-8")) > MAX_PATH_BYTES:
         raise StateError(f"invalid path (too long): {_shown(rel)}")
-    if rel.startswith("/") or "\\" in rel or any(ord(c) < 32 or ord(c) == 127 for c in rel):
+    if rel.startswith("/") or "\\" in rel or any(unicodedata.category(c) in _BAD_CATEGORIES for c in rel):
         raise StateError(f"invalid path: {_shown(rel)}")
     if any(part in ("", ".", "..") for part in rel.split("/")):
         raise StateError(f"invalid path (not normalized): {_shown(rel)}")
+
+
+def _fold(rel):
+    """The form in which a case-insensitive or normalizing filesystem would see the name."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", rel).casefold())
 
 
 def _check_entry(rel, entry):
@@ -212,6 +307,8 @@ def _check_entry(rel, entry):
         raise StateError(f"entry {_shown(rel)}: invalid kind")
     if entry["source"] not in SOURCES or type(entry["source"]) is not str:
         raise StateError(f"entry {_shown(rel)}: invalid source")
+    if "body_sha256" not in entry and "pending_sha256" not in entry:
+        raise StateError(f"entry {_shown(rel)}: no digest")
     for key in ("body_sha256", "pending_sha256"):
         if key in entry and not (type(entry[key]) is str and _DIGEST.fullmatch(entry[key])):
             raise StateError(f"entry {_shown(rel)}: {key} is not 64 lowercase hex")
@@ -228,6 +325,9 @@ def check_entries(entries):
         raise StateError(f"too many entries (limit {MAX_ENTRIES})")
     for rel, entry in entries.items():
         _check_entry(rel, entry)
+    seen = {_fold(rel) for rel in entries}
+    if len(seen) != len(entries):
+        raise StateError("entries collide after Unicode normalization and case folding")
     return {rel: dict(entry) for rel, entry in entries.items()}
 
 
@@ -429,7 +529,13 @@ class Store:
             with contextlib.suppress(OSError):
                 os.unlink(tmp, dir_fd=self._dfd)
             raise
-        _fsync_dir(self._dfd)
+        try:
+            _fsync_dir(self._dfd)
+        except OSError:
+            raise StateError(
+                "state directory fsync failed after the rename: the state may already have been replaced; "
+                "re-load to learn which"
+            ) from None
 
 
 def save(target, layout, entries):
@@ -443,25 +549,52 @@ def save(target, layout, entries):
 # --- two-phase helpers (pure) ----------------------------------------------------------------------------------
 
 
-def with_pending(entries, pending):
-    """Copy of entries with pending_sha256 set from {relative path: digest}; the other entries are unchanged."""
+def with_pending(entries, pending, new=None):
+    """Copy of entries for phase 1 of an update.
+
+    `pending` is {relative path: digest} for paths already recorded: pending_sha256 is set next to the old digest.
+    `new` is {relative path: {"kind", "release", "source", "pending_sha256"}} for paths not yet recorded: each is added
+    WITHOUT a body digest, so after a crash it reads as owned only for exactly that content, and settle removes it
+    if the file was never written."""
     out = check_entries(entries)
     for rel, digest in pending.items():
         if rel not in out:
             raise StateError(f"no entry to update: {_shown(rel)}")
         out[rel]["pending_sha256"] = digest
+    for rel, spec in (new or {}).items():
+        if rel in out:
+            raise StateError(f"new entry already exists: {_shown(rel)}")
+        if type(spec) is not dict or set(spec) != {"kind", "release", "source", "pending_sha256"}:
+            raise StateError(f"new entry {_shown(rel)}: needs exactly kind, release, source and pending_sha256")
+        out[rel] = dict(spec)
     return check_entries(out)
 
 
-def settle(entries):
-    """Copy of entries with every pending digest promoted to body_sha256 and removed."""
+def settle(entries, written):
+    """Copy of entries for phase 2: `written` is the set of relative paths the update actually wrote.
+
+    The pending digest of a written path becomes its body digest; a path that was not written keeps its old digest;
+    an entry that exists only as a pending new path and was not written is removed; every pending field is cleared
+    (including stale ones). A path in `written` that has no entry is an error."""
     out = check_entries(entries)
-    for entry in out.values():
-        if "pending_sha256" in entry:
-            entry["body_sha256"] = entry.pop("pending_sha256")
+    written = set(written)
+    for rel in written:
+        if type(rel) is not str or rel not in out:
+            raise StateError(f"settle: unknown path {_shown(rel)}")
+    for rel in list(out):
+        entry = out[rel]
+        if rel in written and "pending_sha256" in entry:
+            entry["body_sha256"] = entry["pending_sha256"]
+        entry.pop("pending_sha256", None)
+        if "body_sha256" not in entry:
+            del out[rel]
     return out
 
 
 def accepts(entry, digest):
-    """True if digest is the recorded body digest or the pending one (a crash left both acceptable)."""
-    return digest in (entry["body_sha256"], entry.get("pending_sha256"))
+    """True only if digest is exactly the recorded body digest or the pending one (a crash left both acceptable).
+
+    Anything that is not one of the entry's stored digests is False, including None, empty, bytes, numbers and wrong
+    length or case; an absent digest is never a candidate."""
+    stored = [d for d in (entry.get("body_sha256"), entry.get("pending_sha256")) if d is not None]
+    return any(d == digest for d in stored)

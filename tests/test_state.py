@@ -7,7 +7,10 @@ the bottom carries a negative case: each guard is named, and the test that cover
 import contextlib
 import json
 import os
+import shutil
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,7 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+# DOIA_STATE_SCRIPTS lets the guard table below run this file against a deliberately weakened copy of state.py.
+sys.path.insert(0, os.environ.get("DOIA_STATE_SCRIPTS") or str(ROOT / "scripts"))
 
 import state  # noqa: E402  (path set up above)
 
@@ -30,8 +34,17 @@ def entry(**kw):
     return base
 
 
+def _hang(signum, frame):
+    raise AssertionError("test hung (a lock or a read blocked); failing fast instead of wedging the suite")
+
+
 class StateCase(unittest.TestCase):
     def setUp(self):
+        # A regression that makes the lock or a read block must fail the test, not hang the suite.
+        old = signal.signal(signal.SIGALRM, _hang)
+        signal.alarm(20)
+        self.addCleanup(signal.signal, signal.SIGALRM, old)
+        self.addCleanup(signal.alarm, 0)
         self.tmp = Path(tempfile.mkdtemp(prefix="doia-state-")).resolve()
         self.addCleanup(self._rm)
         self.target = self.tmp / "target"
@@ -229,6 +242,36 @@ class StrictParse(StateCase):
         self.plant(json.dumps(self.doc(entries=dict(list(many.items())[:4096]))).encode())
         self.assertEqual(len(state.load(self.target, LAYOUT)), 4096)
 
+    def test_unicode_control_format_and_separator_characters(self):
+        for ch in (
+            "\u0085",
+            "\u0080",
+            "\u009f",
+            "\u2028",
+            "\u2029",
+            "\u202e",
+            "\u2066",
+            "\u200b",
+            "\ufeff",
+            "\ue000",
+            "\u00ad",
+        ):
+            with self.subTest(ch=hex(ord(ch))):
+                self.refused(json.dumps(self.doc(entries={f"a{ch}b.md": entry()})).encode())
+        self.plant(
+            json.dumps(self.doc(entries={"d\u00e9j\u00e0/\u65e5\u672c.md": entry()}), ensure_ascii=False).encode()
+        )
+        self.assertEqual(len(state.load(self.target, LAYOUT)), 1)  # ordinary non-ASCII letters are fine
+
+    def test_colliding_names_after_nfc_and_casefold(self):
+        pairs = [("A.md", "a.md"), ("d\u00e9.md", "de\u0301.md"), ("Stra\u00dfe.md", "STRASSE.md"), ("x/Y", "x/y")]
+        for a, b in pairs:
+            with self.subTest(a=a.encode("unicode_escape")):
+                with self.assertRaisesRegex(state.StateError, "collide"):
+                    state.check_entries({a: entry(), b: entry()})
+                self.refused(json.dumps(self.doc(entries={a: entry(), b: entry()})).encode())
+        state.check_entries({"a.md": entry(), "b.md": entry(), "a/b.md": entry(), "ab.md": entry()})
+
     def test_absolute_path_is_named_as_such(self):
         with self.assertRaisesRegex(state.StateError, r"invalid path: /abs$"):
             state.check_rel_path("/abs")
@@ -350,14 +393,115 @@ class Confinement(StateCase):
         self.assertSaveRefusedAndNothingWritten()
         self.assertEqual(os.listdir(real), [])
 
-    def test_symlinked_parent_component(self):
+    def test_symlinked_base_is_resolved_once_and_works(self):
         real = self.tmp / "realparent"
         real.mkdir(mode=0o700)
         os.symlink(real, self.tmp / "link")
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "link" / "s")}):
+            state.save(self.target, LAYOUT, {"x.md": entry()})
+            self.assertEqual(list(state.load(self.target, LAYOUT)), ["x.md"])
+        self.assertEqual(sorted(os.listdir(real)), ["s"])
+        self.assertEqual(stat.S_IMODE((real / "s").stat().st_mode), 0o700)
+
+    def test_symlink_inside_the_base_chain_default_location(self):
+        # a dotfiles-managed ~/.local and a /home -> /var/home style link both sit ABOVE the state directory
+        real = self.tmp / "realhome"
+        (real / ".local").mkdir(parents=True, mode=0o700)
+        os.symlink(real, self.tmp / "home")
+        env = {"HOME": str(self.tmp / "home")}
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("DOIA_STATE_DIR")
+            os.environ.pop("XDG_STATE_HOME", None)
+            state.save(self.target, LAYOUT, {"x.md": entry()})
+            self.assertEqual(list(state.load(self.target, LAYOUT)), ["x.md"])
+        self.assertTrue((real / ".local" / "state" / state.APP_DIR).is_dir())
+
+    def test_symlink_below_the_base_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir(mode=0o700)
+        os.symlink(outside, self.sdir)  # the state directory itself is the link
+        self.assertLoadRefused()
+        self.assertSaveRefusedAndNothingWritten()
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_symlink_swapped_in_between_check_and_open_is_not_followed(self):
+        outside = self.tmp / "outside"
+        outside.mkdir(mode=0o700)
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        real_check = state.check_location
+        moved = self.tmp / "moved"
+
+        def swap(*a, **kw):
+            real_check(*a, **kw)
+            os.replace(self.sdir, moved)
+            os.symlink(outside, self.sdir)
+
+        with mock.patch.object(state, "check_location", side_effect=swap):
+            self.assertLoadRefused()
+        os.unlink(self.sdir)
+        os.replace(moved, self.sdir)
+        with mock.patch.object(state, "check_location", side_effect=swap):
             with self.assertRaises(state.StateError):
                 state.save(self.target, LAYOUT, {"x.md": entry()})
-        self.assertEqual(os.listdir(real), [])
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_base_directory_group_or_world_writable_is_refused(self):
+        base = self.tmp / "base"
+        base.mkdir(mode=0o700)
+        os.chmod(base, 0o777)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(base / "s")}):
+            with self.assertRaisesRegex(state.StateError, "writable"):
+                state.save(self.target, LAYOUT, {})
+            with self.assertRaisesRegex(state.StateError, "writable"):
+                state.load(self.target, LAYOUT)
+        self.assertEqual(os.listdir(base), [])
+
+    def test_sticky_writable_base_is_allowed(self):
+        base = self.tmp / "base"
+        base.mkdir(mode=0o700)
+        os.chmod(base, 0o1777)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(base / "s")}):
+            state.save(self.target, LAYOUT, {})
+            self.assertEqual(state.load(self.target, LAYOUT), {})
+
+    @unittest.skipUnless(os.path.isdir("/tmp") and os.stat("/tmp").st_uid == 0, "needs a root-owned sticky /tmp")
+    def test_root_owned_sticky_base_is_allowed(self):
+        d = Path(tempfile.mkdtemp(prefix="doia-rootbase-", dir="/tmp"))
+        shutil.rmtree(d)  # keep only the unique name; the state directory is created directly below /tmp
+        self.addCleanup(shutil.rmtree, d, True)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(d)}):
+            state.save(self.target, LAYOUT, {})
+            self.assertEqual(state.load(self.target, LAYOUT), {})
+
+    def test_base_owned_by_another_user_is_refused(self):
+        base = self.tmp / "base"
+        base.mkdir(mode=0o700)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(base / "s")}):
+            with mock.patch.object(state, "_euid", return_value=os.geteuid() + 1):
+                with self.assertRaisesRegex(state.StateError, "not owned"):
+                    state.save(self.target, LAYOUT, {})
+
+    def test_errors_show_only_the_last_two_components(self):
+        self.mkdir_state(0o775)
+        with self.assertRaises(state.StateError) as cm:
+            state.load(self.target, LAYOUT)
+        self.assertNotIn(str(self.tmp), str(cm.exception))
+        self.assertIn("state", str(cm.exception))
+        self.assertEqual(state._tail("/u/someone/.local/state/app"), "state/app")
+        self.assertEqual(state._tail("/x\x1b/y\n"), "x?/y?")
+
+    def test_home_empty_or_root_refused_unless_a_base_is_explicit(self):
+        for home in ("", "/"):
+            with self.subTest(home=home):
+                with mock.patch.dict(os.environ, {"HOME": home}):
+                    os.environ.pop("DOIA_STATE_DIR")
+                    os.environ.pop("XDG_STATE_HOME", None)
+                    with self.assertRaises(state.StateError):
+                        state.state_dir()
+                    os.environ["XDG_STATE_HOME"] = str(self.tmp / "xdg")
+                    self.assertEqual(state.state_dir(), self.tmp / "xdg" / state.APP_DIR)
+        with mock.patch.dict(os.environ, {"HOME": ""}):
+            self.assertEqual(state.state_dir(), self.sdir)  # DOIA_STATE_DIR is explicit
 
     def test_directory_mode_0775(self):
         self.mkdir_state(0o775)
@@ -378,11 +522,14 @@ class Confinement(StateCase):
     def test_file_owned_by_another_user(self):
         self.plant_doc()
         real_euid = os.geteuid()
-        calls = []
 
         def euid():
-            calls.append(1)
-            return real_euid if len(calls) == 1 else real_euid + 1  # the directory passes, the file does not
+            # the directories pass, the file does not
+            f, names = sys._getframe(1), set()
+            while f:  # the mock sits between the caller and this function, so look up the whole stack
+                names.add(f.f_code.co_name)
+                f = f.f_back
+            return real_euid + 1 if "_read_file" in names else real_euid
 
         with mock.patch.object(state, "_euid", side_effect=euid):
             with self.assertRaisesRegex(state.StateError, "not owned"):
@@ -482,6 +629,26 @@ class Confinement(StateCase):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
 
 
+class Targets(StateCase):
+    def test_unicode_target_round_trips(self):
+        target = self.tmp / "t\u00e4rget-\u65e5\u672c"
+        target.mkdir()
+        state.save(target, LAYOUT, {"a.md": entry()})
+        self.assertEqual(state.load(target, LAYOUT), {"a.md": entry()})
+
+    def test_non_utf8_target_is_refused_at_save_and_at_load(self):
+        bad = os.path.join(os.fsencode(self.tmp), b"bad-\xff-target")
+        os.mkdir(bad)
+        bad = os.fsdecode(bad)
+        before = self.listing()
+        with self.assertRaisesRegex(state.StateError, "UTF-8"):
+            state.save(bad, LAYOUT, {"a.md": entry()})
+        with self.assertRaisesRegex(state.StateError, "UTF-8"):
+            state.load(bad, LAYOUT)
+        self.assertEqual(self.listing(), before)
+        self.assertFalse(self.sdir.exists())
+
+
 class WriteSafety(StateCase):
     def test_invalid_entries_refused_and_nothing_written(self):
         bad = [
@@ -568,6 +735,13 @@ class WriteSafety(StateCase):
         self.assertEqual(stat.S_IMODE(self.file.stat().st_mode), 0o600)
         self.assertEqual(list(state.load(self.target, LAYOUT)), ["a.md"])
 
+    def test_directory_fsync_failure_after_the_rename_says_the_state_may_be_replaced(self):
+        state.save(self.target, LAYOUT, {"old.md": entry()})
+        with mock.patch.object(state, "_fsync_dir", side_effect=OSError(5, "boom")):
+            with self.assertRaisesRegex(state.StateError, "may already have been replaced"):
+                state.save(self.target, LAYOUT, {"new.md": entry()})
+        self.assertEqual(list(state.load(self.target, LAYOUT)), ["new.md"])  # the rename did happen
+
     def test_fsync_of_file_and_directory(self):
         calls = []
         real = os.fsync
@@ -600,8 +774,50 @@ class WriteSafety(StateCase):
         self.assertEqual(list(state.load(self.target, LAYOUT)), ["a.md"])
 
 
+class Accepts(StateCase):
+    def test_non_digest_values_are_never_accepted(self):
+        bad = [
+            None,
+            "",
+            b"a" * 64,
+            123,
+            0,
+            True,
+            ["a" * 64],
+            "a" * 63,
+            "a" * 65,
+            "A" * 64,
+            "g" * 64,
+            "a" * 64 + "\n",
+            " " + "a" * 63,
+        ]
+        for e in (
+            entry(),
+            entry(pending_sha256=D2),
+            {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2},
+        ):
+            for value in bad:
+                with self.subTest(value=repr(value)[:20], keys=sorted(e)):
+                    self.assertFalse(state.accepts(e, value))
+
+    def test_accepts_exactly_the_stored_digests(self):
+        e = entry(pending_sha256=D2)
+        self.assertTrue(state.accepts(e, D1))
+        self.assertTrue(state.accepts(e, D2))
+        self.assertFalse(state.accepts(e, "c" * 64))
+        self.assertFalse(state.accepts(entry(), D2))
+
+    def test_pending_only_entry_accepts_only_the_pending_digest(self):
+        e = {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2}
+        self.assertTrue(state.accepts(e, D2))
+        self.assertFalse(state.accepts(e, D1))
+        self.assertFalse(state.accepts(e, None))
+
+
 class TwoPhase(StateCase):
-    def test_pending_then_settle(self):
+    NEW = {"kind": "file", "release": "0.5.0", "source": "public"}
+
+    def test_pending_then_settle_with_written_set(self):
         entries = {"a.md": entry(), "b.md": entry(body_sha256=D1)}
         pend = state.with_pending(entries, {"a.md": D2})
         self.assertEqual(pend["a.md"]["pending_sha256"], D2)
@@ -611,13 +827,71 @@ class TwoPhase(StateCase):
             store.save(pend)
             self.assertEqual(store.load(), pend)
             self.assertTrue(state.accepts(pend["a.md"], D1) and state.accepts(pend["a.md"], D2))
-            done = state.settle(store.load())
-            store.save(done)
+            store.save(state.settle(store.load(), {"a.md"}))
         got = state.load(self.target, LAYOUT)
         self.assertEqual(got["a.md"]["body_sha256"], D2)
         self.assertNotIn("pending_sha256", got["a.md"])
         self.assertFalse(state.accepts(got["a.md"], D1))
         self.assertTrue(state.accepts(got["a.md"], D2))
+
+    def test_settle_promotes_only_what_was_written(self):
+        pend = state.with_pending({"a.md": entry(), "b.md": entry()}, {"a.md": D2, "b.md": "c" * 64})
+        done = state.settle(pend, {"a.md"})
+        self.assertEqual(done["a.md"]["body_sha256"], D2)
+        self.assertEqual(done["b.md"]["body_sha256"], D1)  # not written: the old digest stays
+        self.assertTrue(all("pending_sha256" not in e for e in done.values()))
+
+    def test_settle_with_nothing_written_drops_every_pending(self):
+        pend = state.with_pending({"a.md": entry()}, {"a.md": D2}, new={"n.md": {**self.NEW, "pending_sha256": D2}})
+        done = state.settle(pend, set())
+        self.assertEqual(done, {"a.md": entry()})
+
+    def test_settle_unknown_written_path_is_an_error(self):
+        pend = state.with_pending({"a.md": entry()}, {"a.md": D2})
+        with self.assertRaisesRegex(state.StateError, "unknown"):
+            state.settle(pend, {"zzz.md"})
+        with self.assertRaises(state.StateError):
+            state.settle(pend, {"../x"})
+
+    def test_settle_clears_stale_pending_even_for_written_paths_without_one(self):
+        stale = {"a.md": entry(pending_sha256=D2), "b.md": entry()}
+        done = state.settle(stale, {"b.md"})
+        self.assertEqual(done, {"a.md": entry(), "b.md": entry()})
+
+    def test_new_file_in_pending_form(self):
+        base = {"a.md": entry()}
+        pend = state.with_pending(base, {}, new={"n.md": {**self.NEW, "pending_sha256": D2}})
+        self.assertNotIn("body_sha256", pend["n.md"])
+        self.assertNotIn("n.md", base)
+        state.save(self.target, LAYOUT, pend)  # phase 1 hits disk
+        got = state.load(self.target, LAYOUT)  # ... and the process dies here
+        self.assertTrue(state.accepts(got["n.md"], D2))  # a file with exactly the intended content reads as owned
+        self.assertFalse(state.accepts(got["n.md"], D1))  # nothing else does
+        self.assertFalse(state.accepts(got["n.md"], None))
+        self.assertEqual(state.settle(got, {"n.md"})["n.md"]["body_sha256"], D2)
+        self.assertNotIn("n.md", state.settle(got, set()))  # never written: no ownership claim remains
+
+    def test_new_entry_rules(self):
+        base = {"a.md": entry()}
+        bad = [
+            {"a.md": {**self.NEW, "pending_sha256": D2}},  # already exists
+            {"n.md": {**self.NEW}},  # no digest at all
+            {"n.md": {**self.NEW, "pending_sha256": D2, "body_sha256": D1}},  # new means no body digest yet
+            {"n.md": {**self.NEW, "pending_sha256": "nope"}},
+            {"../n.md": {**self.NEW, "pending_sha256": D2}},
+        ]
+        for i, new in enumerate(bad):
+            with self.subTest(i), self.assertRaises(state.StateError):
+                state.with_pending(base, {}, new=new)
+
+    def test_pending_only_entry_needs_a_pending_digest(self):
+        neither = {"a.md": {"kind": "file", "release": "1", "source": "public"}}
+        self.plant(json.dumps(self.doc(entries=neither)).encode())
+        self.assertLoadRefused()
+        self.assertSaveRefusedAndNothingWritten()
+        only_pending = {"a.md": {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2}}
+        self.plant(json.dumps(self.doc(entries=only_pending)).encode())
+        self.assertEqual(state.load(self.target, LAYOUT), only_pending)
 
     def test_pending_for_unknown_path_or_bad_digest_refused(self):
         with self.assertRaises(state.StateError):
@@ -632,52 +906,222 @@ class TwoPhase(StateCase):
         self.assertFalse(state.accepts(got["a.md"], "c" * 64))
 
 
-# Each guard in scripts/state.py, named, with the test that bites it. The mutation check in the report removes each
-# guard in turn; the second test here proves this table is not stale or empty.
-GUARDS = {
-    "duplicate key": StrictParse.test_duplicate_key,
-    "NaN and Infinity": StrictParse.test_nan_and_infinity,
-    "depth": StrictParse.test_depth_five,
-    "unknown keys": StrictParse.test_unknown_entry_key,
-    "entry count": StrictParse.test_too_many_entries,
-    "paths": StrictParse.test_bad_paths,
-    "digests": StrictParse.test_bad_digests,
-    "utf-8": StrictParse.test_not_utf8,
-    "size cap": StrictParse.test_over_size_cap,
-    "target field": StrictParse.test_target_field_not_matching_the_key,
-    "layout field": StrictParse.test_layout_field_not_matching_the_key,
-    "null and mistyped": StrictParse.test_missing_null_and_mistyped_fields,
-    "symlinked file": Confinement.test_symlinked_state_file,
-    "symlinked directory": Confinement.test_symlinked_state_directory,
-    "directory mode": Confinement.test_directory_mode_0775,
-    "directory owner": Confinement.test_directory_owned_by_another_user,
-    "file owner": Confinement.test_file_owned_by_another_user,
-    "file mode": Confinement.test_file_modes,
-    "inside target": Confinement.test_state_directory_inside_the_target,
-    "inside repository": Confinement.test_state_directory_inside_this_repository,
-    "lock": WriteSafety.test_second_save_while_lock_held_fails_and_first_file_unchanged,
-    "crash cleanup": WriteSafety.test_crash_before_rename_keeps_old_file_and_leaves_no_temp,
-    "corrupt blocks write": WriteSafety.test_existing_corrupt_state_blocks_the_write_but_deleting_it_recovers,
-}
+# Each row weakens one guard in a scratch copy of scripts/state.py and runs ONE named test against the copy in a
+# subprocess (DOIA_STATE_SCRIPTS). The test must go red (or hang past the timeout, which also counts as red). A row
+# whose "old" text is no longer in state.py fails loudly, so the table cannot go stale unnoticed.
+MUTANTS = [
+    (
+        "duplicate key",
+        '            raise StateError(f"duplicate key: {_shown(key)}")',
+        "            pass",
+        "StrictParse.test_duplicate_key",
+    ),
+    (
+        "NaN",
+        '    raise StateError(f"not allowed in state: {_shown(name)}")',
+        "    return 0",
+        "StrictParse.test_nan_is_named_in_the_error",
+    ),
+    ("unknown entry keys", "not keys <= _ENTRY_KEYS", "False", "StrictParse.test_unknown_entry_key"),
+    ("entry count", "    if len(entries) > MAX_ENTRIES:", "    if False:", "StrictParse.test_too_many_entries"),
+    ("dotdot path", 'any(part in ("", ".", "..") for part in rel.split("/"))', "False", "StrictParse.test_bad_paths"),
+    (
+        "C* characters",
+        "in _BAD_CATEGORIES",
+        "in ()",
+        "StrictParse.test_unicode_control_format_and_separator_characters",
+    ),
+    (
+        "collisions",
+        "    if len(seen) != len(entries):",
+        "    if False:",
+        "StrictParse.test_colliding_names_after_nfc_and_casefold",
+    ),
+    (
+        "digest regex",
+        '_DIGEST = re.compile(r"[0-9a-f]{64}")',
+        '_DIGEST = re.compile(r"[0-9a-fA-F]{60,64}")',
+        "StrictParse.test_bad_digests",
+    ),
+    (
+        "utf-8",
+        '        text = data.decode("utf-8")',
+        '        text = data.decode("utf-8", "replace")',
+        "StrictParse.test_not_utf8",
+    ),
+    (
+        "size cap read",
+        "            if total > MAX_BYTES:",
+        "            if False:",
+        "StrictParse.test_size_cap_has_three_independent_layers",
+    ),
+    ("target field", 'or doc["target"] != real', "or False", "StrictParse.test_target_field_not_matching_the_key"),
+    (
+        "file owner",
+        '        if st.st_uid != _euid():\n            raise StateError(f"state file',
+        '        if False:\n            raise StateError(f"state file',
+        "Confinement.test_file_owned_by_another_user",
+    ),
+    ("file mode", "        if stat.S_IMODE(st.st_mode) != 0o600:", "        if False:", "Confinement.test_file_modes"),
+    (
+        "final dir mode",
+        '    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):\n        raise StateError(f"{label}: group',
+        '    if False:\n        raise StateError(f"{label}: group',
+        "Confinement.test_directory_mode_0775",
+    ),
+    (
+        "root-owned base",
+        "st.st_uid not in (_euid(), 0)",
+        "st.st_uid != _euid()",
+        "Confinement.test_root_owned_sticky_base_is_allowed",
+    ),
+    (
+        "directory fchmod",
+        "        os.fchmod(fd, 0o700)  # a tight umask",
+        "        pass  # a tight umask",
+        "WriteSafety.test_file_mode_is_0600_even_with_a_tight_umask",
+    ),
+    (
+        "base writable",
+        "            _check_base(bfd",
+        "            (lambda *a: None)(bfd",
+        "Confinement.test_base_directory_group_or_world_writable_is_refused",
+    ),
+    (
+        "nofollow below base",
+        "_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC",
+        "_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC",
+        "Confinement.test_symlink_below_the_base_is_refused",
+    ),
+    (
+        "base not resolved",
+        "Path(os.path.realpath(path.parent))",
+        "Path(path.parent)",
+        "Confinement.test_symlinked_base_is_resolved_once_and_works",
+    ),
+    (
+        "inside target",
+        'for label, base in (("the target", Path(os.path.realpath(target))), ',
+        "for label, base in (",
+        "Confinement.test_state_directory_inside_the_target",
+    ),
+    (
+        "HOME root",
+        'home.rstrip("/") == ""',
+        "False",
+        "Confinement.test_home_empty_or_root_refused_unless_a_base_is_explicit",
+    ),
+    (
+        "lock nonblocking",
+        "fcntl.LOCK_EX | fcntl.LOCK_NB",
+        "fcntl.LOCK_EX",
+        "WriteSafety.test_second_save_while_lock_held_fails_and_first_file_unchanged",
+    ),
+    (
+        "crash cleanup",
+        "            with contextlib.suppress(OSError):\n                os.unlink(tmp",
+        "            with contextlib.suppress(OSError):\n                pass #",
+        "WriteSafety.test_crash_before_rename_keeps_old_file_and_leaves_no_temp",
+    ),
+    (
+        "corrupt blocks write",
+        "        self.load()  # tampered",
+        "        # tampered",
+        "WriteSafety.test_existing_corrupt_state_blocks_the_write_but_deleting_it_recovers",
+    ),
+    (
+        "fsync wrap",
+        "rename: the state may already have been replaced",
+        "rename: the state replaced",
+        "WriteSafety.test_directory_fsync_failure_after_the_rename_says_the_state_may_be_replaced",
+    ),
+    (
+        "non-utf8 target",
+        '    if not _text_ok(real):\n        raise StateError("target path must be valid UTF-8',
+        '    if False:\n        raise StateError("target path must be valid UTF-8',
+        "Targets.test_non_utf8_target_is_refused_at_save_and_at_load",
+    ),
+    ("accepts None", " if d is not None]", "]", "Accepts.test_non_digest_values_are_never_accepted"),
+    (
+        "settle promotes all",
+        '        if rel in written and "pending_sha256" in entry:',
+        '        if "pending_sha256" in entry:',
+        "TwoPhase.test_settle_promotes_only_what_was_written",
+    ),
+    (
+        "settle keeps stale pending",
+        'entry.pop("pending_sha256", None)',
+        "None",
+        "TwoPhase.test_settle_clears_stale_pending_even_for_written_paths_without_one",
+    ),
+    (
+        "pending-new not removed",
+        '        if "body_sha256" not in entry:\n            del out[rel]',
+        "        if False:\n            del out[rel]",
+        "TwoPhase.test_settle_with_nothing_written_drops_every_pending",
+    ),
+    (
+        "pending-only needs digest",
+        'if "body_sha256" not in entry and "pending_sha256" not in entry',
+        "if False",
+        "TwoPhase.test_pending_only_entry_needs_a_pending_digest",
+    ),
+]
 
 
 class GuardTable(unittest.TestCase):
-    def test_table_collects_something_and_every_entry_is_a_real_test(self):
-        self.assertGreaterEqual(len(GUARDS), 20)
-        for name, fn in GUARDS.items():
-            with self.subTest(name):
-                self.assertTrue(callable(fn) and fn.__name__.startswith("test_"))
-                self.assertTrue(hasattr(fn, "__qualname__"))
+    def run_one(self, scripts_dir, test_id):
+        env = dict(os.environ, DOIA_STATE_SCRIPTS=str(scripts_dir))
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "unittest", f"tests.test_state.{test_id}"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return False  # a hang is a failure of the guard's test, which is the point
+        return r.returncode == 0
 
-    def test_a_weakened_guard_turns_its_test_red(self):
-        """Negative case: with the duplicate-key check replaced by a last-wins one, its test fails."""
-        weak = mock.patch.object(state, "_no_duplicates", side_effect=lambda pairs: dict(pairs))
-        suite = unittest.TestSuite([StrictParse("test_duplicate_key")])
-        result = unittest.TestResult()
-        with weak:
-            suite.run(result)
-        self.assertEqual(result.testsRun, 1)
-        self.assertEqual(len(result.failures) + len(result.errors), 1)
+    def test_every_listed_guard_goes_red_when_weakened_and_green_when_intact(self):
+        self.assertGreaterEqual(len(MUTANTS), 28)
+        source = (ROOT / "scripts" / "state.py").read_text()
+        tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        # <copy>/scripts/state.py: the module derives the repository root from its own location (parents[1]), which
+        # must not swallow the temp directories the tests create
+        intact = tmp / "intact" / "scripts"
+        intact.mkdir(parents=True)
+        (intact / "state.py").write_text(source)
+        survivors = []
+        for n, (name, old, new, test_id) in enumerate(MUTANTS):
+            with self.subTest(name):
+                self.assertTrue(old in source, f"stale mutant row: {name}")
+                self.assertTrue(hasattr(sys.modules[__name__], test_id.split(".")[0]))
+                self.assertTrue(self.run_one(intact, test_id), f"{test_id} is not green on the intact copy")
+                mutant = tmp / f"m{n}" / "scripts"
+                mutant.mkdir(parents=True)
+                (mutant / "state.py").write_text(source.replace(old, new, 1))
+                if self.run_one(mutant, test_id):
+                    survivors.append(name)
+        self.assertEqual(survivors, [], "weakened guards whose test stayed green")
+
+    def test_the_runner_itself_detects_a_survivor(self):
+        """Negative case: a no-op 'mutation' leaves the test green, and the runner reports it as green."""
+        tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        copy = tmp / "x" / "scripts"
+        copy.mkdir(parents=True)
+        (copy / "state.py").write_text((ROOT / "scripts" / "state.py").read_text())
+        self.assertTrue(self.run_one(copy, "StrictParse.test_duplicate_key"))
+        (copy / "state.py").write_text(
+            (ROOT / "scripts" / "state.py")
+            .read_text()
+            .replace('            raise StateError(f"duplicate key: {_shown(key)}")', "            pass", 1)
+        )
+        self.assertFalse(self.run_one(copy, "StrictParse.test_duplicate_key"))
 
 
 if __name__ == "__main__":
