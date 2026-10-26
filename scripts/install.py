@@ -213,13 +213,11 @@ def assert_outside_repo(path, root=ROOT):
         raise ValueError(f"destination inside this repository refused: {Path(path).name}")
 
 
-def _check_options(adapter, layout, lead=None):
+def _check_options(adapter, layout):
     if adapter not in ADAPTERS:
         raise ValueError("unknown adapter")
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout: {layout}")
-    if adapter == "none" and not lead:
-        raise ValueError("--adapter none installs only the lead block; give --lead FILE")
     if layout == "user" and "copilot" in HOSTS[adapter]:
         raise ValueError("copilot has no user layout; use --adapter claude or codex with --layout user")
 
@@ -384,11 +382,13 @@ def _plan(
     """[(source, dest Path, action, bytes, sha of the existing file or None, overlay-sourced)]; raises before writing.
 
     action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
-    _check_options(adapter, layout, lead)
+    _check_options(adapter, layout)
     if force_edited and not update:
         raise ValueError("--force-edited only makes sense with --update")
     ov = load_overlay(overlay, root) if overlay is not None else None
     target = _check_target(target, root)
+    if adapter == "none" and lead is None:
+        raise ValueError("--adapter none installs only the lead block; give --lead FILE")
     items = []
     for src, rel, data, origin in _items(adapter, packs, layout, root, ov):
         dest = target / rel
