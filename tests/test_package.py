@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import generate  # noqa: E402  (path set up above)
+import state_fixture  # noqa: E402  (path set up above)
 from export_prompt import build  # noqa: E402
 from install import install, is_generated  # noqa: E402
 from lib import (  # noqa: E402
@@ -29,6 +30,10 @@ from lib import (  # noqa: E402
 )
 from summarize_log import load, summarise  # noqa: E402
 from validate import privacy_hits, validate  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 PIN_RE = re.compile(r"@([0-9a-f]{40}) # (v\d+\.\d+\.\d+)")
 
@@ -339,7 +344,7 @@ class Install(unittest.TestCase):
             agent = Path(d) / ".claude/agents/reviewer.md"
             self.assertTrue(is_generated(agent))
             stale = agent.read_text().replace("(release ", "(release 0.0.0-", 1)
-            agent.write_text(stale)
+            state_fixture.rewrite(d, ".claude/agents/reviewer.md", stale, layout="project")
             mine = Path(d) / ".claude/skills/pack-threat-model/SKILL.md"
             mine.write_text("my own pack, no marker\n")
             # Without --update an existing destination is still a collision.

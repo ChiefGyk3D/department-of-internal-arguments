@@ -16,9 +16,23 @@ Layouts:
                      .agents/skills/pack-<name>/SKILL.md.
 
 Without --update every existing destination is a collision and the whole install is refused.
-With --update a destination is replaced in place only if its marker is well-formed and its body still matches the
-sha256 in the marker (or it is a known release-0.2.0 file). A file you edited is "edited" and refused; --force-edited
-discards your edits. A file without the marker is still a collision.
+
+Ownership comes from a state file the installer keeps for you OUTSIDE the target (scripts/state.py; $DOIA_STATE_DIR,
+else ${XDG_STATE_HOME:-~/.local/state}/department-of-internal-arguments/). A marker inside a file proves nothing: a
+clone, synced dotfiles or a copy carries a valid marker too. With --update a destination is replaced in place only if
+the state holds a digest that matches the file's bytes (it is "owned"), or it is a known release-0.2.0 file. Otherwise
+it is left alone and reported: "unverified" (a well-formed marker, no state entry), "edited" (an entry exists but the
+bytes differ, or the marker is malformed or no longer matches its body); --force-edited replaces both, discarding
+their content. A file without the marker is still a collision. A destination whose bytes equal exactly what this
+release would write is recorded on --apply (its content is verified against this checkout) and not rewritten. Every
+--apply records what it wrote in two phases (the new digest is saved as pending before the files are written, promoted
+after each successful write), under a lock, and prunes entries for files that no longer exist. If the state file is
+unreadable, invalid, locked or in a forbidden place, nothing is written, --force-edited included; a dry run and
+--list-managed write nothing, not even the state directory. The state directory may not be inside, equal to or contain
+an install root (the directories the installer writes into: for --layout user the per-client directories such as
+~/.claude, ~/.codex and ~/.agents), so ~/.local/state is fine with --layout user and --adapter codex on your home
+directory. A crash between the phases leaves the new files unverified. The lead block (--lead) is still decided by its
+own hash, as before.
 
 --overlay DIR is a private directory outside this repository (roles/, packs/; see scripts/overlay.py). An overlay
 entry with a public name is append-only (the public file unchanged, then a labelled additions section); a new name is
@@ -32,7 +46,8 @@ touched. A re-run with the same text is a no-op; --update replaces a block whose
 is refused (--force-edited with --update discards your edits to the block only); a malformed block is refused.
 
 --list-managed is read-only: it lists files under the target that carry the marker with their release and whether
-they match this checkout (exit 0 when all are current, 3 otherwise).
+they match this checkout (exit 0 when all are current, 3 otherwise), then a state: line. Without a usable state file
+every marked file is "unverified".
 """
 
 import argparse
@@ -44,6 +59,7 @@ import sys
 from pathlib import Path
 
 import generate
+import state as statestore
 from lib import (
     CODEX_AGENTS_DIR,
     CODEX_SKILLS_DIR,
@@ -176,7 +192,8 @@ def inspect(path):
     state: none (absent, not a regular file, a symlink, or no marker text at all) | owned (well-formed marker whose
     sha256 matches the body) | legacy (0.2.0 marker without a hash, body is a known 0.2.0 output) | legacy-unverified
     (hashless marker, unknown body) | edited (marker text present but malformed, forged, or the body no longer matches).
-    The marker text alone is never ownership."""
+    This is the MARKER verdict only: "owned" here means the marker is consistent, never that this installer wrote the
+    file. The marker text alone is never ownership; _ownership() adds the state store's verdict."""
     path = Path(path)
     if path.is_symlink() or not path.is_file():
         return "none", None, None, b""
@@ -202,7 +219,7 @@ def inspect(path):
 
 
 def is_generated(path):
-    """True only for a file the installer may replace without --force-edited."""
+    """True if the file's marker is consistent (a marker-level check only; ownership also needs the state)."""
     return inspect(path)[0] in ("owned", "legacy")
 
 
@@ -376,12 +393,83 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _user_roots(target, rels, lead=None):
+    """The install roots of a user-layout run: the directories the installer writes managed files into.
+
+    A path that starts with a dot names a per-client directory under the target (.codex, .agents, .github): that
+    directory is the root. Any other path (agents/..., skills/...) is the Claude tree, which IS the target. A lead file
+    is its own root. The target alone covers everything when it is a root itself."""
+    roots = {}
+    for rel in rels:
+        first = rel.split("/", 1)[0]
+        root = Path(target) / first if first.startswith(".") else Path(target)
+        roots[str(root)] = root
+    if lead is not None:
+        path = _lead_path(target, lead)
+        roots[str(path)] = path
+    if str(Path(target)) in roots:
+        return [Path(target)]
+    return list(roots.values())
+
+
+def _install_roots(layout, target, rels, lead):
+    """None for the project layout (the old single-target rule: the target is the install root); else the user roots."""
+    if layout != "user":
+        return None
+    return _user_roots(target, rels, lead)
+
+
+class _Plan(list):
+    """The plan rows plus the ownership context _apply needs: what was decided against which state."""
+
+    target = None
+    layout = None
+    roots = None
+    entries = None  # the state entries the plan was decided against; _apply refuses if they changed
+    rel_of = None  # destination Path -> relative path recorded in the state (the lead block has none)
+    release = None
+
+
+def _read_state(target, layout, roots):
+    """The state entries, {} when there is no state file. Any problem raises (a StateError is a ValueError): the run
+    is refused, never downgraded to marker-only ownership."""
+    try:
+        return statestore.load_or_empty(target, layout, roots=roots)
+    except statestore.StateError as exc:
+        hint = ""
+        if "state directory is" in str(exc) or "state directory contains" in str(exc):
+            hint = "; set DOIA_STATE_DIR to a directory outside the install roots"
+        raise ValueError(f"ownership state refused: {exc}{hint}") from None
+
+
+def _ownership(dest, rel, data, entries):
+    """(state, bytes on disk) for an existing destination; the state decides what may be done with it.
+
+    owned (the state vouches for these bytes, or they equal what this release writes) | legacy (a known 0.2.0 body)
+    | unverified (a consistent marker, but no digest recorded) | edited (a digest is recorded and the bytes differ, or
+    the marker is malformed or no longer matches its body) | legacy-unverified | none (not a marker file at all)."""
+    marker, _release, _source, existing = inspect(dest)
+    if marker == "none":
+        return "none", existing
+    if existing == data:
+        return "owned", existing  # verified against this checkout's own sources, not against the marker
+    if marker in ("owned", "legacy") and statestore.verdict(entries, rel, statestore.body_sha256(existing)) == "owned":
+        return "owned", existing
+    if marker == "legacy":
+        return "legacy", existing
+    if marker == "owned":
+        entry = entries.get(rel)
+        return ("edited" if type(entry) is dict and "body_sha256" in entry else "unverified"), existing
+    return marker, existing  # edited | legacy-unverified
+
+
 def _plan(
     target, adapter, packs=None, root=ROOT, update=False, layout="project", overlay=None, force_edited=False, lead=None
 ):
     """[(source, dest Path, action, bytes, sha of the existing file or None, overlay-sourced)]; raises before writing.
 
-    action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
+    action: new | update | unchanged | edited (not replaceable without force) | unverified (no state entry; not
+    replaceable without force) | forced (edited or unverified, will be discarded). The state is read, never written."""
     _check_options(adapter, layout)
     if force_edited and not update:
         raise ValueError("--force-edited only makes sense with --update")
@@ -389,8 +477,13 @@ def _plan(
     target = _check_target(target, root)
     if adapter == "none" and lead is None:
         raise ValueError("--adapter none installs only the lead block; give --lead FILE")
-    items = []
-    for src, rel, data, origin in _items(adapter, packs, layout, root, ov):
+    rows = _items(adapter, packs, layout, root, ov)
+    roots = _install_roots(layout, target, [rel for _s, rel, _d, _o in rows], lead)
+    entries = _read_state(target, layout, roots)
+    items = _Plan()
+    items.target, items.layout, items.roots, items.entries = target, layout, roots, entries
+    items.rel_of, items.release = {}, version(root)
+    for src, rel, data, origin in rows:
         dest = target / rel
         ensure_safe(dest)
         assert_outside_repo(dest, root)
@@ -398,11 +491,11 @@ def _plan(
         if dest.exists() or dest.is_symlink():
             if not update:
                 raise ValueError(f"collision; merge manually (or use --update): {dest.relative_to(target)}")
-            state, _rel, _src, existing = inspect(dest)
-            if state in ("owned", "legacy"):
+            owner, existing = _ownership(dest, rel, data, entries)
+            if owner in ("owned", "legacy"):
                 action = "unchanged" if existing == data else "update"
-            elif state in ("edited", "legacy-unverified"):
-                action = "forced" if force_edited else "edited"
+            elif owner in ("edited", "unverified", "legacy-unverified"):
+                action = "forced" if force_edited else ("unverified" if owner == "unverified" else "edited")
             else:
                 raise ValueError(f"not a generated file; merge manually: {dest.relative_to(target)}")
             seen = _sha(existing)
@@ -413,6 +506,7 @@ def _plan(
             if parent.exists() and not parent.is_dir():
                 raise ValueError(f"parent is not a directory: {parent}")
         items.append((src, dest, action, data, seen, origin == "overlay"))
+        items.rel_of[dest] = rel
     if lead is not None:
         items.append(_lead_item(target, lead, root, update, force_edited))
     return items
@@ -428,10 +522,19 @@ def plan(
 
 def _refuse_edited(items):
     edited = [str(d.name) for _, d, a, _, _, _ in items if a == "edited"]
+    unverified = [str(d.name) for _, d, a, _, _, _ in items if a == "unverified"]
+    parts = []
     if edited:
-        raise ValueError(
+        parts.append(
             "edited files refused (merge manually, or --force-edited discards your changes): " + ", ".join(edited)
         )
+    if unverified:
+        parts.append(
+            "unverified files refused (no record that this installer wrote them; --force-edited replaces them): "
+            + ", ".join(unverified)
+        )
+    if parts:
+        raise ValueError("; ".join(parts))
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -571,14 +674,96 @@ def _write_one(dest, action, data, seen, private):
         os.close(dfd)
 
 
+def _gone(target, rel):
+    """True if nothing exists at target/rel (metadata only, nothing is opened or followed to its content)."""
+    try:
+        os.lstat(Path(target) / rel)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False  # unknown: keep the entry
+    return False
+
+
+def _entry_for(release, private, digest):
+    return {"kind": "file", "release": release, "source": "overlay" if private else "public", "body_sha256": digest}
+
+
 def _apply(items, root=ROOT):
+    """Write the plan under the state lock, in two phases (see the module docstring of scripts/state.py).
+
+    Phase 1 saves the digest each file is about to get as pending (a new path is added without a body digest, so it is
+    never owned until phase 2); entries for vanished files are pruned and files that already hold exactly this
+    release's bytes are recorded. Then every write goes through _write_one, and only a path whose write returned is
+    reported as written; phase 2 settles exactly that set, even when a write failed. A crash between the phases
+    leaves new paths unverified (recovery is the adopt step) and existing ones accepted under both digests."""
     _refuse_edited(items)
-    for _src, dest, action, data, seen, private in items:
-        if action == "unchanged":
-            continue
-        ensure_safe(dest)
-        assert_outside_repo(dest, root)
-        _write_one(dest, action, data, seen, private)
+    if not isinstance(items, _Plan) or items.target is None:
+        raise ValueError("internal error: the plan carries no ownership state; refusing to write")
+    try:
+        store = statestore.Store(items.target, items.layout, roots=items.roots)
+    except statestore.StateError as exc:
+        raise ValueError(f"ownership state refused: {exc}") from None
+    with store:
+        try:
+            entries = store.load() or {}
+        except statestore.StateError as exc:
+            raise ValueError(f"ownership state refused: {exc}") from None
+        if entries != items.entries:
+            raise ValueError("the ownership state changed since the plan was made; re-run")
+        release, rel_of = items.release, items.rel_of
+        cur = {rel: e for rel, e in entries.items() if not _gone(items.target, rel)}
+        pending, new, info = {}, {}, {}
+        for _src, dest, action, data, _seen, private in items:
+            rel = rel_of.get(dest)
+            if rel is None or action == "unchanged":
+                continue
+            digest = statestore.body_sha256(data)
+            info[rel] = "overlay" if private else "public"
+            if rel in cur:
+                pending[rel] = digest
+            else:
+                new[rel] = {"kind": "file", "release": release, "source": info[rel], "pending_sha256": digest}
+        phase1 = statestore.with_pending(cur, pending, new=new)
+        for _src, dest, action, data, _seen, private in items:
+            rel = rel_of.get(dest)
+            if rel is None or action != "unchanged":
+                continue
+            digest = statestore.body_sha256(data)
+            # Record a file that already holds this release's bytes. That also finishes an update that a crash
+            # interrupted after the write: there the entry still shows the old digest next to the pending one.
+            held = phase1.get(rel)
+            if type(held) is not dict or held.get("body_sha256") != digest:
+                phase1 = statestore.with_entry(phase1, rel, _entry_for(release, private, digest))
+        on_disk = entries
+        if phase1 != on_disk:
+            store.save(phase1)
+            on_disk = phase1
+        written = set()
+
+        def settle():
+            final = statestore.settle(on_disk, written)
+            for rel in written:
+                final[rel]["release"], final[rel]["source"] = release, info[rel]
+            if final != on_disk:
+                store.save(final)
+
+        try:
+            for _src, dest, action, data, seen, private in items:
+                if action == "unchanged":
+                    continue
+                ensure_safe(dest)
+                assert_outside_repo(dest, root)
+                _write_one(dest, action, data, seen, private)
+                if dest in rel_of:
+                    written.add(rel_of[dest])  # recorded only after the write returned
+        except BaseException:
+            try:
+                settle()  # what really happened is still recorded; the original error is the one that surfaces
+            except statestore.StateError:
+                pass
+            raise
+        settle()
 
 
 def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, layout="project", overlay=None, **kw):
@@ -603,14 +788,40 @@ def _read_capped(path):
         return f.read(MAX_MANAGED_BYTES + 1)
 
 
+class _Rows(list):
+    """The listing rows plus the one-line account of the ownership state they were judged against."""
+
+    state_line = "state: not read"
+
+
+def _state_line(target, layout, entries, problem):
+    if problem is not None:
+        return f"state: unusable ({_safe(problem)}); every marked file is unverified"
+    try:
+        path = statestore.state_path(target, layout)
+    except statestore.StateError as exc:
+        return f"state: unavailable ({_safe(exc)}); every marked file is unverified"
+    held = ""
+    try:
+        if statestore.lock_held(target, layout):
+            held = "; another install is running"
+    except statestore.StateError:
+        pass
+    if entries is None:
+        return f"state: {_safe(path)} (none{held}; every marked file is unverified)"
+    return f"state: {_safe(path)} ({len(entries)} entries{held})"
+
+
 def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
     """Read-only: one row per file under target whose text carries the marker.
 
     status: current | stale (older release, differs) | differs (this release, content differs) |
             orphan (this checkout and overlay no longer produce it) | unchecked (overlay-sourced, no --overlay given) |
-            edited (marker present but the body no longer matches it, or the marker is malformed) |
+            unverified (a consistent marker but the state has no record of it, or no usable state exists) |
+            edited (a digest is recorded and the bytes differ, or the marker is malformed or no longer matches) |
             legacy-unverified (0.2.0 marker without a hash and a body 0.2.0 never produced).
-    Files without the marker text and symlinks are not listed."""
+    Files without the marker text and symlinks are not listed. The result carries a `state_line`. Nothing is written,
+    not even the state directory; a state that cannot be used is reported, never repaired, and nothing is owned."""
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout: {layout}")
     ov = load_overlay(overlay, root) if overlay is not None else None
@@ -618,28 +829,40 @@ def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
     hosts = ("claude", "codex") if layout == "user" else ("claude", "copilot", "codex")
     expected = {rel: data for _s, rel, data, _o in _items(hosts, None, layout, root, ov)}
     ver = version(root)
-    rows = []
+    found = []
     for pattern in _scan_patterns(layout):
         for path in sorted(target.glob(pattern)):
             try:
                 ensure_safe(path)
             except ValueError:
                 continue
-            state, release, source, data = inspect(path)
-            if state == "none":
-                continue
-            rel = str(path.relative_to(target))
-            if state in ("edited", "legacy-unverified"):
-                status = state
-            elif source == "overlay" and ov is None:
-                status = "unchecked"
-            elif rel not in expected:
-                status = "orphan"
-            elif data == expected[rel]:
-                status = "current"
-            else:
-                status = "differs" if release == ver else "stale"
-            rows.append({"path": rel, "release": release, "source": source, "status": status})
+            marker, release, source, data = inspect(path)
+            if marker != "none":
+                found.append((str(path.relative_to(target)), marker, release, source, data))
+    roots = _install_roots(layout, target, [rel for rel, *_ in found], lead)
+    entries, problem = None, None
+    try:
+        entries = statestore.load(target, layout, roots=roots)
+    except statestore.StateError as exc:
+        problem = str(exc)
+    rows = _Rows()
+    rows.state_line = _state_line(target, layout, entries, problem)
+    for rel, marker, release, source, data in found:
+        recorded = (entries or {}).get(rel)
+        if marker in ("edited", "legacy-unverified"):
+            status = marker
+        elif marker == "owned" and statestore.verdict(entries, rel, statestore.body_sha256(data)) != "owned":
+            has_digest = type(recorded) is dict and "body_sha256" in recorded
+            status = "edited" if has_digest else "unverified"
+        elif source == "overlay" and ov is None:
+            status = "unchecked"
+        elif rel not in expected:
+            status = "orphan"
+        elif data == expected[rel]:
+            status = "current"
+        else:
+            status = "differs" if release == ver else "stale"
+        rows.append({"path": rel, "release": release, "source": source, "status": status})
     if lead is not None:  # an explicitly named file always gets a row, so it can never read as clean by omission
         rows.append(_lead_row(target, lead, root))
     return rows
@@ -721,7 +944,8 @@ class _SafeParser(argparse.ArgumentParser):
 
 LABELS = {
     "edited": "edited (refused; --force-edited discards your changes)",
-    "forced": "update (forced; discards local edits)",
+    "unverified": "unverified (refused; --adopt records it, --force-edited replaces it)",
+    "forced": "update (forced; discards local edits or an unverified file)",
     "append": "append (adds the lead block; the rest of the file is untouched)",
 }
 
@@ -749,6 +973,7 @@ def main(argv=None):
             for r in rows:
                 print(f"{r['status']:17} {r['release']:10} {r['source']:8} {_safe(r['path'])}")
             bad = [r for r in rows if r["status"] != "current"]
+            print(rows.state_line)
             print(f"{len(rows)} managed files, {len(bad)} not current")
             return 3 if bad else 0
         items = _plan(

@@ -1205,6 +1205,100 @@ class Containment(StateCase):
             self.assertEqual(state.load(self.target, LAYOUT), {})
 
 
+class InstallRoots(StateCase):
+    """Issue #40: the location rule applies to the install roots (a list), not to the layout's nominal target."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.root_a = self.home / ".claude"
+        self.root_b = self.home / ".codex"
+        self.root_a.mkdir()
+        self.root_b.mkdir()
+        self.roots = [self.root_a, self.root_b]
+
+    def test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root(self):
+        env = {"HOME": str(self.home)}
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("DOIA_STATE_DIR")
+            os.environ.pop("XDG_STATE_HOME", None)
+            # the nominal target is the home directory; the default directory is inside it, and that is accepted
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            want = self.home / ".local" / "state" / state.APP_DIR
+            self.assertTrue(want.is_dir())
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+            self.assertEqual(state.load_or_empty(self.home, "user", roots=self.roots), {"a.md": entry()})
+            self.assertIs(state.lock_held(self.home, "user", roots=self.roots), False)
+
+    def test_the_single_target_form_still_refuses_the_same_directory(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".local" / "state" / "x")}):
+            with self.assertRaisesRegex(state.StateError, "inside the target"):
+                state.load(self.home, "user")
+
+    def test_a_state_directory_inside_an_install_root_is_refused_by_every_entry_point(self):
+        inside = self.root_a / "state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+            for call in (
+                lambda: state.load(self.home, "user", roots=self.roots),
+                lambda: state.load_or_empty(self.home, "user", roots=self.roots),
+                lambda: state.lock_held(self.home, "user", roots=self.roots),
+                lambda: state.Store(self.home, "user", roots=self.roots),
+            ):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    call()
+        self.assertEqual(os.listdir(self.root_a), [])
+
+    def test_a_state_directory_equal_to_a_root_is_refused(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.root_b)}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_state_directory_that_contains_a_root_is_refused(self):
+        for d in (self.home, self.tmp):
+            with self.subTest(d=d.name), mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(d)}):
+                with self.assertRaisesRegex(state.StateError, "contains an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+
+    def test_a_symlinked_alias_of_a_root_is_refused(self):
+        alias = self.tmp / "alias"
+        os.symlink(self.root_a, alias)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(alias / "s")}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_root_that_does_not_exist_yet_still_counts(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".agents" / "s")}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=[self.home / ".agents"])
+
+    def test_the_repository_is_still_refused_with_roots(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(state._REPO_ROOT / "scripts" / ".state-test")}):
+            with self.assertRaisesRegex(state.StateError, "inside this repository"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_an_empty_list_checks_only_the_repository(self):
+        self.assertIsNone(state.load(self.home, "user", roots=[]))
+
+    def test_hostile_roots_are_state_errors(self):
+        for bad in ([None], [5], [b"/x"], [["/x"]], [StrSub("/x")], ["a\0b"], "not-a-list", 5, ListSub([self.root_a])):
+            with self.subTest(repr(bad)), self.assertRaises(state.StateError):
+                state.load(self.home, "user", roots=bad)
+            with self.subTest(repr(bad)), self.assertRaises(state.StateError):
+                state.Store(self.home, "user", roots=bad)
+        with self.assertRaises(state.StateError):
+            state.load(self.home, "user", roots=[str(self.root_a)] * (state.MAX_ROOTS + 1))
+        self.assertFalse(self.sdir.exists())
+
+    def test_the_key_still_comes_from_the_target_not_the_roots(self):
+        a = state.state_path(self.home, "user")
+        with state.Store(self.home, "user", roots=self.roots) as store:
+            store.save({})
+        self.assertEqual(a, self.sdir / (state.state_key(self.home, "user")[2] + ".json"))
+        self.assertTrue(a.exists())
+
+
 class BytesSub(bytes):
     pass
 
@@ -2226,8 +2320,8 @@ MUTANTS = [
     ),
     (
         "inside target",
-        'for label, base in (("the target", Path(_real_path(target))), ',
-        "for label, base in (",
+        '        bases = [("the target", Path(_real_path(target)))]',
+        "        bases = []",
         "Confinement.test_state_directory_inside_the_target",
     ),
     (
@@ -2677,6 +2771,58 @@ MUTANTS = [
         "    return _shown(exc.strerror)",
         "HostileEverywhere.test_oserr_renders_only_an_exact_str_strerror",
     ),
+    (
+        "install roots checked",
+        '        bases = [("an install root", Path(_real_path(root))) for root in target]',
+        "        bases = []",
+        "InstallRoots.test_a_state_directory_inside_an_install_root_is_refused_by_every_entry_point",
+    ),
+    (
+        "install roots cap",
+        "        if len(target) > MAX_ROOTS:",
+        "        if False:",
+        "InstallRoots.test_hostile_roots_are_state_errors",
+    ),
+    (
+        "roots exact list",
+        "    if not _is_one_of(roots, (list, tuple)):",
+        "    if False:",
+        "InstallRoots.test_hostile_roots_are_state_errors",
+    ),
+    (
+        "roots replace the target",
+        "    if roots is None:\n        return target",
+        "    if True:\n        return target",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "roots keep the repository",
+        '    bases.append(("this repository", _REPO_ROOT.resolve()))',
+        "    pass",
+        "InstallRoots.test_the_repository_is_still_refused_with_roots",
+    ),
+    (
+        "load uses roots",
+        "    directory = state_dir()\n    _check_location(_location_spec(target, roots), directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return None",
+        "    directory = state_dir()\n    _check_location(target, directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return None",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "lock_held uses roots",
+        "    directory = state_dir()\n    _check_location(_location_spec(target, roots), directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return False",
+        "    directory = state_dir()\n    _check_location(target, directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return False",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "Store uses roots",
+        "        _check_location(_location_spec(target, roots), directory)\n        self._dfd",
+        "        _check_location(target, directory)\n        self._dfd",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
 ]
 
 
@@ -2685,7 +2831,7 @@ MUTANTS = [
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
-EXPECTED_ROWS = 97
+EXPECTED_ROWS = 105
 
 
 class LooseModeConstants(unittest.TestCase):

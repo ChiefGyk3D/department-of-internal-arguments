@@ -12,8 +12,14 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import install as installer  # noqa: E402  (path set up above)
+import state_fixture  # noqa: E402  (path set up above)
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 FORGED = "new: forged.toml  [public, sha256 " + "0" * 64 + "]"
 # Every class the review named: LF, CR, ESC, C1 CSI, bidi controls, line/paragraph separators, zero-width.
@@ -103,7 +109,7 @@ class PreviewForgery(unittest.TestCase):
             shutil.copy(ROOT / ".codex/agents/reviewer.toml", agents / f"x\n{FORGED}.toml")
             code, out, _ = run_main("--target", d, "--list-managed")
             self.assertEqual(code, 3)  # the extra file is an orphan
-            self.assertEqual(len(out.splitlines()), 3, out)  # two rows and the count line
+            self.assertEqual(len(out.splitlines()), 4, out)  # two rows, the state line and the count line
             self.assertFalse(any(ln.startswith("new:") for ln in out.splitlines()))
 
 

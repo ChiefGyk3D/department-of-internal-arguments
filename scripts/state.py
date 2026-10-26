@@ -61,8 +61,11 @@ is an environment or location problem and refuses too. `lock_held` is the read-o
 for a `state:` line. `with_entry` and `without_entry` are the copy-and-validate edits for adopt and drop. Hold one
 `Store` across both phases of an update. A dry run must call only load, load_or_empty, lock_held and state_path (none
 creates the directory or the lock file). The state directory may not be, be inside, or contain the target or this
-repository, so a `--layout user` target that is the home directory cannot use the default location under it; set
-DOIA_STATE_DIR to a directory elsewhere (to be decided in #40). A raw OSError never escapes this module.
+repository. load, load_or_empty, lock_held and Store also take an optional `roots=` list of INSTALL ROOTS (the
+directories the installer writes managed files into); the rule then applies to each root instead of the nominal target,
+so a `--layout user` run whose target is the home directory keeps its default state in ~/.local/state, which is part of
+no install root, while ~/.claude (or an ancestor of it) is refused (decided in #40). The state file is still keyed by
+the target and layout. A raw OSError never escapes this module.
 
 Two-phase update. Phase 1: with_pending records the digest each file is about to get (an existing path gets a
 pending_sha256 next to its body_sha256; a NEW path is added with only pending_sha256, via `new=`). Save. Write the
@@ -107,6 +110,7 @@ MAX_BYTES = 1024 * 1024
 MAX_ENTRIES = 4096
 MAX_DEPTH = 4
 MAX_PATH_BYTES = 1024
+MAX_ROOTS = 64
 MIN_TMP_AGE = 5.0  # seconds before an orphaned temporary file may be reaped
 APP_DIR = "department-of-internal-arguments"
 
@@ -215,11 +219,32 @@ def _real_path(target):
         raise StateError("the target path cannot be resolved") from None
 
 
+def _location_spec(target, roots):
+    """What _check_location checks: the target, or the install roots (which must then be an exact list or tuple)."""
+    if roots is None:
+        return target
+    if not _is_one_of(roots, (list, tuple)):
+        raise StateError("roots must be a list or tuple of paths")
+    return roots
+
+
 def _check_location(target, directory=None):
-    """The state directory must not be, be inside, or contain the target or this repository (resolved and literal)."""
+    """The state directory must not be, be inside, or contain the target or this repository (resolved and literal).
+
+    `target` is one path (the target; the project layout) or an exact list or tuple of paths: the INSTALL ROOTS, the
+    directories the installer actually writes managed files into (issue #40). With a list, the rule applies to each
+    root instead of the nominal target, so a `--layout user` target that is the home directory can keep its state in
+    ~/.local/state: that directory is not part of any install root. An empty list checks only the repository."""
     directory = state_dir() if directory is None else directory
     real = Path(os.path.realpath(directory))
-    for label, base in (("the target", Path(_real_path(target))), ("this repository", _REPO_ROOT.resolve())):
+    if _is_one_of(target, (list, tuple)):
+        if len(target) > MAX_ROOTS:
+            raise StateError("too many install roots")
+        bases = [("an install root", Path(_real_path(root))) for root in target]
+    else:
+        bases = [("the target", Path(_real_path(target)))]
+    bases.append(("this repository", _REPO_ROOT.resolve()))
+    for label, base in bases:
         for cand in (real, directory):
             if _inside(cand, base):
                 raise StateError(f"the state directory is inside {label}; refused")
@@ -569,11 +594,13 @@ def _read_file(dfd, name, real, layout):
     return _parse_strict(b"".join(chunks), real, layout)
 
 
-def load(target, layout):
-    """The entries mapping for (target, layout), None when there is no state file, StateError for anything else."""
+def load(target, layout, roots=None):
+    """The entries mapping for (target, layout), None when there is no state file, StateError for anything else.
+
+    `roots` (optional list of install-root paths) replaces the target in the location check; see _check_location."""
     real, layout, stem = state_key(target, layout)
     directory = state_dir()
-    _check_location(target, directory)
+    _check_location(_location_spec(target, roots), directory)
     dfd = _open_state_dir(directory, create=False)
     if dfd is None:
         return None
@@ -583,18 +610,18 @@ def load(target, layout):
         os.close(dfd)
 
 
-def load_or_empty(target, layout):
+def load_or_empty(target, layout, roots=None):
     """Like load, but a missing file is {} (corrupt still raises); for callers that treat no record as no entries."""
-    got = load(target, layout)
+    got = load(target, layout, roots)
     return {} if got is None else got
 
 
-def lock_held(target, layout):
+def lock_held(target, layout, roots=None):
     """True if another process holds the write lock. Read-only probe: creates no directory and no lock file, holds
     nothing afterwards (it takes a shared lock for an instant), so a dry run or a listing can use it."""
     _, _, stem = state_key(target, layout)
     directory = state_dir()
-    _check_location(target, directory)
+    _check_location(_location_spec(target, roots), directory)
     dfd = _open_state_dir(directory, create=False)
     if dfd is None:
         return False
@@ -627,10 +654,10 @@ def lock_held(target, layout):
 class Store:
     """Exclusive write access for one (target, layout). Hold it across both phases of a two-phase update."""
 
-    def __init__(self, target, layout):
+    def __init__(self, target, layout, roots=None):
         self.real, self.layout, self.stem = state_key(target, layout)
         directory = state_dir()
-        _check_location(target, directory)
+        _check_location(_location_spec(target, roots), directory)
         self._dfd = _open_state_dir(directory, create=True)
         self._lfd = None
         try:

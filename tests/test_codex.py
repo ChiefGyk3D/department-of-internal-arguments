@@ -13,13 +13,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import generate  # noqa: E402  (path set up above)
 import install as installer  # noqa: E402
 import lib  # noqa: E402
+import state_fixture  # noqa: E402  (path set up above)
 from install import install, list_managed, plan  # noqa: E402
 from lib import GENERATED_MARK, PACK_NAMES, ROLE_NAMES  # noqa: E402
 from validate import validate  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 AGENTS = ".codex/agents"
 SKILLS = ".agents/skills"
