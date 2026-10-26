@@ -70,15 +70,17 @@ UNVERIFIED: that Codex loads the generated TOML and the skills without complaint
 
 The project install writes `<project>/.claude/...`. A user-level Claude Code tree (the one a dotfiles repo keeps) has no `.claude` level, so `--layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md` instead. It is still additive, still refuses symlinked destinations and whole-install collisions, still previews by default, and `--update` still replaces only files that carry a well-formed marker and a matching hash (see [Overlay and ownership](overlay-and-ownership.md)); as above, files that self-identify as generated may be overwritten by `--update`, because the hash is not a signature. It is for Claude Code and Codex (Copilot has no user layout, and asking for it is refused; the Codex form is described above), and a target inside this repository is refused.
 
-The routine, from a checkout pinned to a release tag:
+The routine, from a checkout pinned by commit:
 
 ```
 git -C /path/to/department-of-internal-arguments fetch --tags
-git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.4.0
+git -C /path/to/department-of-internal-arguments checkout <commit>   # <release tag>; the current release is 0.4.0
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update --apply
 git -C ~/dotfiles/claude status   # review the diff, then commit
 ```
+
+A tag can be moved and a commit cannot, so pin the commit and keep the release tag in the comment, the way the GYST workflow pins do. Read the commit once, from a clone you trust, with `git -C /path/to/department-of-internal-arguments rev-parse <release tag>^{commit}`.
 
 The first install run is the preview and writes nothing.
 

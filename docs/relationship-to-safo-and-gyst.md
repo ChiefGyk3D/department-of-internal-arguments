@@ -2,7 +2,7 @@
 
 ## Hooks are not here
 
-The routing hooks, the dispatch guard that checks a brief names a model and the session probe, are being built in [SAFO](https://github.com/ChiefGyk3D/scrum-around-and-find-out) as `safo hooks`. Prompts guide behavior and do not enforce it, so those belong with the project tooling and not with the personas. SAFO will install personas from this repository, pinned by commit. See [Policies](policies.md).
+The routing hooks, the dispatch guard that checks a brief names a model and the session probe, are being built in [SAFO](https://github.com/ChiefGyk3D/scrum-around-and-find-out) as `safo hooks`. Prompts guide behavior and do not enforce it, so those belong with the project tooling and not with the personas. SAFO does not install personas. Install them with this repository's own installer (see [Install](install.md)), from a checkout pinned by commit, with the release tag as a comment. See [Policies](policies.md).
 
 ## Codex
 
