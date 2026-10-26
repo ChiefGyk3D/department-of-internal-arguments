@@ -1,0 +1,642 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "codex-adapter-first-head",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the first head of the Codex adapter pull request (#30, issue #22)",
+      "base": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+      "head": "e0f2b3932c54fa0e03e5afe8902e5aa4bed03045",
+      "diff_sha256": "5a2073ca0f0d6302444dbfe3aa013e007609e78d2633b221d4decd5a51d49ecd",
+      "findings": [
+        {
+          "id": "root-target",
+          "class": "filesystem-safety",
+          "severity": "important",
+          "round": 1,
+          "summary": "The installer accepts the filesystem root as its target directory, so a typo or a .. can root an install at /.",
+          "source": "Codex review of #30; fixed before merge",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "filesystem root",
+            "_check_target",
+            "target.{0,40}(/|root)",
+            "realpath"
+          ],
+          "fixed": "ac8cbe9addd2eb3e789aac8eccc8691496908fd0",
+          "at_base": "observed",
+          "repro": {
+            "kind": "probe",
+            "probe": "root_target.py",
+            "args": []
+          }
+        },
+        {
+          "id": "invalid-toml",
+          "class": "input-validation",
+          "severity": "important",
+          "round": 1,
+          "summary": "A role, fragment, policy or overlay text with a control character renders a Codex agent file that is not valid TOML, and nothing checks the rendered text.",
+          "source": "Copilot and Codex review of #30; fixed before merge",
+          "paths": [
+            "scripts/generate.py"
+          ],
+          "evidence_any": [
+            "tomllib",
+            "valid(ate|ation)?.{0,30}TOML",
+            "TOML.{0,40}(invalid|parse|valid)",
+            "control char"
+          ],
+          "fixed": "ac8cbe9addd2eb3e789aac8eccc8691496908fd0",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "codex_toml.py",
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "codex-adapter-merged",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the Codex adapter pull request as merged (#30)",
+      "base": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+      "head": "ac8cbe9addd2eb3e789aac8eccc8691496908fd0",
+      "diff_sha256": "ee1fe67f73b1869ae0a4e57bf4a1b7aa5a0c3ac6a3d93c1a20879710acc8ab8d",
+      "findings": [
+        {
+          "id": "forged-marker",
+          "class": "ownership-trust",
+          "severity": "important",
+          "round": 2,
+          "summary": "The ownership marker carries a sha256 of the body, which anyone who can write a destination can compute, so a forged file is classified owned and --update replaces it.",
+          "source": "Codex adversarial review of #30; tracked in issue #31, still open",
+          "paths": [
+            "scripts/lib.py",
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "body_sha256",
+            "split_marker",
+            "inspect\\(",
+            "forg",
+            "self-describ",
+            "not a signature",
+            "anyone who can write"
+          ],
+          "fixed": null,
+          "at_base": "observed",
+          "repro": {
+            "kind": "probe",
+            "probe": "forged_marker.py",
+            "args": []
+          }
+        },
+        {
+          "id": "argv0-escape",
+          "class": "output-injection",
+          "severity": "minor",
+          "round": 1,
+          "summary": "Installer usage and error output prints the program name (argv[0]) without escaping, so a hostile name injects terminal escape sequences.",
+          "source": "Residual from the #22 reviews, fixed in #34",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "argv\\[0\\]",
+            "prog",
+            "escape",
+            "terminal",
+            "argparse"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "observed",
+          "repro": {
+            "kind": "probe",
+            "probe": "argv0_escape.py",
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "local-llm-rule",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the local-model verification rule and pilot-log fields (#26, issue #21)",
+      "base": "2b5990fb40b87fab0b014b23f0a18a50ccc01b2b",
+      "head": "b538ff24a38c3e3ca8ba2a8293d121efced66e4a",
+      "diff_sha256": "bd6ef6ce8a01f302a522ffb007bd85619e37bfee98ace97b59bcc1906c0bf359",
+      "findings": [
+        {
+          "id": "model-tag-regex",
+          "class": "input-validation",
+          "severity": "important",
+          "round": 1,
+          "summary": "MODEL_RE rejects real Ollama tags (gemma3n:e4b, mixtral:8x7b, llama3.2:latest, namespaced names) and accepts nonsense such as a:1b.",
+          "source": "Review of #26; issue #27",
+          "paths": [
+            "scripts/summarize_log.py"
+          ],
+          "evidence_any": [
+            "MODEL_RE",
+            "e4b",
+            "8x7b",
+            "latest",
+            "namespace",
+            "a:1b",
+            "gemma3n"
+          ],
+          "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "model_tag.py",
+            "args": [
+              "rejects",
+              "gemma3n:e4b"
+            ]
+          }
+        },
+        {
+          "id": "scope-test-count-only",
+          "class": "test-gap",
+          "severity": "minor",
+          "round": 1,
+          "summary": "The scope test only requires the scope phrase to appear four or more times (it appears seven), so removing one from a measured figure stays green.",
+          "source": "Review of #26; issue #27",
+          "paths": [
+            "tests/test_package.py"
+          ],
+          "evidence_any": [
+            "assertGreaterEqual",
+            "count\\(",
+            "scope",
+            "SCOPE",
+            "per.figure",
+            "each figure"
+          ],
+          "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "tests/test_package.py",
+            "regex": "def test_every_measured_figure_carries_the_scope",
+            "present": false
+          }
+        },
+        {
+          "id": "british-spelling-in-code",
+          "class": "convention",
+          "severity": "minor",
+          "round": 1,
+          "summary": "The American-English guard scans prose directories only, and code docstrings still hold British spellings (Summarise, Defence).",
+          "source": "Review of #26; issue #27",
+          "paths": [
+            "scripts/summarize_log.py",
+            "scripts/install.py",
+            "tests/test_package.py"
+          ],
+          "evidence_any": [
+            "Summaris",
+            "Defence",
+            "British",
+            "spelling",
+            "docstring"
+          ],
+          "fixed": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "scripts/summarize_log.py",
+            "regex": "^\"\"\"Summaris",
+            "present": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "followups-for-27",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the follow-ups for the #26 review (#28, issue #27)",
+      "base": "b538ff24a38c3e3ca8ba2a8293d121efced66e4a",
+      "head": "ef7c9393aeab1904734af819b4ce4f0cd2adbfa5",
+      "diff_sha256": "6e57e3c3979855cdc1f4a44fd7e7365a197b5fe2a27b6f525c4773cccc076168",
+      "findings": [
+        {
+          "id": "tag-edge-cases",
+          "class": "input-validation",
+          "severity": "minor",
+          "round": 1,
+          "summary": "valid_model passes odd input: ../x:7b, a/../b:7b, and trailing or doubled hyphens (gemma4:12b-, gemma4:12b--x, gemma4:-7b).",
+          "source": "Review of #28; issue #29 item 3; also a Copilot finding on #28",
+          "paths": [
+            "scripts/summarize_log.py"
+          ],
+          "evidence_any": [
+            "valid_model",
+            "\\.\\.",
+            "hyphen",
+            "path segment",
+            "\\.\\./x",
+            "traversal"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "model_tag.py",
+            "args": [
+              "accepts",
+              "../x:7b"
+            ]
+          }
+        },
+        {
+          "id": "version-tag-rejected",
+          "class": "input-validation",
+          "severity": "minor",
+          "round": 1,
+          "summary": "The real tag nomic-embed-text:v1.5 (a version, not a size) is rejected.",
+          "source": "Review of #28; issue #29 item 2",
+          "paths": [
+            "scripts/summarize_log.py"
+          ],
+          "evidence_any": [
+            "nomic",
+            "v1\\.5",
+            "version tag",
+            "valid_model",
+            "embedding"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "observed",
+          "repro": {
+            "kind": "probe",
+            "probe": "model_tag.py",
+            "args": [
+              "rejects",
+              "nomic-embed-text:v1.5"
+            ]
+          }
+        },
+        {
+          "id": "dead-slash-check",
+          "class": "dead-code",
+          "severity": "minor",
+          "round": 1,
+          "summary": "The redundant `or \"//\" in name` check is dead code: removing it leaves the tests green.",
+          "source": "Review of #28; issue #29 item 4",
+          "paths": [
+            "scripts/summarize_log.py"
+          ],
+          "evidence_any": [
+            "\"//\"",
+            "dead",
+            "redundant",
+            "mutation",
+            "survivor"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "scripts/summarize_log.py",
+            "regex": "or \"//\" in name",
+            "present": true
+          }
+        },
+        {
+          "id": "async-docstring-untested",
+          "class": "test-gap",
+          "severity": "minor",
+          "round": 1,
+          "summary": "Dropping ast.AsyncFunctionDef from the docstring scan leaves the tests green: no async docstring case.",
+          "source": "Review of #28; issue #29 item 4",
+          "paths": [
+            "tests/test_package.py",
+            "tests/test_user_layout.py"
+          ],
+          "evidence_any": [
+            "AsyncFunctionDef",
+            "async",
+            "mutation",
+            "survivor",
+            "code_prose"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "tests/test_package.py",
+            "regex": "async def",
+            "present": false
+          }
+        },
+        {
+          "id": "scope-test-line-based",
+          "class": "test-gap",
+          "severity": "minor",
+          "round": 1,
+          "summary": "The per-figure scope test is line-based: a scope phrase wrapped onto the next line is reported unscoped.",
+          "source": "Review of #28; issue #29 item 1",
+          "paths": [
+            "tests/test_package.py"
+          ],
+          "evidence_any": [
+            "wrap",
+            "line.based",
+            "single.line",
+            "continuation",
+            "next line",
+            "unscoped"
+          ],
+          "fixed": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "tests/test_package.py",
+            "regex": "def blocks",
+            "present": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "lead-install-first-head",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the first head of the lead persona installer (#35, issues #32 and #33)",
+      "base": "78ab5a0076f45a22e161b0410e7ed4c622ef50e3",
+      "head": "03c209ba768f8671399ba102de18b24211acd7a8",
+      "diff_sha256": "193ee7092eddb270b35d875ba475d569c63b4b7a950c7b7a290aaa9d0edcc7a7",
+      "findings": [
+        {
+          "id": "lead-list-hides-unsafe",
+          "class": "error-reporting",
+          "severity": "important",
+          "round": 1,
+          "summary": "list-managed --lead returns no row for a directory or another non-regular file, so an unsafe instruction file reads as clean by omission.",
+          "source": "Codex adversarial review of #35, round 1",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "_lead_row",
+            "return None",
+            "no row",
+            "omit",
+            "symlink",
+            "clean",
+            "list_managed"
+          ],
+          "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "lead_list.py",
+            "args": [
+              "directory"
+            ]
+          }
+        },
+        {
+          "id": "lead-list-hides-oversized",
+          "class": "error-reporting",
+          "severity": "important",
+          "round": 1,
+          "summary": "list-managed --lead silently drops an oversized (over 1 MiB) lead file from the listing.",
+          "source": "Copilot review of #35",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "MAX_MANAGED_BYTES",
+            "oversize",
+            "1 MiB",
+            "return None",
+            "silently",
+            "omit",
+            "_lead_row"
+          ],
+          "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "lead_list.py",
+            "args": [
+              "oversized"
+            ]
+          }
+        },
+        {
+          "id": "lead-lost-update",
+          "class": "concurrency",
+          "severity": "important",
+          "round": 1,
+          "summary": "The writer checks only the inode before rename, not the content it built the new file from, so an in-place edit made after the first read is lost.",
+          "source": "Codex adversarial review of #35, round 1",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "lost.update",
+            "race",
+            "TOCTOU",
+            "st_ino",
+            "re-?check",
+            "rename",
+            "changed (during|while)",
+            "(stat|inode)"
+          ],
+          "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "pattern",
+            "path": "scripts/install.py",
+            "regex": "def _recheck",
+            "present": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "lead-install-after-round-1",
+      "roles": [
+        "reviewer",
+        "adversarial-reviewer"
+      ],
+      "kind": "diff",
+      "title": "Review the lead persona installer after the first review round (#35)",
+      "base": "b7c6db9efd67e510404618d97a9d7663bc8ed744",
+      "head": "e58c557dfff14aeb05c15e25bdc780eaaf5e0f1e",
+      "diff_sha256": "211335409e215b8be362b659a2d41e92a42ebf909dd37355119d13cdbd21a385",
+      "findings": [
+        {
+          "id": "lead-list-fs-error",
+          "class": "error-reporting",
+          "severity": "important",
+          "round": 1,
+          "summary": "A filesystem error while reading the named lead file (an unreadable file, a file that vanished) escapes list-managed instead of becoming a row.",
+          "source": "Codex adversarial review of #35, round 2",
+          "paths": [
+            "scripts/install.py"
+          ],
+          "evidence_any": [
+            "_lead_row",
+            "OSError",
+            "PermissionError",
+            "unreadable",
+            "exception",
+            "raise",
+            "row",
+            "filesystem error"
+          ],
+          "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
+          "at_base": "n/a",
+          "repro": {
+            "kind": "probe",
+            "probe": "lead_list.py",
+            "args": [
+              "unreadable"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "lead-persona-brief",
+      "roles": [
+        "brief-writer"
+      ],
+      "kind": "brief",
+      "title": "Write the implementer brief for the lead persona installer (issues #32 and #33), scored on the gaps the reviews of #35 found",
+      "input_file": "inputs/lead-persona-brief-input.md",
+      "input_sha256": "4d232ee4a8984464f149da3bc8843342d7cdbd07899f6734aba93140f8cf6308",
+      "findings": [
+        {
+          "id": "brief-listing-never-hides",
+          "class": "brief-gap",
+          "severity": "important",
+          "round": 1,
+          "summary": "The brief must require that --list-managed gives the named lead file a row in every state (missing, unsafe, oversized, edited), never an omission.",
+          "source": "Gap behind lead-install-first-head/lead-list-hides-unsafe and lead-list-hides-oversized",
+          "paths": [
+            "brief"
+          ],
+          "evidence_any": [
+            "(?i)list-managed.{0,200}(row|every state|never omit|omission|silent)",
+            "(?i)(symlink|oversize|unsafe).{0,120}(row|reported|listed)"
+          ],
+          "fixed": null,
+          "at_base": "n/a",
+          "repro": {
+            "kind": "ref",
+            "finding": "lead-install-first-head/lead-list-hides-unsafe"
+          },
+          "absent_from_input": [
+            "(?i)symlink",
+            "(?i)oversiz|1 MiB",
+            "(?i)\\brow\\b"
+          ]
+        },
+        {
+          "id": "brief-concurrent-edit",
+          "class": "brief-gap",
+          "severity": "important",
+          "round": 2,
+          "summary": "The brief must name the concurrent-edit case: the file may change between the read and the replace, and the writer must re-check the content before it renames.",
+          "source": "Gap behind lead-install-first-head/lead-lost-update",
+          "paths": [
+            "brief"
+          ],
+          "evidence_any": [
+            "(?i)(race|concurren|lost.update|changed (during|while)|re-?check|re-?read).{0,200}(rename|replace|write|edit)",
+            "(?i)editor.{0,80}(edit|rewrote|in place)"
+          ],
+          "fixed": null,
+          "at_base": "n/a",
+          "repro": {
+            "kind": "ref",
+            "finding": "lead-install-first-head/lead-lost-update"
+          },
+          "absent_from_input": [
+            "(?i)\\brace\\b|concurren|lost.update|re-?check|in place"
+          ]
+        },
+        {
+          "id": "brief-fs-errors-are-rows",
+          "class": "brief-gap",
+          "severity": "important",
+          "round": 3,
+          "summary": "The brief must say that a filesystem error on the named file (unreadable, vanished) is reported as a row and not as a crash or a bare refusal.",
+          "source": "Gap behind lead-install-after-round-1/lead-list-fs-error",
+          "paths": [
+            "brief"
+          ],
+          "evidence_any": [
+            "(?i)(unreadable|permission|vanish|filesystem error|OSError|I/O error).{0,200}(row|report|status)",
+            "(?i)error.{0,60}(is a row|as a row)"
+          ],
+          "fixed": null,
+          "at_base": "n/a",
+          "repro": {
+            "kind": "ref",
+            "finding": "lead-install-after-round-1/lead-list-fs-error"
+          },
+          "absent_from_input": [
+            "(?i)unreadable|permission|vanish|filesystem error|OSError"
+          ]
+        }
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "id": "codex-adapter-symlink-ancestors",
+      "source": "Copilot review comments on #30",
+      "reason": "Two comments asked to reject symlinked source ancestors and to prevent symlink traversal when writing generated roots. No fix commit, no issue and no maintainer acceptance exist in the history, so there is no confirmed label to score against; a probe would have to guess intent. Dropped, not adjusted."
+    },
+    {
+      "id": "local-llm-rule-copilot-findings",
+      "source": "Copilot review comments on #26",
+      "reason": "The comments (a seeded discrepancy count of two, a frozen legacy fixture in ownership tests, header validation) concern review states between commits that were force-updated; the state they were made on is not reachable from a ref, so the defect cannot be shown at a commit. Dropped."
+    },
+    {
+      "id": "followups-duplicate-figure-block",
+      "source": "Copilot review comment on #28 and #34",
+      "reason": "A duplicate figure inside one logical block bypassing the scope check has no fix commit, no issue and no maintainer ruling in the history. Whether it is a defect is a judgment call, so there is no reproducible label. Dropped."
+    },
+    {
+      "id": "lead-install-copilot-parent-dirs-and-rerun-test",
+      "source": "Copilot review comments on #35",
+      "reason": "Validating lead destination parent directories during planning and a rerun-without---update test: the history does not show a fix or a ruling for either, so neither is a confirmed label. Dropped."
+    },
+    {
+      "id": "private-seeds",
+      "source": "The five private seeds listed in issue #3",
+      "reason": "Work from outside this repository; not here and not published without the maintainer's word. They would need a sanitized rewrite (task text, diff and findings re-derived from public material) before they could be added. Not included."
+    }
+  ]
+}

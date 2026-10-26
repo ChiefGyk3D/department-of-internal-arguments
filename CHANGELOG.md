@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+Benchmark corpus and scoring rubric (issue #47, unit 1 of #3). No model is run and nothing is spent.
+
+- `evals/benchmark/corpus.json`: seven tasks and 19 labelled findings from this repository's own history (the Codex adapter #30, the local-model rule #26 and its follow-ups #28 and #34, the lead persona installer #35), each with a base commit, the defect-introducing head, the fixing commit where there is one, the known finding by class and its expected evidence. A brief-writing task is its own role column (`brief-writer`), scored on the gaps the reviews of #35 found. Every finding was shown to reproduce against the history by a probe or a pattern check; five candidate seeds were dropped and are recorded with the reason. Private seeds are not included.
+- `scripts/benchmark.py`: `--check` (corpus well formed; commits and diffs resolve with local tools only, `not-run` without a full clone), `--reproduce` (re-proves each seed), `--score RESULTS.jsonl` (recall, precision, false findings, fix rounds avoided, wall clock, tokens, refusals per role and model; rejects a family name for an exact model id and a missing client version or cost). Read-only; never touches `policies/model-routing.md`. `scripts/validate.py` checks the corpus structure.
+- `evals/benchmark-schema.md`, a section in `docs/evals-and-measurements.md`, `tests/test_benchmark.py`.
+
 ## [0.4.0] - 2026-10-26
 
 The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.
