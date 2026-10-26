@@ -1195,6 +1195,53 @@ class Containment(StateCase):
             self.assertEqual(state.load(self.target, LAYOUT), {})
 
 
+class BytesSub(bytes):
+    pass
+
+
+class ByteArraySub(bytearray):
+    pass
+
+
+class IntSub(int):
+    pass
+
+
+class Spoof:
+    """isinstance(Spoof(), str) is True through __class__, type(Spoof()) is Spoof."""
+
+    @property
+    def __class__(self):
+        return str
+
+
+class ExactTypes(unittest.TestCase):
+    """_is_one_of and its users test the exact type: subclasses, spoofed __class__ and bool-for-int are all refused."""
+
+    def test_is_one_of(self):
+        cases = [
+            (BytesSub(b"x"), (bytes,), False),
+            (ByteArraySub(b"x"), (bytearray,), False),
+            (StrSub("x"), (str,), False),
+            (IntSub(1), (int,), False),
+            (DictSub(), (dict,), False),
+            (ListSub(), (list,), False),
+            (SetSub(), (set,), False),
+            (Spoof(), (str,), False),
+            (True, (int,), False),
+            (True, (bool,), True),
+            (5, (int,), True),
+            (b"", (), False),
+            (b"", (bytes, bytearray), True),
+            (bytearray(), (bytes, bytearray), True),
+            ({}, (dict,), True),
+        ]
+        for obj, types, expected in cases:
+            with self.subTest(type(obj).__name__, types=[t.__name__ for t in types]):
+                self.assertIs(state._is_one_of(obj, types), expected)
+        self.assertIs(state._is_one_of(memoryview(b"x"), (memoryview,)), True)
+
+
 class Api(StateCase):
     """The helpers the installer needs, so it never re-implements hashing, probing or KeyError handling."""
 
@@ -1209,6 +1256,13 @@ class Api(StateCase):
             with self.subTest(bad=repr(bad)), self.assertRaises(state.StateError):
                 state.body_sha256(bad)
         self.assertRegex(state.body_sha256(b""), r"^[0-9a-f]{64}$")
+
+    def test_body_sha256_rejects_bytes_subclasses_and_spoofs(self):
+        for bad in (BytesSub(b"abc"), ByteArraySub(b"abc"), Spoof(), True, IntSub(3), StrSub("abc")):
+            with self.subTest(type(bad).__name__), self.assertRaises(state.StateError):
+                state.body_sha256(bad)
+        self.assertEqual(state.body_sha256(b"abc"), state.body_sha256(bytearray(b"abc")))
+        self.assertEqual(state.body_sha256(b"abc"), state.body_sha256(memoryview(b"abc")))
 
     def test_state_path(self):
         self.assertEqual(state.state_path(self.target, LAYOUT), self.file)
@@ -1478,6 +1532,11 @@ class Hostile(StateCase):
             with self.subTest(type(ok).__name__):
                 self.assertEqual(state.settle(base, ok)["a.md"]["body_sha256"], D2 if ok else D1)
 
+    def test_settle_rejects_container_subclasses(self):
+        for container in (SetSub(), ListSub(), type("FS", (frozenset,), {})(), type("T", (tuple,), {})(), DictSub()):
+            with self.subTest(type(container).__name__), self.assertRaises(state.StateError):
+                state.settle({}, container)
+
     def test_nul_and_non_text_targets_raise_state_error_not_value_error(self):
         for target in ("x\0y", "/tmp/a\0", None, 5, b"/tmp", ["/tmp"], StrSub("/tmp"), HostileStr()):
             with self.subTest(target=type(target).__name__):
@@ -1528,8 +1587,50 @@ class BoomAll:
     __hash__ = object.__hash__
 
 
+FIRED = []  # every foreign dunder of the Recording objects appends here; it must stay empty
+
+
+def _recording(name, result):
+    def method(self, *args):
+        FIRED.append(name)
+        return result
+
+    return method
+
+
+class Recording:
+    """Inert, but notes every conversion or path hook that is run on it."""
+
+    __str__ = _recording("__str__", "x")
+    __repr__ = _recording("__repr__", "x")
+    __format__ = _recording("__format__", "x")
+    __fspath__ = _recording("__fspath__", "/tmp")
+    __bytes__ = _recording("__bytes__", b"x")
+    __index__ = _recording("__index__", 0)
+    __int__ = _recording("__int__", 0)
+
+
+def _escaping(exc_type):
+    def raiser(self, *args):
+        raise exc_type("escaped")
+
+    return type(
+        "Escaping" + exc_type.__name__,
+        (),
+        {n: raiser for n in ("__str__", "__repr__", "__format__", "__fspath__", "__bytes__", "__int__", "__index__")},
+    )
+
+
+EscapingSystemExit = _escaping(SystemExit)
+EscapingKeyboardInterrupt = _escaping(KeyboardInterrupt)
+
 _DUNDERS = ("__eq__", "__ne__", "__len__", "__iter__", "__getitem__", "__bool__", "__str__", "__repr__", "__contains__")
-KEY_OK_HOSTILE = [_boom(n)() for n in _DUNDERS] + [BoomAll()]
+KEY_OK_HOSTILE = [_boom(n)() for n in _DUNDERS] + [
+    BoomAll(),
+    Recording(),
+    EscapingSystemExit(),
+    EscapingKeyboardInterrupt(),
+]
 VALUE_ONLY_HOSTILE = [BoomHash()]
 # (object, may it be a dict key?) -- never use `in` on these lists: that would call the hostile __eq__
 ALL_HOSTILE = [(h, True) for h in KEY_OK_HOSTILE] + [(h, False) for h in VALUE_ONLY_HOSTILE]
@@ -1618,6 +1719,65 @@ class HostileEverywhere(StateCase):
                 self.assertEqual(state.verdict({"a.md": entry(body_sha256=h)}, "a.md", D1), "unverified")
                 self.assertEqual(state.verdict({"a.md": entry(pending_sha256=h)}, "a.md", D2), "unverified")
         self.assertEqual(state.verdict({"a.md": entry()}, "a.md", D1), "owned")  # the positive control
+
+    def test_foreign_str_repr_format_and_fspath_never_run(self):
+        """_shown renders only an exact str or int; nothing else is converted, formatted or turned into a path."""
+        del FIRED[:]
+        self.addCleanup(FIRED.clear)
+        for h in (Recording(), EscapingSystemExit(), EscapingKeyboardInterrupt()):
+            for name, call in self.mutator_calls(h, True).items():
+                with self.subTest(hostile=type(h).__name__, call=name), self.assertRaises(state.StateError):
+                    call()
+            self.assertEqual(state.verdict({"a.md": entry()}, h, D1), "unverified")
+            self.assertEqual(state.verdict({"a.md": entry()}, "a.md", h), "unverified")
+            self.assertIs(state.accepts(entry(), h), False)
+        self.assertEqual(FIRED, [])  # the recorder never fired
+
+    def test_the_review_repros(self):
+        class X:
+            def __str__(self):
+                raise SystemExit("x")
+
+        for call in (
+            lambda: state.state_key("/tmp", X()),
+            lambda: state.without_entry({}, X()),
+            lambda: state.settle({}, [X()]),
+            lambda: state.with_pending({"a.md": entry()}, {X(): D2}),
+            lambda: state.with_pending({}, {}, new={X(): dict(self.SPEC)}),
+            lambda: state.save("/tmp", X(), {}),
+        ):
+            with self.assertRaises(state.StateError):
+                call()
+
+    def test_shown_renders_only_exact_str_and_int(self):
+        self.assertEqual(state._shown("a\x1b[0mb"), "a?[0mb")
+        self.assertEqual(state._shown(5), "5")
+        self.assertEqual(state._shown("x" * 100, 10), "x" * 10 + "...")
+        for foreign in (Recording(), StrSub("secret"), True, 1.5, b"bytes", None, ["a"], {"a": 1}, object()):
+            with self.subTest(type(foreign).__name__):
+                self.assertEqual(state._shown(foreign), "?")
+        self.assertEqual(FIRED, [])
+
+    def test_only_exact_path_types_are_accepted_as_targets(self):
+        class OnlyFspath:
+            def __fspath__(self):
+                FIRED.append("fspath")
+                return str(self_target)
+
+        self_target = self.target
+        self.addCleanup(FIRED.clear)
+        del FIRED[:]
+        for bad in (OnlyFspath(), Recording(), EscapingSystemExit(), StrSub(str(self.target))):
+            with self.subTest(type(bad).__name__), self.assertRaises(state.StateError):
+                state.state_key(bad, LAYOUT)
+        self.assertEqual(FIRED, [])  # a foreign __fspath__ is never run
+        subclass = type("MyPath", (type(self.target),), {})
+        with self.assertRaises(state.StateError):
+            state.state_key(subclass(self.target), LAYOUT)
+        import pathlib
+
+        for good in (str(self.target), self.target, pathlib.PurePosixPath(self.target)):
+            self.assertEqual(state.state_key(good, LAYOUT)[0], os.path.realpath(self.target))
 
     def test_membership_is_never_tested_before_the_type(self):
         """The exact review repro: a kind whose __eq__ raises."""
@@ -2277,12 +2437,6 @@ MUTANTS = [
         "Hostile.test_nul_and_non_text_targets_raise_state_error_not_value_error",
     ),
     (
-        "non-text target",
-        "    if type(path) is not str:",
-        "    if False:",
-        "Hostile.test_nul_and_non_text_targets_raise_state_error_not_value_error",
-    ),
-    (
         "layout plain str",
         "if type(layout) is not str or not _LAYOUT.fullmatch(layout):",
         "if not isinstance(layout, str) or not _LAYOUT.fullmatch(layout):",
@@ -2322,12 +2476,6 @@ MUTANTS = [
         "plain str rel",
         "    if type(rel) is not str or not _text_ok(rel) or not rel:",
         "    if not _text_ok(rel) or not rel:",
-        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
-    ),
-    (
-        "shown total",
-        '    except Exception:\n        text = "?"',
-        '    except ZeroDivisionError:\n        text = "?"',
         "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
     ),
     (
@@ -2444,12 +2592,63 @@ MUTANTS = [
         "        if False:",
         "StandInInstaller.test_files_the_installer_wrote_are_owned_after_phase_2",
     ),
+    (
+        "shown exact type",
+        '    elif type(text) is not str:\n        text = "?"',
+        '    elif False:\n        text = "?"',
+        "HostileEverywhere.test_foreign_str_repr_format_and_fspath_never_run",
+    ),
+    (
+        "shown exact type (repro)",
+        '    elif type(text) is not str:\n        text = "?"',
+        '    elif False:\n        text = "?"',
+        "HostileEverywhere.test_the_review_repros",
+    ),
+    (
+        "shown exact type (unit)",
+        '    elif type(text) is not str:\n        text = "?"',
+        '    elif False:\n        text = "?"',
+        "HostileEverywhere.test_shown_renders_only_exact_str_and_int",
+    ),
+    (
+        "shown int exact",
+        "    if type(text) is int:",
+        "    if isinstance(text, int):",
+        "HostileEverywhere.test_shown_renders_only_exact_str_and_int",
+    ),
+    (
+        "path types exact",
+        "    if not _is_one_of(target, _PATH_TYPES):",
+        "    if False:",
+        "HostileEverywhere.test_only_exact_path_types_are_accepted_as_targets",
+    ),
+    (
+        "is_one_of exact",
+        "    return any(t is c for c in types)",
+        "    return isinstance(obj, tuple(types))",
+        "ExactTypes.test_is_one_of",
+    ),
+    (
+        "body_sha256 exact",
+        "    if not _is_one_of(data, (bytes, bytearray, memoryview)):",
+        "    if not isinstance(data, (bytes, bytearray, memoryview)):",
+        "Api.test_body_sha256_rejects_bytes_subclasses_and_spoofs",
+    ),
+    (
+        "settle container exact",
+        "    if not _is_one_of(written, (set, frozenset, list, tuple)):",
+        "    if not isinstance(written, (set, frozenset, list, tuple)):",
+        "Hostile.test_settle_rejects_container_subclasses",
+    ),
 ]
 
 
 # Rows whose test can only notice the weakened guard by blocking (the 10 s alarm in StateCase turns the hang into a
 # failure). Every other row must be caught by an assertion; a hang there would mean the test proves nothing useful.
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
+
+
+EXPECTED_ROWS = 96
 
 
 class GuardTable(unittest.TestCase):
@@ -2472,7 +2671,9 @@ class GuardTable(unittest.TestCase):
         return "hang" if "test hung" in r.stderr else "red"
 
     def test_every_listed_guard_goes_red_when_weakened_and_green_when_intact(self):
-        self.assertGreaterEqual(len(MUTANTS), 80)
+        # Exact on purpose: adding or dropping a row must be a deliberate edit of this number, so the table cannot
+        # shrink unnoticed.
+        self.assertEqual(len(MUTANTS), EXPECTED_ROWS)
         source = (ROOT / "scripts" / "state.py").read_text()
         tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
         self.addCleanup(shutil.rmtree, tmp, True)

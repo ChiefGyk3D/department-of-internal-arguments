@@ -96,7 +96,7 @@ import stat
 import time
 import unicodedata
 import uuid
-from pathlib import Path
+from pathlib import Path, PosixPath, PurePosixPath
 
 SCHEMA = 1
 MAX_BYTES = 1024 * 1024
@@ -124,6 +124,7 @@ _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_PATH_TYPES = (str, PurePosixPath, PosixPath)
 
 
 class StateError(ValueError):
@@ -141,13 +142,21 @@ class StateCorrupt(StateError):
 
 
 def _shown(text, limit=80):
-    """Echo-safe form of untrusted text: printable ASCII only, bounded."""
-    try:
-        text = str(text)
-    except Exception:
+    """Echo-safe form of untrusted text: printable ASCII only, bounded.
+
+    Only an exact str (or exact int) is rendered. Anything else becomes "?": str(), repr() or format() is never called
+    on a foreign object, so none of its code runs (and nothing it raises, SystemExit included, escapes)."""
+    if type(text) is int:
+        text = int.__repr__(text)
+    elif type(text) is not str:
         text = "?"
     out = "".join(c if " " <= c <= "~" else "?" for c in text[:limit])
     return out + ("..." if len(text) > limit else "")
+
+
+def _oserr(exc):
+    """The escaped strerror of an OSError raised by the operating system (never a foreign object)."""
+    return _shown(exc.strerror if type(exc.strerror) is str else type(exc).__name__)
 
 
 def _euid():
@@ -190,13 +199,11 @@ def _inside(path, parent):
 
 
 def _real_path(target):
-    """realpath of a target given as str or os.PathLike; anything else, a NUL, or a failure is a StateError."""
-    try:
-        path = os.fspath(target)
-    except Exception:
-        raise StateError("the target must be a path") from None
-    if type(path) is not str:
-        raise StateError("the target must be a text path")
+    """realpath of a target given as an exact str, PurePosixPath or PosixPath (so os.fspath only ever runs the standard
+    library's own code, never a foreign __fspath__); anything else, a NUL, or a failure is a StateError."""
+    if not _is_one_of(target, _PATH_TYPES):
+        raise StateError("the target must be a str or a pathlib path")
+    path = os.fspath(target)
     try:
         return os.path.realpath(path)
     except (OSError, ValueError):
@@ -528,7 +535,7 @@ def _read_file(dfd, name, real, layout):
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise StateCorrupt(f"state file {name}: cannot open as a plain file ({_shown(exc.strerror)})") from None
+        raise StateCorrupt(f"state file {name}: cannot open as a plain file ({_oserr(exc)})") from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -551,7 +558,7 @@ def _read_file(dfd, name, real, layout):
                 raise StateCorrupt(f"state file {name}: over the size limit")
             chunks.append(chunk)
     except OSError as exc:
-        raise StateError(f"state file {name}: read failed ({_shown(exc.strerror or exc)})") from None
+        raise StateError(f"state file {name}: read failed ({_oserr(exc)})") from None
     finally:
         os.close(fd)
     return parse(b"".join(chunks), real, layout)
@@ -592,7 +599,7 @@ def lock_held(target, layout):
         except FileNotFoundError:
             return False
         except OSError as exc:
-            raise StateError(f"state lock: cannot open as a plain file ({_shown(exc.strerror)})") from None
+            raise StateError(f"state lock: cannot open as a plain file ({_oserr(exc)})") from None
         try:
             _check_lock_file(lfd, created=False)
             try:
@@ -602,7 +609,7 @@ def lock_held(target, layout):
             fcntl.flock(lfd, fcntl.LOCK_UN)
             return False
         except OSError as exc:
-            raise StateError(f"state lock: probe failed ({_shown(exc.strerror or exc)})") from None
+            raise StateError(f"state lock: probe failed ({_oserr(exc)})") from None
         finally:
             os.close(lfd)
     finally:
@@ -644,7 +651,7 @@ class Store:
         try:
             lfd, created = self._open_lock(self.stem + ".lock")
         except OSError as exc:
-            raise StateError(f"state lock: cannot open ({_shown(exc.strerror)})") from None
+            raise StateError(f"state lock: cannot open ({_oserr(exc)})") from None
         try:
             _check_lock_file(lfd, created)
             try:
@@ -653,7 +660,7 @@ class Store:
                 raise StateLocked("another install is running") from None
         except OSError as exc:
             os.close(lfd)
-            raise StateError(f"state lock: {_shown(exc.strerror or exc)}") from None
+            raise StateError(f"state lock: {_oserr(exc)}") from None
         except BaseException:
             os.close(lfd)
             raise
@@ -706,7 +713,7 @@ class Store:
             os.rename(tmp, name, src_dir_fd=self._dfd, dst_dir_fd=self._dfd)
         except OSError as exc:
             self._discard(tmp)
-            raise StateError(f"cannot write the state ({_shown(exc.strerror or exc)})") from None
+            raise StateError(f"cannot write the state ({_oserr(exc)})") from None
         except BaseException:
             self._discard(tmp)
             raise
