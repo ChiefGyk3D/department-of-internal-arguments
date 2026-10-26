@@ -25,6 +25,7 @@ Codex adapter (issue #22). Everything about Codex below comes from OpenAI's Code
 - Round 4 (second external adversarial pass):
   - A target is also refused as the filesystem root when its `(st_dev, st_ino)` equals that of `/`, which catches a bind mount of `/` under another name. The test mocks `os.stat`; a real bind-mount test needs privileges and was not run.
   - Every path and message the installer prints (preview, refusals, `--list-managed`) goes through one escaper: printable ASCII passes, everything else (control characters, ESC, CSI, CR, LF, bidi and zero-width characters, line separators) and the backslash print as visible escapes such as `\x1b` and `\u202e`. A hostile filename can no longer forge an extra preview record. Non-ASCII file names now print escaped instead of as `?`.
+- Round 5: `install.py` argument errors (unknown option or positional, bad choice, missing value) now go through the same escaper as the rest of its output (a small `argparse.ArgumentParser` subclass overriding `error()`); the usage text and exit code 2 are argparse's own.
 - Not done here: an `AGENTS.md` (the project's own file; a merged one would not fit the 32 KiB default), and a read-only researcher or planner role (waits for issue #20).
 
 ## [0.3.1] - 2026-10-11

@@ -536,6 +536,15 @@ def _safe(text):
     return "".join(out)
 
 
+class _SafeParser(argparse.ArgumentParser):
+    """argparse echoes user-supplied text (an unknown option, a bad value) raw; send the whole message through _safe()
+    so it is one escaped line. The usage text and the exit code 2 are argparse's own."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {_safe(message)}\n")
+
+
 LABELS = {
     "edited": "edited (refused; --force-edited discards your changes)",
     "forced": "update (forced; discards local edits)",
@@ -543,7 +552,7 @@ LABELS = {
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _SafeParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=Path, required=True)
     ap.add_argument("--adapter", choices=ADAPTERS, default="claude")
     ap.add_argument("--layout", choices=LAYOUTS, default="project")

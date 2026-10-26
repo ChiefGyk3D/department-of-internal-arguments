@@ -139,17 +139,39 @@ class UserTextInMessages(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         return err.getvalue()
 
-    def test_argparse_invalid_choice_is_echoed_by_repr_so_a_newline_stays_escaped(self):
-        with tempfile.TemporaryDirectory() as d:
-            err = self.argparse_error("--target", d, "--adapter", "bad\nx")
-        self.assertIn("'bad\\nx'", err)  # argparse formats choices with repr
-        self.assertNotIn("bad\nx", err)
+    def check_one_escaped_error_line(self, err, ch):
+        lines = err.splitlines()
+        self.assertTrue(lines and lines[0].startswith("usage:"), err)  # argparse's usage is kept
+        self.assertEqual(sum(": error:" in ln for ln in lines), 1, err)
+        self.assertFalse(any(ln.startswith("FORGED") for ln in lines), err)
+        if ch != "\n":
+            self.assertNotIn(ch, err)
+        self.assertTrue(err.isascii())
 
-    def test_argparse_unrecognized_arguments_gap_is_documented_not_asserted_safe(self):
-        """Gap, reported to the lead and not fixed here (no logic changes this round): argparse prints its own
-        'unrecognized arguments' text, and _safe() does not reach it. This only pins that it exits 2."""
-        with tempfile.TemporaryDirectory() as d:
-            self.argparse_error("--target", d, "stray\nvalue")
+    def test_argparse_errors_are_one_escaped_line_for_every_dangerous_character(self):
+        for ch in DANGEROUS:
+            with self.subTest(code=hex(ord(ch))), tempfile.TemporaryDirectory() as d:
+                cases = {
+                    "unknown option": ("--target", d, f"--bad{ch}FORGED"),
+                    "unknown positional": ("--target", d, f"pos{ch}FORGED"),
+                    "bad choice": ("--target", d, "--adapter", f"bad{ch}FORGED"),
+                    "bad layout choice": ("--target", d, "--layout", f"bad{ch}FORGED"),
+                }
+                for label, args in cases.items():
+                    err = self.argparse_error(*args)
+                    self.check_one_escaped_error_line(err, ch)
+                    if "choice" not in label:  # argparse already repr()s a bad choice: \n and \r arrive as \\n and \\r
+                        self.assertIn(escape_of(ch), err, label)
+
+    def test_missing_required_and_missing_value_errors_keep_usage_and_exit_2(self):
+        err = self.argparse_error()
+        self.assertIn("are required: --target", err)
+        self.assertEqual(sum(": error:" in ln for ln in err.splitlines()), 1)
+        self.assertIn("expected one argument", self.argparse_error("--target"))
+
+    def test_a_plain_error_message_is_unchanged_apart_from_escaping(self):
+        err = self.argparse_error("--target", "/tmp", "--adapter", "nope")
+        self.assertIn("invalid choice: 'nope' (choose from claude, copilot, both, codex)", err)
 
 
 class FilesystemIdentity(unittest.TestCase):
