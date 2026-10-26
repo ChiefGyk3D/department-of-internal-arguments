@@ -550,16 +550,33 @@ class LocalLlmRule(unittest.TestCase):
 
     FIGURES = ("85%", "46%", "55 to 215 seconds", "436 evaluation tokens", "8192 but not 16384")
 
+    BLOCK_START = re.compile(r"\s*(?:[-*+] |\d+\. |#|\||>)")
+
+    @classmethod
+    def blocks(cls, text):
+        """Logical lines: a bullet, numbered item or paragraph with its wrapped continuation lines joined by a space,
+        so a scope phrase that a hard wrap split across two lines is still found in its own bullet."""
+        out = []
+        for ln in text.splitlines():
+            if not ln.strip():
+                out.append(None)
+            elif out and out[-1] is not None and not cls.BLOCK_START.match(ln):
+                out[-1] += " " + ln.strip()
+            else:
+                out.append(ln.strip())
+        return [b for b in out if b]
+
     def unscoped(self, text):
-        """Measured figures whose own line lacks the scope phrase (a missing or repeated figure counts as unscoped)."""
+        """Measured figures whose own bullet lacks the scope phrase (a missing or repeated figure counts as unscoped).
+        Wrap-tolerant: a bullet hard-wrapped onto continuation lines is tested as one logical line."""
         bad = []
         for key in self.FIGURES:
-            lines = [ln for ln in text.splitlines() if key in ln]
+            lines = [ln for ln in self.blocks(text) if key in ln]
             if not lines or any(self.SCOPE not in ln for ln in lines):
                 bad.append(key)
         return bad
 
-    def test_every_measured_figure_carries_the_scope_on_its_own_line(self):
+    def test_every_measured_figure_carries_the_scope_in_its_own_bullet(self):
         self.assertEqual(self.unscoped(self.pack()), [])
 
     def test_figure_scope_check_bites(self):
@@ -570,6 +587,18 @@ class LocalLlmRule(unittest.TestCase):
             one = text.replace(line, line.replace(self.SCOPE, "unscoped"))
             self.assertNotEqual(one, text, key)
             self.assertIn(key, self.unscoped(one))
+
+    def test_a_wrapped_scoped_bullet_passes_and_an_unscoped_one_still_fails(self):
+        head, tail = self.SCOPE.split("; measured", 1)
+        wrapped = f"- Labels were right about 85% of the time ({head};\n  measured{tail}).\n- Other note.\n"
+        scoped = f"- Labels were right about 85% of the time ({self.SCOPE}).\n"
+        only = lambda text: [k for k in self.unscoped(text) if k == "85%"]  # noqa: E731  (other figures absent here)
+        self.assertEqual(only(wrapped), [])
+        self.assertEqual(only(scoped), [])
+        # the scope sits in the NEXT bullet or paragraph, not in this one: still unscoped
+        self.assertEqual(only(f"- Labels were right about 85% of the time.\n- Other ({self.SCOPE}).\n"), ["85%"])
+        self.assertEqual(only(f"- Labels were right about 85%.\n\n  {self.SCOPE}\n"), ["85%"])
+        self.assertEqual(only("- Labels were right about 85%\n  of the time (wrapped, no scope).\n"), ["85%"])
 
     def test_pack_makes_no_class_level_claims_without_scope(self):
         text = self.pack()
@@ -666,6 +695,8 @@ class AmericanSpelling(unittest.TestCase):
             "    pass\n"
         )
         self.assertEqual(sorted(w.lower() for _, w in self.code_hits(src)), ["defence", "neighbour", "summarise"])
+        asynchronous = 'async def fetch():\n    """Defence in depth."""\n'
+        self.assertEqual([w.lower() for _, w in self.code_hits(asynchronous)], ["defence"])
         clean = '"""Summarize."""\ndef summarise(rows):\n    """Defense."""\n    return "colour"  # color\n'
         self.assertEqual(self.code_hits(clean), [])
 
@@ -733,8 +764,27 @@ class Summariser(unittest.TestCase):
             "gemma3:270m",
             "llama3.2:1b-instruct-q4_K_M",
             "qwen3:0.6b",
+            "nomic-embed-text:v1.5",
+            "all-minilm:v2",
+            "gemma:4b",  # a size tag; only a registry could say there is no such tag
         ]
         rejected = [
+            "../x:7b",
+            "a/../b:7b",
+            "a/./b:7b",
+            "./x:7b",
+            "x..y:7b",
+            "gemma4:12b-",
+            "gemma4:12b--x",
+            "gemma4:-7b",
+            "-gemma4:12b",
+            "gemma4-:12b",
+            "a/-b:7b",
+            "gemma4:v",
+            "gemma4:v1.",
+            "gemma4:v1..5",
+            "gemma4:vx",
+            "gemma4:v1.5x",
             "a:1b",
             "1:1b",
             "gemma4:",

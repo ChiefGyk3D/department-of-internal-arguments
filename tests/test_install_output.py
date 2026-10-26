@@ -215,7 +215,6 @@ class FilesystemIdentity(unittest.TestCase):
                 self.assertEqual(installer._check_target(d, ROOT), Path(d).absolute())
 
 
-
 class HostileProgName(unittest.TestCase):
     """A prog name taken from sys.argv[0] reaches argparse's error prefix, usage line and -h output; none may carry
     a raw control character. Only version-independent properties are asserted (no argparse wording)."""
