@@ -8,6 +8,14 @@ Benchmark corpus and scoring rubric (issue #47, unit 1 of #3). No model is run a
 - `scripts/benchmark.py`: `--check` (corpus well formed; commits and diffs resolve with local tools only, `not-run` without a full clone), `--reproduce` (re-proves each seed), `--score RESULTS.jsonl` (recall, precision, false findings, fix rounds avoided, wall clock, tokens, refusals per role and model; rejects a family name for an exact model id and a missing client version or cost). Read-only; never touches `policies/model-routing.md`. `scripts/validate.py` checks the corpus structure.
 - `evals/benchmark-schema.md`, a section in `docs/evals-and-measurements.md`, `tests/test_benchmark.py`.
 
+Round 3 of the review of the benchmark corpus (issue #47):
+
+- `diff_sha256` no longer depends on git attributes: the diff is computed between the two commit objects in a temporary bare repository with no configuration, no `info/attributes` and no working tree (objects borrowed through alternates), with `core.attributesFile` at the null device and `GIT_ATTR_NOSYSTEM=1`. A `-diff` or `binary` attribute, a diff driver selected by an attribute, and a `.gitattributes` in the working tree or index, no longer change it. The existing digests are unchanged.
+- The rubric no longer overstates its controls: they stop accidental or label-only echoing, not a report that copies the public corpus (a test names that a known limit and shows it). A scored run must not show the model `corpus.json`, and a result record needs `corpus_hidden: true` or it is refused.
+- `followups-for-27/version-tag-rejected` is relabelled `in_diff` (its quote is a line the diff adds), making 10 `in_diff`, 6 `pre_existing` and 3 brief findings; `--check` now applies the added-line test to every `pre_existing` finding whatever `at_base` says. `lead-list-fs-error` is shown to be observed at its base commit. `at_base: n/a` now means only that the reproduction cannot run at the base.
+- The matching tie-break, the `--no-ext-diff`, `--no-textconv` and `--full-index` pins, `core.quotePath`, the clone check, the subprocess timeouts, and the `--reproduce` exit code without a clone are now each held by a test. Distinct evidence hits must be on different, non-overlapping text; invisible and default-ignorable characters and non-ASCII spaces are rejected in text fields; a record dated more than a day ahead (UTC) is refused.
+- Documented: `--reproduce` runs pinned history unsandboxed as the invoking user (with a `bwrap` wrapper for untrusted pull-request heads); a note in `SECURITY.md`.
+
 Round 2 of the review of the benchmark corpus (issue #47):
 
 - Matching is a deterministic maximum bipartite assignment (augmenting paths, canonical report order), so the score no longer depends on the order of the report when evidence patterns overlap (the rubric text said it did not; the greedy version did).

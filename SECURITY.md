@@ -34,4 +34,4 @@ or commit message unless you ask not to be named.
 
 ## Scope
 
-In scope: `scripts/` (the installer, exporter, generator and validator), the generated adapters, and `.github/workflows/`. Out of scope: how a particular model behaves when given these prompts. Prompts guide behavior and are not access control; see `policies/security-boundaries.md`.
+In scope: `scripts/` (the installer, exporter, generator and validator), the generated adapters, and `.github/workflows/`. Out of scope: how a particular model behaves when given these prompts. `scripts/benchmark.py --reproduce` executes this repository's pinned history (probe scripts and the unit tests of a mutated copy) unsandboxed as the invoking user, so run it as a throwaway user or in a container when the history you fetched includes an untrusted pull-request head. Prompts guide behavior and are not access control; see `policies/security-boundaries.md`.

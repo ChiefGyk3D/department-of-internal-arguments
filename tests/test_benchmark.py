@@ -3,6 +3,7 @@ is ever run. The git tests build a throwaway repository in a temporary directory
 
 import contextlib
 import copy
+import datetime
 import hashlib
 import io
 import itertools
@@ -15,6 +16,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -104,7 +106,7 @@ def record(**over):
         "client": "claude-code",
         "client_version": "2.1.0",
         "model": "claude-sonnet-5-5",
-        "date": "2026-11-01",
+        "date": "2026-10-01",
         "commit": "a" * 40,
         "tools_enabled": ["read"],
         "outcome": "completed",
@@ -114,6 +116,7 @@ def record(**over):
         "wall_clock_s": 12.5,
         "tokens": {"input": 1000, "output": 200},
         "approval_ref": "synthetic",
+        "corpus_hidden": True,
         "refusals": [],
     }
     r.update(over)
@@ -237,6 +240,40 @@ class Matching(unittest.TestCase):
         )
         self.assertEqual((r["matched"], r["false"], r["unevidenced"]), ([], 3, 3))
 
+    def test_the_reviewers_three_report_case_gives_one_set_in_every_order(self):
+        quotes = ["code zero", "code one", "code two", "code three"]
+        t = task(
+            findings=[finding(f"e{i}", "dead-code", 1, ("src/a.py",), ("alpha", "beta"), [quotes[i]]) for i in range(4)]
+        )
+
+        def report(*ids):
+            text = "alpha beta " + " ".join(quotes[i] for i in ids)
+            return {"class": "dead-code", "path": "src/a.py", "evidence": text}
+
+        reports = [report(0, 2, 3), report(0, 1, 2, 3), report(2)]
+        seen = {tuple(sorted(self.m(list(order), t)["matched"])) for order in itertools.permutations(reports)}
+        self.assertEqual(len(seen), 1, seen)
+        self.assertEqual(len(next(iter(seen))), 3)
+
+    def test_the_quote_may_break_across_lines_in_the_report(self):
+        r = self.m([{**self.GOOD, "evidence": "the unchecked\n  value is bad"}])
+        self.assertEqual(r["matched"], ["f1"])
+
+    def test_two_patterns_satisfied_by_the_same_words_count_once(self):
+        t = task(findings=[finding("f1", evidence=(r"\.\.", r"\.\./x"), quotes=["unchecked value"])])
+        r = self.m([{**self.GOOD, "evidence": "../x unchecked value"}], t)
+        self.assertEqual(r["matched"], [])
+        r = self.m([{**self.GOOD, "evidence": "a .. b and ../x unchecked value"}], t)
+        self.assertEqual(r["matched"], ["f1"])
+
+    def test_the_same_word_matched_twice_in_different_places_still_counts_once(self):
+        t = task(findings=[finding("f1", evidence=(r"unch\w+", r"\bunchecked\b"), quotes=["unchecked value"])])
+        r = self.m([{**self.GOOD, "evidence": "unchecked, and again unchecked value"}], t)
+        self.assertEqual(r["matched"], [])
+        t = task(findings=[finding("f1", evidence=(r"unch\w+", r"\bvalue\b"), quotes=["unchecked value"])])
+        r = self.m([{**self.GOOD, "evidence": "unchecked, and again unchecked value"}], t)
+        self.assertEqual(r["matched"], ["f1"])
+
     def overlapping(self):
         shared = ("alpha", "beta")
         return task(
@@ -335,6 +372,41 @@ class RealCorpusMatching(unittest.TestCase):
             ]
             self.assertEqual(benchmark.match_findings(t, reports)["matched"], [], t["id"])
 
+    def satisfying_words(self, pattern):
+        plain = re.sub(r"\(\?i\)|\\[a-zA-Z]", "", pattern)
+        for w in re.findall(r"[A-Za-z_][A-Za-z_.-]+", plain):
+            if re.search(pattern, w):
+                return w
+        return None
+
+    def test_KNOWN_LIMIT_copying_the_public_quotes_and_patterns_scores_full_recall_on_diff_tasks(self):
+        # Documented limit, not a defect to fix here: corpus.json is public, so a report built from its quotes and
+        # pattern words matches with no code reviewed. This is why a scored run must never show the model the corpus
+        # (the corpus_hidden field of a result record).
+        total = hit = 0
+        for t in self.c["tasks"]:
+            if t["kind"] != "diff":
+                continue
+            reports = []
+            for f in t["findings"]:
+                words = [w for w in (self.satisfying_words(p) for p in f["evidence_any"]) if w]
+                text = " ; ".join([*words, *f["quotes"]])
+                reports.append({"class": f["class"], "path": f["paths"][0], "evidence": text})
+            total += len(t["findings"])
+            hit += len(benchmark.match_findings(t, reports)["matched"])
+        self.assertEqual((hit, total), (16, 16))
+
+    def test_KNOWN_LIMIT_the_brief_task_is_trivially_gameable_from_the_public_patterns(self):
+        t = self.task("lead-persona-brief")
+        filler = " lorem" * 40  # keeps the two matched phrases apart, so neither wide pattern window covers the other
+        texts = {
+            "brief-listing-never-hides": "unsafe row." + filler + " list-managed gives the file a row",
+            "brief-concurrent-edit": "editor edit." + filler + " race then rename",
+            "brief-fs-errors-are-rows": "error is a row." + filler + " unreadable row",
+        }
+        reports = [{"class": "brief-gap", "path": "brief", "evidence": v} for v in texts.values()]
+        self.assertEqual(len(benchmark.match_findings(t, reports)["matched"]), 3)
+
     def test_a_report_with_the_label_words_and_the_real_line_does_match(self):
         t = self.task("codex-adapter-first-head")
         f = t["findings"][0]
@@ -392,10 +464,33 @@ class ResultRecords(unittest.TestCase):
         self.rejects(record(cost_usd=-1), "cost_usd")
         self.rejects(record(run=benchmark.MAX_RUN + 1), "run")
 
+    def test_a_scored_run_must_have_hidden_the_corpus_from_the_model(self):
+        self.assertEqual(parse(record(corpus_hidden=True))["corpus_hidden"], True)
+        for bad in (False, "true", 1, None):
+            self.rejects(record(corpus_hidden=bad), "corpus_hidden")
+        r = record()
+        del r["corpus_hidden"]
+        self.rejects(r, "corpus_hidden")
+
+    def test_a_date_more_than_a_day_ahead_is_refused(self):
+        today = datetime.datetime.now(datetime.UTC).date()
+        self.assertEqual(parse(record(date=(today + datetime.timedelta(days=1)).isoformat()))["run"], 1)
+        self.rejects(record(date=(today + datetime.timedelta(days=2)).isoformat()), "future")
+
+    def test_invisible_and_blank_looking_characters_are_rejected_in_text_fields(self):
+        for ch in ("\ufe0f", "\u034f", "\u3164", "\u2800", "\u00a0", "\u3000", "\U000e0001", "\u180e", "\u0378"):
+            for key in ("client", "client_version", "approval_ref", "notes"):
+                self.rejects(record(**{key: "ok" + ch + "ok"}), key)
+            self.rejects(record(findings=[{"class": "dead-code", "path": "a", "evidence": "x" + ch + "y"}]), "control")
+
+    def test_cost_has_an_upper_bound(self):
+        self.assertEqual(parse(record(cost_usd=10_000_000))["cost_usd"], 10_000_000)
+        self.rejects(record(cost_usd=10_000_001), "cost_usd")
+
     def test_the_date_must_be_a_real_calendar_date(self):
         for bad in ("2026-02-30", "2026-13-01", "2026-00-10", "2026-1-01", "20261101", "2026-11-31"):
             self.rejects(record(date=bad), "date")
-        self.assertEqual(parse(record(date="2028-02-29"))["date"], "2028-02-29")
+        self.assertEqual(parse(record(date="2024-02-29"))["date"], "2024-02-29")
 
     def test_commit_is_40_hex_or_an_abbreviation_that_resolves(self):
         self.rejects(record(commit="abcdef1"), "abbreviated")  # no clone given
@@ -638,7 +733,6 @@ class CorpusStructure(unittest.TestCase):
             "unknown scope": lambda c: f0(c).update({"scope": "somewhere"}),
             "in_diff without touched": lambda c: f0(c).pop("touched"),
             "in_diff with a bad touched regex": lambda c: f0(c).update({"touched": ["("]}),
-            "in_diff but observed at the base": lambda c: f0(c).update({"at_base": "observed"}),
             "pre_existing with touched": lambda c: f0(c).update({"scope": "pre_existing"}),
             "no quotes": lambda c: f0(c).pop("quotes"),
             "empty quotes": lambda c: f0(c).update({"quotes": []}),
@@ -722,10 +816,8 @@ class RealCorpus(unittest.TestCase):
     def test_both_scopes_are_present_and_labelled(self):
         scopes = {f["scope"] for t in self.c["tasks"] for f in t["findings"]}
         self.assertEqual(scopes, {"in_diff", "pre_existing", "brief"})
-        for t in self.c["tasks"]:
-            for f in t["findings"]:
-                if f["at_base"] == "observed":
-                    self.assertEqual(f["scope"], "pre_existing", f["id"])
+        counts = {s: sum(f["scope"] == s for t in self.c["tasks"] for f in t["findings"]) for s in scopes}
+        self.assertEqual(counts, {"in_diff": 10, "pre_existing": 6, "brief": 3})
 
     def test_every_absence_only_repro_says_it_is_a_proxy(self):
         for t in self.c["tasks"]:
@@ -777,6 +869,8 @@ class GitBacked(unittest.TestCase):
             ("fixed", "checked value\n", {}),
         ):
             (self.repo / "src" / "a.py").write_text(text, encoding="utf-8")
+            if name == "defect":  # a non-ASCII file name, so core.quotePath changes the diff header
+                (self.repo / "src" / "\u00e9.txt").write_text("accent\n", encoding="utf-8")
             lines = list(self.long)
             for n, new in tweak.items():
                 lines[n - 1] = new
@@ -892,11 +986,226 @@ class GitBacked(unittest.TestCase):
         self.assertEqual(status, "fail")
         self.assertTrue(any("pre_existing" in e for e in errs))
         already = pre_existing("f1", quotes=["unchecked value"], fixed=self.shas["fixed"], at_base="observed")
-        self.assertEqual(benchmark.check_commits(self.repo, self.corpus_for(already))[0], "ok")
+        status, errs = benchmark.check_commits(self.repo, self.corpus_for(already))
+        self.assertEqual(status, "fail")  # an added line cannot be pre_existing, whatever the base shows
+        self.assertTrue(any("pre_existing" in e for e in errs))
         absent = self.corpus_for(self.pattern_finding(quotes=["a line that is not in the code"]))
         status, errs = benchmark.check_commits(self.repo, absent)
         self.assertEqual(status, "fail")
         self.assertTrue(any("quote not found" in e for e in errs))
+
+    # ---- the digest does not depend on attributes, drivers, config or the working tree
+
+    def clean_digest(self):
+        return benchmark.diff_digest(self.repo, self.shas["base"], self.shas["defect"])
+
+    def poison(self, source):
+        """Make `source` an attribute or driver source that would change a plain git diff. Returns (env, undo)."""
+        repo = self.repo
+        env = {}
+        undo = []
+        if source == "user-attributes":
+            fake = Path(self._tmp.name) / "fakehome"
+            (fake / ".config" / "git").mkdir(parents=True)
+            (fake / ".config" / "git" / "attributes").write_text("*.py -diff\n", encoding="utf-8")
+            env = {"HOME": str(fake), "XDG_CONFIG_HOME": str(fake / ".config")}
+        elif source == "core.attributesFile":
+            f = Path(self._tmp.name) / "attrs"
+            f.write_text("* binary\n", encoding="utf-8")
+            git(repo, "config", "core.attributesFile", str(f))
+            undo.append(lambda: git(repo, "config", "--unset", "core.attributesFile"))
+        elif source == "info/attributes":
+            f = repo / ".git" / "info" / "attributes"
+            f.parent.mkdir(exist_ok=True)
+            f.write_text("*.py -diff\n", encoding="utf-8")
+            undo.append(f.unlink)
+        elif source == "worktree .gitattributes":
+            f = repo / ".gitattributes"
+            f.write_text("* binary\n", encoding="utf-8")
+            undo.append(f.unlink)
+        elif source == "index .gitattributes":
+            f = repo / ".gitattributes"
+            f.write_text("* binary\n", encoding="utf-8")
+            git(repo, "add", ".gitattributes")
+            undo.append(lambda: (git(repo, "rm", "-q", "--cached", ".gitattributes"), f.unlink()))
+        elif source == "binary diff driver":
+            f = repo / ".git" / "info" / "attributes"
+            f.parent.mkdir(exist_ok=True)
+            f.write_text("*.py diff=evil\n", encoding="utf-8")
+            git(repo, "config", "diff.evil.binary", "true")
+            undo.append(f.unlink)
+            undo.append(lambda: git(repo, "config", "--unset", "diff.evil.binary"))
+        else:
+            raise AssertionError(source)
+        return env, undo
+
+    SOURCES = (
+        "user-attributes",
+        "core.attributesFile",
+        "info/attributes",
+        "worktree .gitattributes",
+        "index .gitattributes",
+        "binary diff driver",
+    )
+
+    def plain_diff(self, env):
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "diff", "--full-index", self.shas["base"], self.shas["defect"]],
+            capture_output=True,
+            env={**os.environ, **GIT_ENV, **env},
+        ).stdout
+
+    def test_the_digest_ignores_every_attribute_source(self):
+        clean = self.clean_digest()
+        self.assertNotIn(b"Binary files", self.plain_diff({}))
+        for source in self.SOURCES:
+            with self.subTest(source):
+                env, undo = self.poison(source)
+                try:
+                    # the poison is real: a plain diff now differs from the clean one
+                    self.assertIn(b"Binary files", self.plain_diff(env), source)
+                    saved = {k: os.environ.get(k) for k in env}
+                    os.environ.update(env)
+                    try:
+                        self.assertEqual(self.clean_digest(), clean, source)
+                        self.assertEqual(
+                            benchmark.check_commits(self.repo, self.corpus_for(self.pattern_finding()))[0], "ok"
+                        )
+                    finally:
+                        for k, v in saved.items():
+                            if v is None:
+                                os.environ.pop(k, None)
+                            else:
+                                os.environ[k] = v
+                finally:
+                    for fn in reversed(undo):
+                        fn()
+
+    def test_the_command_line_pins_alone_hold_for_the_attribute_files_they_can_reach(self):
+        # _run_diff on the repository itself (no isolated view): only the pins defend here
+        clean = benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"])
+        for source in ("user-attributes", "core.attributesFile"):
+            with self.subTest(source):
+                env, undo = self.poison(source)
+                saved = {k: os.environ.get(k) for k in env}
+                os.environ.update(env)
+                try:
+                    self.assertEqual(benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"]), clean)
+                finally:
+                    for k, v in saved.items():
+                        if v is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = v
+                    for fn in reversed(undo):
+                        fn()
+
+    def test_attribute_pins_are_in_the_environment_and_the_config(self):
+        self.assertEqual(benchmark._git_env()["GIT_ATTR_NOSYSTEM"], "1")
+        self.assertIn("core.attributesFile=" + os.devnull, benchmark.DIFF_CONFIG)
+
+    def test_external_diff_and_textconv_programs_never_run(self):
+        mark1, mark2 = Path(self._tmp.name) / "MARK-external", Path(self._tmp.name) / "MARK-textconv"
+        script = Path(self._tmp.name) / "ext.sh"
+        script.write_text(f"#!/bin/sh\ntouch {mark1}\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        git(self.repo, "config", "diff.external", str(script))
+        git(self.repo, "config", "diff.evil.textconv", f"touch {mark2}; cat")
+        info = self.repo / ".git" / "info" / "attributes"
+        info.parent.mkdir(exist_ok=True)
+        info.write_text("*.py diff=evil\n", encoding="utf-8")
+        try:
+            # the poison is real: a plain git diff runs both programs
+            subprocess.run(
+                ["git", "-C", str(self.repo), "diff", self.shas["base"], self.shas["defect"]],
+                capture_output=True,
+                env={**os.environ, **GIT_ENV},
+            )
+            self.assertTrue(mark1.exists())
+            mark1.unlink()
+            clean_text = benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"])
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.repo),
+                    "diff",
+                    "--no-ext-diff",
+                    "--textconv",
+                    self.shas["base"],
+                    self.shas["defect"],
+                ],
+                capture_output=True,
+                env={**os.environ, **GIT_ENV},
+            )
+            self.assertTrue(mark2.exists())
+            mark1.unlink(missing_ok=True)
+            mark2.unlink()
+            # the pins alone (no isolated view)
+            benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"])
+            self.assertFalse(mark1.exists())
+            self.assertFalse(mark2.exists())
+            self.assertTrue(clean_text)
+            # and through the public function
+            benchmark.diff_bytes(self.repo, self.shas["base"], self.shas["defect"])
+            self.assertFalse(mark1.exists())
+            self.assertFalse(mark2.exists())
+        finally:
+            info.unlink()
+
+    def test_the_diff_uses_full_object_ids_and_the_pins_are_in_the_argument_list(self):
+        text = benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"]).decode()
+        self.assertRegex(text, r"(?m)^index [0-9a-f]{40}\.\.[0-9a-f]{40}")
+        for pin in ("--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--no-color", "-U3"):
+            self.assertIn(pin, benchmark.DIFF_ARGS)
+
+    def test_core_quotepath_is_pinned(self):
+        clean = benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"])
+        self.assertIn(b"\\303\\251", clean)  # the accented name is escaped
+        git(self.repo, "config", "core.quotePath", "false")
+        self.assertEqual(benchmark._run_diff(self.repo, self.shas["base"], self.shas["defect"]), clean)
+
+    def test_a_subdirectory_of_a_repository_is_not_a_clone(self):
+        self.assertTrue(benchmark._has_clone(self.repo))
+        self.assertFalse(benchmark._has_clone(self.repo / "src"))
+        c = self.corpus_for(self.pattern_finding())
+        self.assertEqual(benchmark.check_commits(self.repo / "src", c), ("not-run", []))
+
+    def test_run_env_points_home_at_the_scratch_directory(self):
+        env = benchmark._run_env(Path("/scratch/dir"))
+        self.assertEqual(env["HOME"], "/scratch/dir")
+        self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertFalse([k for k in env if k.startswith("GIT_")])
+
+    def test_every_subprocess_has_a_timeout(self):
+        calls = []
+        real = subprocess.run
+
+        def spy(*args, **kw):
+            calls.append((args[0][0] if args else "?", kw.get("timeout")))
+            return real(*args, **kw)
+
+        probe = {"kind": "probe", "probe": "p.py", "args": []}
+        c = self.corpus_for(self.pattern_finding(repro=probe))
+        with mock.patch.object(subprocess, "run", spy):
+            benchmark.check_commits(self.repo, c)
+            self.run_reproduce(c)
+        self.assertTrue(calls)
+        self.assertEqual([x for x in calls if x[1] is None], [])
+        self.assertTrue(any(prog != "git" for prog, _ in calls))  # the probe itself was run
+
+    def test_cli_not_run_message_and_the_reproduce_exit_code_without_a_clone(self):
+        c = self.corpus_for(self.pattern_finding())
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as empty:
+            path = Path(d) / "corpus.json"
+            path.write_text(json.dumps(c), encoding="utf-8")
+            base = ["--corpus", str(path), "--repo", empty, "--probes", str(self.probes)]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(benchmark.main([*base, "--check"]), 0)
+                self.assertIn("not-run", out.getvalue())
+                self.assertIn("no commit was checked", out.getvalue())
+                self.assertEqual(benchmark.main([*base, "--reproduce"]), 2)
 
     def test_a_shallow_clone_is_not_a_clone_for_the_check(self):
         shallow = Path(self._tmp.name) / "shallow"
@@ -1083,6 +1392,19 @@ class MutationRepro(unittest.TestCase):
     def test_a_surviving_mutation_is_the_defect_and_a_killed_one_is_the_fix(self):
         res = benchmark.reproduce(self.repo, self.corpus_for(self.repro()))
         self.assertTrue(res[0]["ok"], res)
+
+    def test_the_unit_test_subprocess_has_a_timeout(self):
+        calls = []
+        real = subprocess.run
+
+        def spy(*args, **kw):
+            calls.append(kw.get("timeout"))
+            return real(*args, **kw)
+
+        with mock.patch.object(subprocess, "run", spy):
+            benchmark.reproduce(self.repo, self.corpus_for(self.repro()))
+        self.assertTrue(calls)
+        self.assertNotIn(None, calls)
 
     def test_a_mutation_that_the_tests_catch_at_the_head_is_not_a_reproduction(self):
         c = self.corpus_for(self.repro(), fixed=False)

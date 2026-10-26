@@ -15,6 +15,7 @@ report written to hit the patterns. The controls are a verbatim quote from the c
 distinct evidence patterns, the class and the path, and a human reading the false-findings column."""
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import io
@@ -77,6 +78,20 @@ DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 PRIVATE_PATH_RE = re.compile("/ho" + "me/|/Us" + "ers/|" + r"\\Us" + r"ers\\|~/")
 OBSERVED, NOT_OBSERVED = "OBSERVED", "NOT-OBSERVED"
 BAD_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
+# Default-ignorable and blank-looking code points that the categories above do not all cover (variation selectors,
+# the combining grapheme joiner, the Hangul fillers, the braille blank, the tag characters).
+INVISIBLE = frozenset(chr(c) for c in (0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0))
+INVISIBLE_RANGES = (
+    (0x180B, 0x180F),
+    (0x2000, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0xFE00, 0xFE0F),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
 
 
 def exact_model_id(model):
@@ -96,13 +111,25 @@ def exact_model_id(model):
 
 
 def _clean(text, allow_whitespace=False):
-    """No control, format (zero-width, bidi), separator or unassigned character; optionally keep \\n \\r \\t."""
+    """No control, format (zero-width, bidi), separator, unassigned, default-ignorable or blank-looking character
+    (any space but the ASCII one); optionally keep \\n \\r \\t."""
     for ch in text:
         if allow_whitespace and ch in "\n\r\t":
             continue
-        if unicodedata.category(ch) in BAD_CATEGORIES:
+        if _bad_char(ch):
             return False
     return True
+
+
+def _bad_char(ch):
+    cat = unicodedata.category(ch)
+    o = ord(ch)
+    return (
+        cat in BAD_CATEGORIES
+        or ch in INVISIBLE
+        or any(a <= o <= b for a, b in INVISIBLE_RANGES)
+        or (cat == "Zs" and ch != " ")
+    )
 
 
 def _norm(text):
@@ -310,8 +337,6 @@ def _scope_errors(label, kind, f):
         errs.append(f"{label}: quotes must be a non-empty list of code lines (8 to {MAX_QUOTE} characters)")
     if f["scope"] == "in_diff":
         errs += _regex_errors(f"{label}: touched", f.get("touched"))
-        if f["at_base"] == "observed":
-            errs.append(f"{label}: a finding observed at the base commit is pre_existing, not in_diff")
     elif "touched" in f:
         errs.append(f"{label}: a pre_existing finding has no touched line")
     return errs
@@ -366,8 +391,34 @@ def _repro_errors(label, kind, f, by_key, check_files, probes_dir):
 # ---------------------------------------------------------------- rubric
 
 
-def _evidence_hits(finding, evidence):
-    return sum(re.search(p, evidence) is not None for p in finding["evidence_any"])
+def _enough_hits(patterns, text, need):
+    """True when `need` different patterns each match a different, non-overlapping, non-empty piece of the text. Two
+    patterns that are satisfied by the same words (\\.\\. and \\.\\./x on "../x") count once."""
+    spans = []
+    for p in patterns:
+        found = []
+        for m in re.finditer(p, text):
+            if m.end() > m.start():
+                found.append((m.start(), m.end(), m.group(0)))
+                if len(found) >= 8:
+                    break
+        if found:
+            spans.append(found)
+    if len(spans) < need:
+        return False
+
+    def pick(i, chosen):
+        if len(chosen) >= need:
+            return True
+        if len(spans) - i < need - len(chosen):
+            return False
+        for s in spans[i]:
+            if all(s[1] <= c[0] or c[1] <= s[0] for c in chosen) and all(s[2] != c[2] for c in chosen):
+                if pick(i + 1, [*chosen, s]):
+                    return True
+        return pick(i + 1, chosen)
+
+    return pick(0, [])
 
 
 def _matches(task, e, r):
@@ -375,7 +426,7 @@ def _matches(task, e, r):
     tasks) and at least evidence_min distinct patterns of the model's own evidence."""
     if e["class"] != r["class"] or r["path"] not in e["paths"]:
         return False
-    if _evidence_hits(e, r["evidence"]) < e.get("evidence_min", DEFAULT_EVIDENCE_MIN):
+    if not _enough_hits(e["evidence_any"], r["evidence"], e.get("evidence_min", DEFAULT_EVIDENCE_MIN)):
         return False
     if task["kind"] == "diff":
         text = _norm(r["evidence"])
@@ -488,6 +539,7 @@ REQUIRED = (
     "wall_clock_s",
     "tokens",
     "approval_ref",
+    "corpus_hidden",
     "refusals",
 )
 OPTIONAL = ("quantization", "context", "cost_usd", "notes")
@@ -522,6 +574,11 @@ def parse_result(line, n, c, repo=None):
         v = rec[key]
         if not (isinstance(v, str) and v.strip() and len(v) <= 200 and _clean(v)):
             bad(f"{key} must be non-empty text without control characters (an exact version and an approval reference)")
+    if rec["corpus_hidden"] is not True:
+        bad(
+            "corpus_hidden must be true: a scored run never shows the model corpus.json, because the labels, quotes "
+            "and evidence patterns in it are public and a report that copies them scores full recall"
+        )
     if not exact_model_id(rec["model"]):
         bad("model must be an exact model id, not a family name or an alias (claude-sonnet-5-5, gemma4:12b)")
     task = next((t for t in c["tasks"] if t["id"] == rec["task"]), None) if isinstance(rec["task"], str) else None
@@ -583,9 +640,11 @@ def _check_date(value, bad):
     if not (isinstance(value, str) and DATE_RE.fullmatch(value)):
         bad("date must be YYYY-MM-DD")
     try:
-        datetime.date.fromisoformat(value)
+        day = datetime.date.fromisoformat(value)
     except ValueError:
         bad("date is not a real calendar date")
+    if day > datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=1):
+        bad("date is in the future")
 
 
 def _check_commit(value, repo, bad):
@@ -687,6 +746,7 @@ DIFF_CONFIG = (
     "diff.noprefix=false",
     "diff.mnemonicPrefix=false",
     "core.quotePath=true",
+    "core.attributesFile=" + os.devnull,
 )
 
 
@@ -697,8 +757,10 @@ def _git_env():
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_SYSTEM=os.devnull,
         GIT_CONFIG_NOSYSTEM="1",
+        GIT_ATTR_NOSYSTEM="1",
         GIT_TERMINAL_PROMPT="0",
     )
+    env.pop("XDG_CONFIG_HOME", None)
     return env
 
 
@@ -710,9 +772,31 @@ def _git(repo, *args, check=True):
     return p
 
 
-def diff_bytes(repo, base, head, *paths):
+@contextlib.contextmanager
+def _object_view(repo):
+    """A bare repository with no configuration, no info/attributes and no working tree that borrows the objects of
+    `repo` through an alternates file. Git reads attributes from the working tree, the index and info/attributes of the
+    repository it runs in, none of which can be neutralized by a command-line option on every git version; running in
+    this view makes them empty, and the commits are read as objects, never from the working tree."""
+    common = _git(repo, "rev-parse", "--git-common-dir").stdout.decode().strip()
+    objects = (Path(repo) / common).resolve() / "objects"
+    with tempfile.TemporaryDirectory() as tmp:
+        p = subprocess.run(["git", "init", "--bare", "-q", tmp], capture_output=True, env=_git_env(), timeout=120)
+        if p.returncode:
+            raise RuntimeError(p.stderr.decode("utf-8", "replace").strip() or "git init failed")
+        (Path(tmp) / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (Path(tmp) / "objects" / "info" / "alternates").write_text(f"{objects}\n", encoding="utf-8")
+        yield tmp
+
+
+def _run_diff(repo, base, head, *paths):
     extra = ["--", *paths] if paths else []
     return _git(repo, "diff", *DIFF_ARGS, base, head, *extra).stdout
+
+
+def diff_bytes(repo, base, head, *paths):
+    with _object_view(repo) as view:
+        return _run_diff(view, base, head, *paths)
 
 
 def diff_digest(repo, base, head):
@@ -759,7 +843,7 @@ def _added_text(diff_text):
 def check_commits(repo, c):
     """('ok'|'fail'|'not-run', errors). Local git only, no network. Not-run when there is no full (non-shallow)
     clone at repo; fail when a recorded commit is missing, a recorded diff changed, a quote is not in the head code,
-    an in_diff finding touches no line of the diff, or a pre_existing one has its quote on an added line."""
+    an in_diff finding touches no line of the diff, or a pre_existing one has a quote on an added line."""
     if not _has_clone(repo):
         return "not-run", []
     errs = []
@@ -797,7 +881,7 @@ def _scope_check(repo, t, f):
         lines = _touched_lines(text)
         if not any(re.search(p, ln) for p in f["touched"] for ln in lines):
             errs.append(f"{label}: labelled in_diff but no touched line of the diff matches {f['touched']}")
-    elif f["at_base"] != "observed":  # observed at the base: present before the diff even where the diff rewrote it
+    else:  # pre_existing: no quote of it may be a line this diff adds, whatever the base shows
         added = _added_text(text)
         for q in f["quotes"]:
             if _norm(q) in added:
@@ -815,7 +899,8 @@ def _safe_members(tf):
 
 
 def _extract(repo, sha, dest):
-    data = _git(repo, "archive", sha).stdout
+    with _object_view(repo) as view:
+        data = _git(view, "archive", sha).stdout
     with tarfile.open(fileobj=io.BytesIO(data)) as tf:
         members = list(_safe_members(tf))
         if hasattr(tarfile, "data_filter"):  # Python 3.11.4 and later (and 3.12+): the standard hardened filter

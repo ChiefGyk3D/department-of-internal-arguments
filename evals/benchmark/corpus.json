@@ -332,7 +332,7 @@
           "class": "input-validation",
           "severity": "minor",
           "round": 1,
-          "scope": "pre_existing",
+          "scope": "in_diff",
           "summary": "The real tag nomic-embed-text:v1.5 (a version, not a size) is rejected.",
           "source": "Review of #28; issue #29 item 2",
           "paths": [
@@ -357,7 +357,10 @@
               "rejects",
               "nomic-embed-text:v1.5"
             ]
-          }
+          },
+          "touched": [
+            "return tag == \\\"latest\\\""
+          ]
         },
         {
           "id": "dead-slash-check",
@@ -617,7 +620,7 @@
             "\\bfilesystem error\\b"
           ],
           "fixed": "0e37b5b2864399ed454d01a342f6bc7e8f948609",
-          "at_base": "n/a",
+          "at_base": "observed",
           "quotes": [
             "raw = _read_capped(dest)",
             "if len(raw) > MAX_MANAGED_BYTES:"
