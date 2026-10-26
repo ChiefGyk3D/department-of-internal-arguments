@@ -102,16 +102,19 @@ class Escapes(Base):
 
     def test_without_a_pid_namespace_a_late_write_is_caught_after_the_settle_time(self):
         repo, _, c2 = self.make_repo(check_src=LATE_DAEMON_SRC)
-        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "net", "--settle", "4"])
+        code, r = self.run_tool(
+            repo, c2, c2, extra=["--isolation", "net", "--allow-degraded-isolation", "--settle", "4"]
+        )
         self.assertEqual((code, r["verdict"]), (3, "inconclusive"), r["reason"])
         self.assertEqual(r["process_isolation"], "none")
         self.assertIs(r["source_unchanged_at_check"], False)
+        self.assertIs(r["isolation_degraded"], True, "the JSON must say the contract is the weaker one")
         self.assertNotIn("source_repo_unchanged", r, "no PID namespace: the claim is only 'unchanged at check'")
         self.assertTrue((repo / "PWNED").exists())
 
     def test_field_name_follows_what_is_proved(self):
         repo, _, c2 = self.make_repo()
-        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "net"])
+        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "net", "--allow-degraded-isolation"])
         self.assertEqual(code, 0, r["reason"])
         self.assertIs(r["source_unchanged_at_check"], True)
         self.assertNotIn("source_repo_unchanged", r)
@@ -124,7 +127,7 @@ class Escapes(Base):
         mark = self.tmp / "straggler"
         repo, _, c2 = self.make_repo()
         test = f"sh -c '(sleep 2; touch {mark}) & exit 0'"
-        code, r = self.run_tool(repo, c2, c2, test=test, extra=["--isolation", "net"])
+        code, r = self.run_tool(repo, c2, c2, test=test, extra=["--isolation", "net", "--allow-degraded-isolation"])
         self.assertEqual(code, 2, r["reason"])
         time.sleep(4)
         self.assertFalse(mark.exists(), "a straggler in the process group survived the run")
@@ -139,6 +142,7 @@ class Escapes(Base):
             )
             argv = [sys.executable, str(SCRIPT), "--repo", str(repo), f"--head={c2}", f"--revert={c2}", "--test", test]
             argv += ["--scratch", str(self.scratch), "--isolation", iso, "--settle", "0.2"]
+            argv += ["--private-parent", str(self.tmp / "priv"), "--allow-degraded-isolation"]
             proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.wait_for(started)
             proc.send_signal(sig)
@@ -309,58 +313,17 @@ class UsageExits(Base):
 
     def test_require_no_network_is_inconclusive_when_isolation_is_off(self):
         repo, _, c2 = self.make_repo()
-        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "none", "--require-no-network"])
+        code, r = self.run_tool(
+            repo, c2, c2, extra=["--isolation", "none", "--allow-degraded-isolation", "--require-no-network"]
+        )
         self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
         self.assertIn("--require-no-network", r["reason"])
         self.assertNotIn("test-at-head", self.phases(r))
-        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "none"])
+        code, r = self.run_tool(repo, c2, c2, extra=["--isolation", "none", "--allow-degraded-isolation"])
         self.assertEqual((code, r["network_isolation"], r["process_isolation"]), (0, "none", "none"))
 
 
-class Pruning(Base):
-    def entry(self, name, marker=True, age_days=10, target=None):
-        path = self.scratch / name
-        if target is not None:
-            path.symlink_to(target)
-            return path
-        path.mkdir()
-        (path / "payload.txt").write_text("evidence")
-        if marker:
-            m = path / mc.MARKER
-            m.write_text("x")
-            old = time.time() - age_days * 86400
-            os.utime(m, (old, old))
-        return path
-
-    def test_old_copies_made_by_the_tool_are_pruned_and_nothing_else(self):
-        self.scratch.mkdir(mode=0o700)
-        victim = self.tmp / "victim"
-        victim.mkdir()
-        (victim / mc.MARKER).write_text("x")
-        os.utime(victim / mc.MARKER, (1, 1))
-        old = self.entry("doia-mc-old")
-        new = self.entry("doia-mc-new", age_days=1)
-        nomark = self.entry("doia-mc-nomarker", marker=False)
-        other = self.entry("keepme")
-        link = self.entry("doia-mc-link", target=victim)
-        repo, _, c2 = self.make_repo()
-        code, r = self.run_tool(repo, c2, c2)
-        self.assertEqual(code, 0, r["reason"])
-        self.assertEqual(r["pruned"], ["doia-mc-old"])
-        self.assertFalse(old.exists())
-        for kept in (new, nomark, other):
-            self.assertTrue((kept / "payload.txt").exists(), kept)
-        self.assertTrue(link.is_symlink())
-        self.assertTrue((victim / mc.MARKER).exists(), "pruning followed a symlink")
-
-    def test_clean_old_zero_disables_pruning(self):
-        self.scratch.mkdir(mode=0o700)
-        old = self.entry("doia-mc-old")
-        repo, _, c2 = self.make_repo()
-        code, r = self.run_tool(repo, c2, c2, extra=["--clean-old", "0"])
-        self.assertEqual((code, r["pruned"]), (0, []))
-        self.assertTrue(old.exists())
-
+class RemoveTree(Base):
     def test_remove_tree_refuses_anything_but_a_real_direct_child(self):
         self.scratch.mkdir(mode=0o700)
         child = self.scratch / "child"

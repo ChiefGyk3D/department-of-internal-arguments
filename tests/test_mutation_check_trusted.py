@@ -199,10 +199,10 @@ class TrustedBoundary(Base):
 
     def test_private_directory_inside_the_repository_is_refused(self):
         repo, _, c2 = self.make_repo()
-        code, r = self.run_tool(repo, c2, c2, env={"HOME": str(repo)})
+        code, r = self.run_tool(repo, c2, c2, extra=["--private-parent", str(repo / "inside")])
         self.assertEqual(code, 3)
         self.assertIn("private directory", r["reason"])
-        self.assertFalse((repo / ".local").exists(), "something was created inside the repository")
+        self.assertFalse((repo / "inside").exists(), "something was created inside the repository")
 
     def test_a_nonempty_trusted_directory_is_refused(self):
         private = self.tmp / "private"

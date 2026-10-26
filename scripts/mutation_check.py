@@ -18,7 +18,10 @@ and reason. The claim is `source_repo_unchanged` when the run had a PID namespac
 only that nothing had changed when the tool looked, twice, one settle time apart).
 
 Exit codes (usage errors and -h also print JSON and exit 3, so 2 always means "vacuous" and 0 only "bites"):
-    0  bites: green, red after the revert, green after the restore, tree clean, source repository unchanged
+    0  bites: green, red after the revert, green after the restore, tree clean, source repository unchanged, and
+       the run had BOTH a network and a PID namespace. Without them the verdict is inconclusive (exit 3) unless
+       --allow-degraded-isolation is given; then exit 0 is the weaker contract and the JSON says
+       `isolation_degraded: true` (an escaped process or a network call is possible, see below)
     2  vacuous: the test stays green with the fix reverted (tree clean, source unchanged)
     3  inconclusive: anything else. Not green at head, a revert that does not apply or changes nothing, a test that
        failed with an exit code outside --red-exit, timed out, produced too much output or could not start, an
@@ -29,6 +32,11 @@ The copy is deleted on a bites result and kept (its path is in the JSON, "work_d
 result so evidence is not thrown away; --keep keeps it on bites too. Copies this tool made (a `doia-mc-*`
 directory holding a marker file) and left behind are removed after --clean-old days (default 7, 0 turns it off)
 when the next run starts; nothing else in the scratch directory is touched and symlinks are never followed.
+
+A test that is stateful (fails only on its second invocation, counts its own runs, depends on the clock or on a
+cache the allowlist removed) can be reported `bites` or `inconclusive` for reasons that have nothing to do with
+the fix; this tool runs each command three times, it does not detect that, and it is a documented limit (the
+documentation pages are issue #44).
 
 What `bites` means. It means the test passed at head, failed with the fix reverted and passed again after the
 restore, in a tree the tool measured with git metadata the test never saw, and that the source repository's hashes
@@ -48,8 +56,10 @@ only as a throwaway user, container or VM. What it does:
     user's real identity and home directory (pwd still names them), and unix sockets stay reachable.
   * runs the test AND every git step of the tool inside the same namespaces: `unshare --user --map-current-user
     --net --pid --fork --kill-child --mount-proc` (the user maps to itself, not root). Probed by running it; if
-    the host refuses it falls back to the network namespace alone, then to nothing (--isolation auto|net|none;
-    --require-no-network makes "nothing" inconclusive). The JSON says which: network_isolation is
+    the host refuses it the run may fall back to the network namespace alone, then to nothing (--isolation
+    auto|net|none), but such a degraded run is inconclusive unless --allow-degraded-isolation is given, and
+    --require-no-network makes "nothing" inconclusive even then. The JSON says which, and
+    `isolation_degraded` too: network_isolation is
     "net-namespace" or "none", process_isolation is "pid-namespace" or "none". The claim is network namespace only:
     outgoing TCP and UDP to the host's addresses fail inside; filesystem, unix sockets bound in the filesystem (the
     agent and D-Bus sockets in the user's runtime directory, say) and every readable secret file are not
@@ -80,6 +90,31 @@ only as a throwaway user, container or VM. What it does:
     test being dishonest, and the source hashes do not depend on it.
   * reads the source repository with its own configuration, minus hooks, fsmonitor and every filter driver it
     defines (neutralized one by one), and never runs anything the head's .gitattributes could name.
+  * hides the private repository from the test: the test runs in a mount namespace where the parent of the
+    private directory is covered by a bind mount of an empty directory, and the test's capabilities are dropped
+    (ambient set cleared, no_new_privs) before it starts, so it can neither list nor unmount it
+    (`isolation.private_dir_hidden`; `--hide-private off` turns it off, and a host that cannot do it reports
+    false). The tool's own steps run outside that mount. Where it is not hidden, the repository is also guarded:
+    its identity, mode, owner and a digest of every byte are recorded before the test and checked before every
+    trusted step and after every run; any change or failure is inconclusive. The same user can still deny a
+    verdict this way (suppression, never a forged bite) because the check refuses to continue.
+  * authenticates what `--clean-old` deletes: a marker is a regular file (opened O_NOFOLLOW, never blocking),
+    owned by the caller, mode 0600, holding a per-installation random token (a 0600 file in the private parent)
+    and the directory's own name, so a `touch`ed or copied marker deletes nothing. Candidates are opened relative
+    to a pinned directory descriptor, must be on the parent's device with no mount point inside, are emptied
+    through their own descriptor and removed only if the name still refers to the same inode.
+  * hashes every dirty or untracked source file whole, whatever its size, against a byte budget
+    (--max-source-bytes, default 4 GiB; over budget is inconclusive), so an equal-length rewrite with restored
+    times is seen.
+  * never counts a crash as a failing test: a run killed by a signal (a negative status or 128+N) is `crashed`;
+    --red-exit takes 1 to 125 only (0, 126, 127, 128 and above, 255 and negatives are refused); a run that dies by
+    signal at any step is inconclusive. The test runs as the namespace's PID 2 under a tiny PID 1 that reports
+    128+N for a signal death (a test that was PID 1 would ignore its own fatal signals and hang).
+  * checks storage before copying anything: estimate (object store plus tracked files), free space at the scratch
+    and private locations at least 2.5 times the estimate plus 64 MiB, and --max-copy-bytes (default 16 GiB);
+    otherwise inconclusive with the numbers. A failure mid-copy (no space left, say) removes the partial copies.
+  * reads a patch file through one descriptor (O_NOFOLLOW, O_NONBLOCK, fstat on that descriptor, at most 1 MiB
+    read whatever the size claims) and never opens the path a second time.
   * puts a timeout, an output cap and a process-group kill on every subprocess (--timeout, --max-output), and
     kills the whole run when it is interrupted.
   * refuses a revert patch (given or generated) that has an absolute path, a ".." component, a ".git"
@@ -90,7 +125,9 @@ only as a throwaway user, container or VM. What it does:
 
 What cannot be enforced. The test is arbitrary code running as the invoking user. It can write anywhere that user
 can write, including the source repository by absolute path, and read anything that user can read. The tool
-detects a changed source repository and reports it (exit 3); it cannot prevent or undo it. Without `unshare`
+detects a changed source repository and reports it (exit 3); it cannot prevent or undo it. Where the private
+repository is not hidden, the same user can delete or damage it: that denies the verdict (exit 3) but cannot
+forge a bite. Without `unshare`
 there is no network or process isolation. The isolated environment is not CI: a test that needs a variable or a
 cache the allowlist removes can be reported inconclusive. A revert that breaks the import of the module under test
 makes the test fail like a real bite does. Standard library only."""
@@ -100,6 +137,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -116,7 +154,12 @@ EXIT_BITES, EXIT_VACUOUS, EXIT_INCONCLUSIVE = 0, 2, 3
 SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 TAIL_BYTES = 4000
 MAX_PATCH = 1024 * 1024
-MAX_HASH_FILE = 64 * 1024 * 1024
+DEFAULT_MAX_SOURCE = 4 * 1024 * 1024 * 1024
+DEFAULT_MAX_COPY = 16 * 1024 * 1024 * 1024
+COPY_MARGIN = 64 * 1024 * 1024
+# Test hooks (set by the tests only): called between validation and use to inject a race.
+_PRUNE_HOOK = None
+_AFTER_OPEN_HOOK = None
 GIT_TIMEOUT = 300
 GIT_CAP = 4 * 1024 * 1024
 DEFAULT_SCRATCH = "~/.local/share/doia-mutation"
@@ -319,6 +362,56 @@ class Git:
         return res.code, res.data
 
 
+class StoreGuard:
+    """Detects damage to the private trusted repository. If the test could reach it (same user) it can suppress a
+    verdict, but a changed byte, mode, owner or missing file must make the run inconclusive, never a bite."""
+
+    def __init__(self, base):
+        self.base = base
+        self.quick_ref = self._quick()
+        self.digest = self._digest()
+
+    def _quick(self):
+        out = []
+        for sub in ("", "objects"):
+            try:
+                st = os.stat(os.path.join(self.base, sub))
+            except OSError as e:
+                raise Inconclusive(f"the private trusted repository is not readable ({type(e).__name__})") from e
+            out.append((st.st_ino, st.st_mode, st.st_uid))
+        return out
+
+    def _digest(self):
+        h = hashlib.sha256()
+        try:
+            for dirpath, dirnames, filenames in os.walk(self.base, followlinks=False):
+                dirnames.sort()
+                st = os.lstat(dirpath)
+                h.update(f"D {os.path.relpath(dirpath, self.base)} {st.st_mode:o} {st.st_uid}\n".encode())
+                for name in sorted(filenames):
+                    fp = os.path.join(dirpath, name)
+                    fst = os.lstat(fp)
+                    h.update(
+                        f"F {os.path.relpath(fp, self.base)} {fst.st_mode:o} {fst.st_uid} {fst.st_size}\n".encode()
+                    )
+                    if stat.S_ISREG(fst.st_mode):
+                        with open(fp, "rb") as f:
+                            for block in iter(lambda: f.read(1 << 20), b""):
+                                h.update(block)
+        except OSError as e:
+            raise Inconclusive(f"the private trusted repository is not readable ({type(e).__name__})") from e
+        return h.hexdigest()
+
+    def quick(self):
+        if self._quick() != self.quick_ref:
+            raise Inconclusive("the private trusted repository changed (mode, owner or identity) while the test ran")
+
+    def verify(self):
+        self.quick()
+        if self._digest() != self.digest:
+            raise Inconclusive("the private trusted repository changed while the test ran")
+
+
 class Trusted:
     """Git metadata the test never saw and cannot reach. After the test has run, nothing is read from the clone's
     own .git, from the source repository's object store, from the test's HOME or XDG directories, or from any path
@@ -332,10 +425,13 @@ class Trusted:
     controls: git compares its files against the private objects by hashing them from disk, and reads nothing
     executable from a worktree."""
 
-    def __init__(self, git, private, clone, objects, sha):
+    def __init__(self, git, private, clone, objects, sha, guard=None):
         self.git, self.private, self.clone, self.objects, self.sha = git, private, clone, objects, sha
+        self.guard = guard
 
     def prepare(self):
+        if self.guard is not None:
+            self.guard.quick()
         gd = tempfile.mkdtemp(prefix="g-", dir=self.private)  # random name, created atomically, mode 0700
         st = os.lstat(gd)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or os.listdir(gd):
@@ -382,8 +478,23 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def hash_file(path):
-    """Content hash of a regular file, a link target hash for a symlink, a type tag for anything else."""
+class Budget:
+    """A byte budget for hashing the source repository's dirty files. Over budget is inconclusive, never skipped."""
+
+    def __init__(self, limit):
+        self.left = limit
+
+    def take(self, n):
+        self.left -= n
+        if self.left < 0:
+            raise Inconclusive(
+                "the source hashing budget (--max-source-bytes) is exhausted; raise it or clean the source"
+            )
+
+
+def hash_file(path, budget):
+    """Content hash of a regular file of any size (streamed), a link target hash for a symlink, a type tag for
+    anything else. Every byte counts against the budget."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -394,12 +505,11 @@ def hash_file(path):
         return "link:" + sha256(os.readlink(path).encode("utf-8", "surrogateescape"))
     if not stat.S_ISREG(st.st_mode):
         return f"type:{stat.S_IFMT(st.st_mode):o}"
-    if st.st_size > MAX_HASH_FILE:
-        return f"large:{st.st_size}:{st.st_mtime_ns}"
     h = hashlib.sha256()
     try:
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):
+                budget.take(len(block))
                 h.update(block)
     except OSError as e:
         return f"error:{type(e).__name__}"
@@ -440,7 +550,7 @@ def filter_overrides(git, root):
     return opts
 
 
-def snapshot(git, root):
+def snapshot(git, root, max_bytes=DEFAULT_MAX_SOURCE):
     """Everything about the source repository the tool promises not to change, as hashes."""
 
     def read(*args):
@@ -449,6 +559,7 @@ def snapshot(git, root):
             raise Inconclusive(f"source snapshot: git {args[-1]} exited {code}: {git.last_err}")
         return data
 
+    budget = Budget(max_bytes)
     snap = {}
     code, head = git.out(root, "rev-parse", "--verify", "--quiet", "HEAD")
     snap["head"] = head.decode().strip() if code == 0 else "unborn"
@@ -463,11 +574,13 @@ def snapshot(git, root):
     snap["status_and_content_sha256"] = sha256(
         raw
         + b"\0\0"
-        + b"\n".join(p + b"\0" + hash_file(os.path.join(os.fsencode(root), p)).encode() for p in status_paths(raw))
+        + b"\n".join(
+            p + b"\0" + hash_file(os.path.join(os.fsencode(root), p), budget).encode() for p in status_paths(raw)
+        )
     )
     for name in ("config", "index"):
         gp = read("rev-parse", "--git-path", name).decode("utf-8", "surrogateescape").strip()
-        snap[f"{name}_sha256"] = hash_file(os.path.join(root, gp))
+        snap[f"{name}_sha256"] = hash_file(os.path.join(root, gp), budget)
     snap["combined_sha256"] = sha256(json.dumps(snap, sort_keys=True).encode())
     return snap
 
@@ -554,6 +667,33 @@ def sha_of(git, root, rev, what):
     return sha
 
 
+def read_patch_file(path):
+    """Read a revert patch through one descriptor: opened once without following a symlink or blocking, checked with
+    fstat on that descriptor, read through it, never longer than MAX_PATCH bytes whatever the file size claims."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        raise Inconclusive("revert patch file could not be opened (a symlink, or not readable)") from e
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Inconclusive("revert patch file must be a regular file, not a symlink")
+        if _AFTER_OPEN_HOOK is not None:
+            _AFTER_OPEN_HOOK()
+        chunks, total = [], 0
+        while total <= MAX_PATCH:
+            block = os.read(fd, min(65536, MAX_PATCH + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_PATCH:
+        raise Inconclusive("revert patch file over 1 MiB")
+    return data
+
+
 def build_revert(git, root, spec, head):
     """Return (patch bytes, files reverted, description of the source of the patch)."""
     info = {}
@@ -567,16 +707,9 @@ def build_revert(git, root, spec, head):
             commit = data.decode().strip()
     if commit is None:
         path = os.path.abspath(spec)
-        try:
-            st = os.lstat(path)
-        except OSError as e:
-            raise Inconclusive("--revert is neither a commit nor a patch file") from e
-        if not stat.S_ISREG(st.st_mode):  # lstat: a symlink is never a regular file
-            raise Inconclusive("revert patch file must be a regular file, not a symlink")
-        if st.st_size > MAX_PATCH:
-            raise Inconclusive("revert patch file over 1 MiB")
-        with open(path, "rb") as f:
-            patch = f.read(MAX_PATCH + 1)
+        if not os.path.lexists(path):
+            raise Inconclusive("--revert is neither a commit nor a patch file")
+        patch = read_patch_file(path)
         info["kind"] = "patch"
         info["sha256"] = sha256(patch)
         return patch, patch_paths(patch), info
@@ -620,33 +753,84 @@ def build_revert(git, root, spec, head):
 ISOLATION_MODES = ("auto", "net", "none")
 
 
-def isolation_wrapper(mode, probe_env):
-    """(argv prefix, what it isolates). Namespaces for an unprivileged user, probed by really running them.
+# Runs as PID 1 of the PID namespace (python3 -I -c INIT_HELPER EMPTY TARGET -- CMD...). A process that is PID 1 of a
+# namespace ignores fatal signals it sends itself or that the kernel raises with the default action, so a test run
+# directly as PID 1 that segfaults would hang instead of dying. This shim forks the command as PID 2, reaps every
+# orphan, and exits with the command's status (128 + N for a signal), which ends the namespace. When TARGET is not
+# "-" it first bind-mounts EMPTY over TARGET and drops every capability (see isolation_wrapper).
+INIT_HELPER = (
+    "import ctypes, os, sys\n"
+    "empty, target = sys.argv[1], sys.argv[2]\n"
+    "if target != '-':\n"
+    "    libc = ctypes.CDLL(None, use_errno=True)\n"
+    "    if libc.mount(empty.encode(), target.encode(), None, 4096, None) != 0:\n"
+    "        sys.exit(97)\n"
+    "    libc.prctl(38, 1, 0, 0, 0)\n"  # PR_SET_NO_NEW_PRIVS
+    "    libc.prctl(47, 4, 0, 0, 0)\n"  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL: the test gets no capability
+    "pid = os.fork()\n"
+    "if pid == 0:\n"
+    "    try:\n"
+    "        os.execvp(sys.argv[4], sys.argv[4:])\n"
+    "    finally:\n"
+    "        os._exit(127)\n"
+    "code = 0\n"
+    "while True:\n"
+    "    try:\n"
+    "        done, st = os.wait()\n"
+    "    except ChildProcessError:\n"
+    "        break\n"
+    "    if done == pid:\n"
+    "        code = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st)\n"
+    "        break\n"
+    "sys.exit(code)\n"
+)
 
-    "auto" tries a user + network + PID namespace (`unshare --user --map-current-user --net --pid --fork
-    --kill-child --mount-proc`: when the leader exits the kernel kills every process in the namespace, so nothing
-    the test started can outlive the run), then a network namespace alone, then nothing. The user is mapped to
-    itself, not to root, so permission-dependent tests behave as they would outside. A private /tmp was tried
-    (a tmpfs mount inside the mount namespace) and is refused by the kernel for a mapped current user, so it is not
-    offered. Files, unix sockets and the user's identity are NOT isolated."""
+
+def isolation_wrapper(mode, probe_env, hide=None):
+    """(argv prefix for the tool's own git steps, argv prefix for the test, what is isolated).
+
+    Namespaces for an unprivileged user, probed by really running them. "auto" tries a user + network + PID
+    namespace (`unshare --user --map-current-user --net --pid --fork --kill-child --mount-proc`: when the leader
+    exits the kernel kills every process in the namespace), then a network namespace alone, then nothing. The user
+    is mapped to itself, not to root. For the TEST only, when `hide` is (empty_dir, target) and the full mode works,
+    the target (the parent of the private trusted repository) is covered by a bind mount of the empty directory
+    inside the test's mount namespace and every capability is dropped before the test starts (`--keep-caps` gives
+    the helper the right to mount; the helper clears the ambient set and sets no_new_privs before the exec), so the
+    test can neither see nor unmount it. The tool's own steps run in a namespace without that mount. A private /tmp
+    (tmpfs) is refused by the kernel for a user mapped to itself and is not offered. Files, unix sockets and the
+    user's identity are NOT isolated."""
     exe = shutil.which("unshare", path=clean_path())
     probe_cmd = shutil.which("true", path=clean_path())
     plan = {"auto": (("net", "pid"), ("net",)), "net": (("net",),), "none": ()}[mode]
-    if exe and probe_cmd:
-        for parts in plan:
-            argv = [exe, "--user", "--map-current-user"]
-            if "net" in parts:
-                argv.append("--net")
-            if "pid" in parts:
-                argv += ["--pid", "--fork", "--kill-child", "--mount-proc"]
-            argv.append("--")
-            res = run([*argv, probe_cmd], cwd=None, env=probe_env, timeout=20, cap=4096)
+    none = {"network": "none", "process": "none", "private_dir_hidden": False}
+    if not (exe and probe_cmd):
+        return [], [], none
+    for parts in plan:
+        argv = [exe, "--user", "--map-current-user"]
+        if "net" in parts:
+            argv.append("--net")
+        if "pid" in parts:
+            argv += ["--pid", "--fork", "--kill-child", "--mount-proc"]
+        shim = ["--", sys.executable, "-I", "-c", INIT_HELPER] if "pid" in parts else ["--"]
+        tail = ["-", "-", "--"] if "pid" in parts else []
+        tool_argv = [*argv, *shim, *tail]
+        res = run([*tool_argv, probe_cmd], cwd=None, env=probe_env, timeout=20, cap=4096)
+        if res.status != "exited" or res.code != 0:
+            continue
+        iso = {
+            "network": "net-namespace" if "net" in parts else "none",
+            "process": "pid-namespace" if "pid" in parts else "none",
+            "private_dir_hidden": False,
+        }
+        test_argv = tool_argv
+        if hide is not None and parts == ("net", "pid"):
+            empty, target = hide
+            hidden = [*argv, "--keep-caps", *shim, empty, target, "--"]
+            res = run([*hidden, probe_cmd], cwd=None, env=probe_env, timeout=20, cap=4096)
             if res.status == "exited" and res.code == 0:
-                return argv, {
-                    "network": "net-namespace" if "net" in parts else "none",
-                    "process": "pid-namespace" if "pid" in parts else "none",
-                }
-    return [], {"network": "none", "process": "none"}
+                test_argv, iso["private_dir_hidden"] = hidden, True
+        return tool_argv, test_argv, iso
+    return [], [], none
 
 
 def clean_evidence(trusted):
@@ -704,6 +888,8 @@ class Checker:
             kind = "error"
         elif res.code == 0:
             kind = "green"
+        elif res.code < 0 or res.code >= 128:
+            kind = "crashed"  # killed by a signal (negative, or 128+N from a launcher): never a failing test
         elif res.code in self.args.red_exit_codes:
             kind = "red"
         else:
@@ -728,43 +914,199 @@ MARKER = ".doia-mutation-check"
 PREFIX = "doia-mc-"
 
 
-def prune_old(scratch, days):
-    """Remove disposable copies this tool made (a PREFIX directory holding MARKER, owned by this user, not a
-    symlink) whose marker is older than `days`. Nothing else in the scratch directory is looked at or touched."""
+def get_token(parent):
+    """The per-installation secret that authenticates this tool's markers: random, kept 0600 in the private root,
+    created O_EXCL, read back with O_NOFOLLOW and refused unless it is a regular file of ours with mode 0600."""
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    path = os.path.join(parent, ".token")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        fd = None
+    if fd is not None:
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(secrets.token_hex(32))
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        raise Inconclusive("the token file could not be opened (a symlink, or not readable)") from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+            raise Inconclusive("the token file must be a regular file of ours with mode 0600")
+        token = os.read(fd, 200).decode("ascii", "replace").strip()
+    finally:
+        os.close(fd)
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise Inconclusive("the token file does not hold a token")
+    return token
+
+
+def write_marker(dirpath, token):
+    """Mark a directory as made by this tool: token and directory name, 0600, created O_EXCL, never through a link."""
+    fd = os.open(os.path.join(dirpath, MARKER), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(f"{token}\n{os.path.basename(dirpath)}\n")
+
+
+def validate_marker(st, content, name, token, cutoff):
+    """Is this marker genuine and old? A regular file of ours, mode 0600, holding the token and this directory name."""
+    return (
+        stat.S_ISREG(st.st_mode)
+        and st.st_uid == os.getuid()
+        and stat.S_IMODE(st.st_mode) == 0o600
+        and content == f"{token}\n{name}\n".encode()
+        and st.st_mtime < cutoff
+    )
+
+
+def is_mount_boundary(parent_st, child_st):
+    return parent_st.st_dev != child_st.st_dev
+
+
+def _delete_pinned(cfd, cand_dev):
+    """Empty the directory open as `cfd` using descriptors only, refusing anything on another device first."""
+    for _dp, _dn, _fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
+        if os.fstat(rfd).st_dev != cand_dev:
+            raise OSError("a mount point inside the candidate")
+    dirs = []
+    for dp, dn, fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
+        os.fchmod(rfd, 0o700)
+        for f in fn:
+            os.unlink(f, dir_fd=rfd)
+        for d in list(dn):
+            if stat.S_ISLNK(os.stat(d, dir_fd=rfd, follow_symlinks=False).st_mode):
+                os.unlink(d, dir_fd=rfd)
+                dn.remove(d)
+        dirs.append(dp)
+    for dp in sorted(dirs, key=len, reverse=True):
+        if dp != ".":
+            os.rmdir(dp, dir_fd=cfd)
+
+
+def prune_old(parent, days, token):
+    """Remove disposable copies this tool made and left behind. A candidate is a PREFIX directory directly under
+    `parent` (a pinned descriptor, nothing is followed) on the same device, holding an authenticated marker (see
+    validate_marker) older than `days`. It is emptied through its own descriptor and removed only if the name still
+    refers to the same inode; a mount point or a swapped candidate is left alone."""
     pruned = []
     if days <= 0:
         return pruned
     cutoff = time.time() - days * 86400
-    for entry in sorted(os.listdir(scratch)):
-        path = os.path.join(scratch, entry)
-        if not entry.startswith(PREFIX):
-            continue
-        try:
-            mark = os.lstat(os.path.join(path, MARKER))
-        except OSError:
-            continue
-        if mark.st_mtime >= cutoff:
-            continue
-        try:  # remove_tree refuses a symlink and anything that is not a direct child of the scratch directory
-            remove_tree(path, scratch)
-            pruned.append(entry)
-        except Exception:  # an old copy that cannot be removed is left; the check goes on
-            continue
+    pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        pst = os.fstat(pfd)
+        for name in sorted(os.listdir(pfd)):
+            if not name.startswith(PREFIX):
+                continue
+            try:
+                st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                if not stat.S_ISDIR(st.st_mode) or is_mount_boundary(pst, st):
+                    continue
+                cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+            except OSError:
+                continue
+            try:
+                fst = os.fstat(cfd)
+                if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                    continue
+                try:
+                    mfd = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cfd)
+                except OSError:
+                    continue
+                try:
+                    mst = os.fstat(mfd)
+                    content = os.read(mfd, 512) if stat.S_ISREG(mst.st_mode) else b""
+                finally:
+                    os.close(mfd)
+                if not validate_marker(mst, content, name, token, cutoff):
+                    continue
+                if _PRUNE_HOOK is not None:
+                    _PRUNE_HOOK(name)
+                _delete_pinned(cfd, fst.st_dev)
+                now = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                if (now.st_ino, now.st_dev) == (fst.st_ino, fst.st_dev):
+                    os.rmdir(name, dir_fd=pfd)
+                    pruned.append(name)
+            except OSError:
+                continue  # an old copy that cannot be removed is left; the check goes on
+            finally:
+                os.close(cfd)
+    finally:
+        os.close(pfd)
     return pruned
 
 
 PRIVATE_PARENT = "~/.local/share/doia-mutation-private"
 
 
-def make_private_dir(root):
-    """A random 0700 directory for the trusted git material, outside the scratch directory and the repository."""
-    parent = os.path.realpath(os.path.expanduser(PRIVATE_PARENT))
+def resolve_private_parent(args, root):
+    parent = os.path.realpath(os.path.expanduser(args.private_parent or PRIVATE_PARENT))
     if under(root, parent) or under(parent, root):
         raise Inconclusive(
             "the private directory for trusted git material equals, contains or lies inside the repository"
         )
+    return parent
+
+
+def free_bytes(path):
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def required_free(estimate):
+    """Free space needed before copying: 2.5 times the estimate plus a margin."""
+    return int(2.5 * estimate) + COPY_MARGIN
+
+
+def estimate_copy_bytes(git, root, objects_dir, limit=5_000_000):
+    """Disk the copies will need at most: the object store plus the tracked files (bounded walk)."""
+    total, seen = 0, 0
+    for dirpath, _dn, filenames in os.walk(objects_dir, followlinks=False):
+        for name in filenames:
+            seen += 1
+            if seen > limit:
+                raise Inconclusive("too many files in the object store to estimate the copy size")
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            total += max(st.st_size, st.st_blocks * 512)
+    code, data = git.out(root, "ls-files", "-z")
+    if code != 0:
+        raise Inconclusive("could not list the tracked files to estimate the copy size")
+    for rel in data.split(b"\0")[:limit]:
+        if rel:
+            try:
+                total += os.lstat(os.path.join(os.fsencode(root), rel)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def check_storage(estimate, args, targets):
+    if estimate > args.max_copy_bytes:
+        raise Inconclusive(
+            f"the copies would need about {estimate} bytes, over --max-copy-bytes {args.max_copy_bytes}; "
+            "nothing was copied"
+        )
+    need = required_free(estimate)
+    for target in targets:
+        probe = target
+        while not os.path.exists(probe) and os.path.dirname(probe) != probe:
+            probe = os.path.dirname(probe)
+        free = free_bytes(probe)
+        if free < need:
+            raise Inconclusive(
+                f"not enough free space at {target}: {free} bytes free, {need} needed "
+                f"(2.5 x the estimate of {estimate} bytes plus a margin); nothing was copied"
+            )
+
+
+def make_private_dir(parent):
+    """A random 0700 directory for the trusted git material, outside the scratch directory and the repository."""
     os.makedirs(parent, mode=0o700, exist_ok=True)
-    return parent, tempfile.mkdtemp(prefix=PREFIX + "private-", dir=parent)
+    return tempfile.mkdtemp(prefix=PREFIX + "private-", dir=parent)
 
 
 def check(args, report, state):
@@ -794,27 +1136,35 @@ def check(args, report, state):
     patch, files, info = build_revert(src_git, root, args.revert, head)
     report["reverted"] = {"files": files, **info}
     scratch = resolve_scratch(args, root)
-    pparent, private = make_private_dir(root)
+    pparent = resolve_private_parent(args, root)
+    code, objs = src_git.out(root, "rev-parse", "--git-path", "objects")
+    src_objects = os.path.join(root, objs.decode("utf-8", "surrogateescape").strip())
+    estimate = estimate_copy_bytes(src_git, root, src_objects)
+    report["storage"] = {"estimate_bytes": estimate, "required_free_bytes": required_free(estimate)}
+    check_storage(estimate, args, [scratch, pparent])
+    private = make_private_dir(pparent)
     state["private"], state["private_parent"] = private, pparent
-    with open(os.path.join(private, MARKER), "w", encoding="utf-8") as f:
-        f.write("made by mutation_check.py\n")
-    report["pruned"] = prune_old(scratch, args.clean_old) + prune_old(pparent, args.clean_old)
-    state["src_git"], state["root"] = src_git, root
-    before = snapshot(src_git, root)
+    token = get_token(pparent)
+    write_marker(private, token)
+    report["pruned"] = prune_old(scratch, args.clean_old, token) + prune_old(pparent, args.clean_old, token)
+    state["src_git"], state["root"], state["max_source"] = src_git, root, args.max_source_bytes
+    before = snapshot(src_git, root, args.max_source_bytes)
     state["before"] = before
 
     work = tempfile.mkdtemp(prefix=PREFIX, dir=scratch)  # mkdtemp creates it 0700
     state["work"], state["scratch"] = work, scratch
     report["work_dir"] = work
-    with open(os.path.join(work, MARKER), "w", encoding="utf-8") as f:
-        f.write("made by mutation_check.py\n")
-    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache"):
+    write_marker(work, token)
+    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache", "empty"):
         os.mkdir(os.path.join(work, d), 0o700)
     clone = os.path.join(work, "repo")
     chk = Checker(args, report)
     env = sanitized_env(os.path.join(work, "home"), work)
-    wrap, iso = isolation_wrapper(args.isolation, env)
+    hide = (os.path.join(work, "empty"), pparent) if args.hide_private == "auto" else None
+    wrap, test_wrap, iso = isolation_wrapper(args.isolation, env, hide)
     state["process_isolation"] = iso["process"]
+    degraded = iso["network"] != "net-namespace" or iso["process"] != "pid-namespace"
+    report["isolation_degraded"] = degraded
     report["network_isolation"], report["process_isolation"] = iso["network"], iso["process"]
     report["isolation"] = {
         **iso,
@@ -822,6 +1172,12 @@ def check(args, report, state):
         "identity": "none: the real user, home directory and any secret file the user can read",
         "environment": "allowlist only (no inherited variable is passed)",
     }
+    if degraded and not args.allow_degraded_isolation:
+        raise Inconclusive(
+            f"the isolation a bite needs (network and PID namespaces) is not in place (network: {iso['network']}, "
+            f"process: {iso['process']}); no test was run. Use a host with unshare, or pass "
+            "--allow-degraded-isolation to accept the weaker contract"
+        )
     if args.require_no_network and iso["network"] == "none":
         raise Inconclusive("--require-no-network but this host cannot isolate the network (no usable unshare)")
     report["environment"] = sorted(env)
@@ -832,30 +1188,39 @@ def check(args, report, state):
         os.mkdir(os.path.join(private, d), 0o700)
     tenv = trusted_env(os.path.join(private, "home"), os.path.join(private, "tmp"))
     report["trusted"] = {"env_keys": sorted(tenv), "private_dir": private}
+    state["copy_failed"] = True  # cleared once both copies exist; any failure in between deletes the partial copies
     base = os.path.join(private, "base.git")
     # The private object store: a bare copy of the source, made before the test runs, with its own configuration.
     Git(git_exe, tenv, chk.record, wrap, strict=False).run(
         private, "clone", "--bare", "--local", "--no-hardlinks", "--", root, base, phase="trusted-base"
     )
+    guard = StoreGuard(base)
     trusted = Trusted(
-        Git(git_exe, tenv, chk.record, wrap, strict=True), private, clone, os.path.join(base, "objects"), head
+        Git(git_exe, tenv, chk.record, wrap, strict=True), private, clone, os.path.join(base, "objects"), head, guard
     )
 
     git.run(work, "clone", "--local", "--no-hardlinks", "--no-checkout", "--", root, clone, phase="clone")
     git.run(clone, "checkout", "--detach", "--force", head, phase="checkout-head")
+    state["copy_failed"] = False
     check_patch_paths(files, clone)
 
-    kind = chk.test_run("test-at-head", test_argv, clone, env, wrap)
+    kind = chk.test_run("test-at-head", test_argv, clone, env, test_wrap)
     report["green_before"] = kind == "green"
     if kind != "green":
-        raise Inconclusive(f"the test is not green at head (result: {kind}); nothing else was run")
+        raise Inconclusive(
+            f"the test is not green at head (result: {kind}"
+            + (", it crashed: killed by a signal" if kind == "crashed" else "")
+            + "); nothing else was run"
+        )
 
+    guard.verify()
     envx = trusted.prepare()
     trusted.run("apply", "-R", "--whitespace=nowarn", "-", phase="revert", stdin=patch, envx=envx)
     _, dirty = trusted.out("status", "--porcelain=v1", "--untracked-files=all", envx=envx)
     if not dirty:
         raise Inconclusive("the revert changed nothing in the clone")
-    kind = chk.test_run("test-after-revert", test_argv, clone, env, wrap)
+    kind = chk.test_run("test-after-revert", test_argv, clone, env, test_wrap)
+    guard.verify()
     report["red_after_revert"] = True if kind == "red" else (False if kind == "green" else None)
 
     restore(trusted)
@@ -866,7 +1231,8 @@ def check(args, report, state):
         report["tree_clean"]["final"] = after_restore
         state["conclusion"] = "vacuous"
     elif kind == "red":
-        k3 = chk.test_run("test-after-restore", test_argv, clone, env, wrap)
+        k3 = chk.test_run("test-after-restore", test_argv, clone, env, test_wrap)
+        guard.verify()
         report["green_after_restore"] = k3 == "green"
         report["tree_clean"]["final"] = clean_evidence(trusted)
         state["conclusion"] = "bites" if k3 == "green" else "error"
@@ -875,9 +1241,12 @@ def check(args, report, state):
         report["green_after_restore"] = None
         report["tree_clean"]["final"] = after_restore
         state["conclusion"] = "error"
-        state["why"] = "the test failed after the revert in a way that is not a clean failure (see commands)"
+        state["why"] = (
+            "the test failed after the revert in a way that is not a clean failure "
+            "(crash by signal, timeout, unlisted exit code; see commands)"
+        )
     report["tree_clean"]["clean"] = bool(after_restore["clean"] and report["tree_clean"]["final"]["clean"])
-    state["after"] = snapshot(src_git, root)
+    state["after"] = snapshot(src_git, root, args.max_source_bytes)
 
 
 def restore(trusted):
@@ -909,6 +1278,24 @@ def build_parser():
     p.add_argument(
         "--clean-old", type=int, default=7, metavar="DAYS", help="remove this tool's copies older than DAYS (0: off)"
     )
+    p.add_argument(
+        "--allow-degraded-isolation",
+        action="store_true",
+        help="accept a run without both the network and PID namespaces (weaker exit-0 contract)",
+    )
+    p.add_argument(
+        "--hide-private", choices=("auto", "off"), default="auto", help="hide the private repository's parent"
+    )
+    p.add_argument(
+        "--private-parent",
+        help="where the private trusted repository lives (default ~/.local/share/doia-mutation-private)",
+    )
+    p.add_argument(
+        "--max-source-bytes", type=int, default=DEFAULT_MAX_SOURCE, help="byte budget for hashing the source"
+    )
+    p.add_argument(
+        "--max-copy-bytes", type=int, default=DEFAULT_MAX_COPY, help="refuse to copy more than this (estimate)"
+    )
     p.add_argument("--settle", type=float, default=1.0, help="seconds to wait before the last source check (default 1)")
     p.add_argument("-h", "--help", action="store_true", help="print this help to stderr and exit 3")
     return p
@@ -929,10 +1316,13 @@ def parse(argv):
         args.red_exit_codes = {int(c) for c in args.red_exit.split(",") if c.strip()}
     except ValueError as e:
         raise Inconclusive("--red-exit must be a comma list of integers") from e
-    if not args.red_exit_codes or 0 in args.red_exit_codes:
-        raise Inconclusive("--red-exit must be non-empty and must not contain 0")
-    if args.timeout < 1 or args.max_output < 1:
-        raise Inconclusive("--timeout and --max-output must be positive")
+    if not args.red_exit_codes or any(not 1 <= c <= 125 for c in args.red_exit_codes):
+        raise Inconclusive(
+            "--red-exit takes exit codes 1 to 125 only (0 is a pass; 126, 127, 128 and above, 255 and negative "
+            "values are launcher or signal codes, never a failing test)"
+        )
+    if args.timeout < 1 or args.max_output < 1 or args.max_source_bytes < 1 or args.max_copy_bytes < 1:
+        raise Inconclusive("--timeout, --max-output, --max-source-bytes and --max-copy-bytes must be positive")
     return args
 
 
@@ -959,7 +1349,8 @@ def main(argv=None):
     def on_signal(signum, _frame):
         raise Interrupted(f"interrupted by signal {signum}")
 
-    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    for s in saved:
         signal.signal(s, on_signal)
     try:
         args = parse(sys.argv[1:] if argv is None else argv)
@@ -980,7 +1371,7 @@ def main(argv=None):
     if before is not None and after is not None:
         try:
             time.sleep(args.settle)
-            after_settle = snapshot(state["src_git"], state["root"])
+            after_settle = snapshot(state["src_git"], state["root"], state["max_source"])
         except Exception as e:
             report["reason"] = report["reason"] or f"final source check failed: {type(e).__name__}"
     unchanged = after_settle is not None and before == after == after_settle
@@ -1023,7 +1414,7 @@ def main(argv=None):
 
     work = state.get("work")
     if work:
-        keep = verdict != "bites" or (args is not None and args.keep)
+        keep = (verdict != "bites" or (args is not None and args.keep)) and not state.get("copy_failed")
         if keep:
             report["kept"] = True
             print(f"mutation_check: kept the disposable copy at {work}", file=sys.stderr)
@@ -1034,7 +1425,17 @@ def main(argv=None):
             except Exception as e:  # leaving a directory behind is reported, never hidden
                 report["kept"] = True
                 report["cleanup_error"] = f"{type(e).__name__}: {e}"
-    print(json.dumps(report, indent=2, sort_keys=True))
+    for s, handler in saved.items():
+        signal.signal(s, handler)
+    try:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        # The reader went away: the exit code is the contract, not the print. Silence the interpreter's own flush.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
     return code
 
 

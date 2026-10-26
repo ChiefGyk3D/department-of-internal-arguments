@@ -1,0 +1,567 @@
+"""scripts/mutation_check.py, round 3: degraded isolation never yields `bites`, the private trusted repository cannot
+be used to suppress or forge a verdict, `--clean-old` deletes only what the tool made, big source files are hashed
+whole, crash and launcher exit codes are never red, storage is checked before copying, and the patch file is read
+through one descriptor. Each test is meant to go red when its guard is removed."""
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import mutation_check as mc  # noqa: E402  (path set up above)
+from test_mutation_check import SCRIPT, TEST_SRC, Base, host_has_pid_namespace  # noqa: E402
+
+# Run 1 attacks the private trusted repository: it lists the fixed parent and damages what it finds.
+ATTACK_HEAD = (
+    TEST_SRC
+    + r"""m = os.path.join(os.path.dirname(os.getcwd()), 'marker')
+if not os.path.exists(m):
+    open(m, 'w').close()
+    priv = '@PRIV@'
+    for d in os.listdir(priv):
+        p = os.path.join(priv, d)
+        if not os.path.isdir(p):
+            continue
+        base = os.path.join(p, 'base.git')
+"""
+)
+ATTACK_BODIES = {
+    "chmod": "        if os.path.isdir(base):\n            os.chmod(base, 0)\n",
+    "rewrite": (
+        "        for dp, dn, fn in os.walk(os.path.join(base, 'objects')):\n"
+        "            for f in fn:\n"
+        "                fp = os.path.join(dp, f)\n"
+        "                os.chmod(fp, 0o644)\n"
+        "                open(fp, 'wb').write(b'garbage')\n"
+    ),
+    "delete": "        import shutil\n        shutil.rmtree(base, ignore_errors=True)\n",
+}
+# The write of the large file happens in runs 1 and 3: one byte flipped, same length, timestamps restored.
+BIGWRITE_SRC = (
+    TEST_SRC
+    + r"""p = '@SRC@/big.bin'
+st = os.stat(p)
+data = bytearray(open(p, 'rb').read())
+data[-1] = 1
+open(p, 'wb').write(data)
+os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+"""
+)
+# Run 2 (after the revert, marker present, f() != 2) dies by a signal instead of failing.
+CRASH_RUN2_SRC = (
+    "import os, sys, signal\n"
+    "sys.path.insert(0, os.getcwd())\n"
+    "m = os.path.join(os.path.dirname(os.getcwd()), 'marker')\n"
+    "from calc import f\n"
+    "if os.path.exists(m):\n"
+    "    if f() != 2:\n"
+    "        os.kill(os.getpid(), signal.SIGSEGV)\n"
+    "else:\n"
+    "    assert f() == 2\n"
+    "    open(m, 'w').close()\n"
+)
+
+
+def probe_hide():
+    """Independent of the tool: can this host bind-mount over a directory inside a user namespace and drop the
+    capabilities afterwards?"""
+    exe = shutil.which("unshare")
+    if not exe or not host_has_pid_namespace():
+        return False
+    code = (
+        "import ctypes, sys\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "sys.exit(0 if libc.mount(sys.argv[1].encode(), sys.argv[1].encode(), None, 4096, None) == 0 else 1)\n"
+    )
+    argv = [exe, "--user", "--map-current-user", "--keep-caps", "--net", "--pid", "--fork", "--kill-child"]
+    argv += ["--mount-proc", "--", sys.executable, "-I", "-c", code, str(ROOT)]
+    return subprocess.run(argv, capture_output=True).returncode == 0
+
+
+class Degraded(Base):
+    def bin_without_unshare(self):
+        b = self.tmp / "bin"
+        b.mkdir(exist_ok=True)
+        for n in ("git", "python3"):
+            if not (b / n).exists():
+                (b / n).symlink_to(shutil.which(n))
+        return str(b)
+
+    def test_missing_unshare_is_inconclusive_by_default(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, c2, c2, env={"PATH": self.bin_without_unshare()}, strict=True)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"), r["reason"])
+        self.assertIn("isolation", r["reason"])
+        self.assertIs(r["isolation_degraded"], True)
+        self.assertEqual(self.phases(r), [], "no test may run when the isolation cannot be had")
+        self.assertNotIn("clone", [c["phase"] for c in r["commands"]])
+
+    def test_missing_unshare_bites_only_with_the_opt_in_and_says_so(self):
+        repo, _, c2 = self.make_repo()
+        env = {"PATH": self.bin_without_unshare()}
+        code, r = self.run_tool(repo, c2, c2, env=env, strict=True, extra=["--allow-degraded-isolation"])
+        self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
+        self.assertIs(r["isolation_degraded"], True)
+        self.assertEqual((r["network_isolation"], r["process_isolation"]), ("none", "none"))
+        self.assertIn("source_unchanged_at_check", r)
+
+    def test_each_requested_degraded_mode_needs_the_opt_in(self):
+        repo, _, c2 = self.make_repo()
+        for mode in ("net", "none"):
+            code, r = self.run_tool(repo, c2, c2, strict=True, extra=["--isolation", mode])
+            self.assertEqual((code, r["verdict"]), (3, "inconclusive"), mode)
+            self.assertIn("--allow-degraded-isolation", r["reason"], mode)
+            self.assertEqual(self.phases(r), [], mode)
+            code, r = self.run_tool(
+                repo, c2, c2, strict=True, extra=["--isolation", mode, "--allow-degraded-isolation"]
+            )
+            self.assertEqual((code, r["verdict"]), (0, "bites"), (mode, r["reason"]))
+            self.assertIs(r["isolation_degraded"], True, mode)
+
+    @unittest.skipUnless(host_has_pid_namespace(), "this host cannot run a PID namespace")
+    def test_full_isolation_is_not_degraded(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, c2, c2, strict=True)
+        self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
+        self.assertIs(r["isolation_degraded"], False)
+
+    def test_require_no_network_is_still_inconclusive_with_the_opt_in(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(
+            repo,
+            c2,
+            c2,
+            strict=True,
+            extra=["--isolation", "none", "--allow-degraded-isolation", "--require-no-network"],
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("--require-no-network", r["reason"])
+
+
+class PrivateRepository(Base):
+    def attack(self, name, extra=()):
+        src = ATTACK_HEAD + ATTACK_BODIES[name]
+        repo, _, c2 = self.make_repo(name=f"src-{name}-{len(extra)}", check_src=src)
+        return self.run_tool(repo, c2, c2, extra=list(extra))
+
+    @unittest.skipUnless(probe_hide(), "this host cannot bind-mount inside a user namespace")
+    def test_the_private_parent_is_invisible_to_the_test(self):
+        for name in ATTACK_BODIES:
+            code, r = self.attack(name)
+            self.assertEqual((code, r["verdict"]), (0, "bites"), (name, r["reason"]))
+            self.assertIs(r["isolation"]["private_dir_hidden"], True)
+
+    def test_damage_to_the_private_repository_is_detected_when_it_is_not_hidden(self):
+        """With hiding off the test can reach the repository; it can suppress a verdict but never forge a bite."""
+        for name in ATTACK_BODIES:
+            code, r = self.attack(name, extra=["--hide-private", "off"])
+            self.assertEqual((code, r["verdict"]), (3, "inconclusive"), (name, r["reason"]))
+            self.assertIs(r["isolation"]["private_dir_hidden"], False)
+            self.assertIn("private", r["reason"], name)
+
+    def test_untouched_private_repository_passes_the_check_with_hiding_off(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, c2, c2, extra=["--hide-private", "off"])
+        self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
+
+    def test_the_guard_reports_a_changed_store_and_mode(self):
+        base = self.tmp / "base.git"
+        (base / "objects").mkdir(parents=True)
+        (base / "objects" / "obj").write_text("one")
+        guard = mc.StoreGuard(str(base))
+        guard.verify()  # negative case: nothing changed
+        (base / "objects" / "obj").write_text("two")
+        with self.assertRaises(mc.Inconclusive):
+            guard.verify()
+        (base / "objects" / "obj").write_text("one")
+        guard.verify()
+        os.chmod(base, 0)
+        self.addCleanup(os.chmod, base, 0o700)
+        with self.assertRaises(mc.Inconclusive):
+            guard.verify()
+
+
+class Pruning(Base):
+    def setUp(self):
+        super().setUp()
+        self.priv = self.tmp / "priv"
+        self.priv.mkdir(mode=0o700)
+        self.scratch.mkdir(mode=0o700)
+        self.token = mc.get_token(str(self.priv))
+
+    def made(self, name, age_days=10, content=None, mode=0o600, kind="file"):
+        d = self.scratch / name
+        d.mkdir()
+        (d / "payload.txt").write_text("evidence")
+        m = d / mc.MARKER
+        text = f"{self.token}\n{name}\n" if content is None else content
+        if kind == "file":
+            m.write_text(text)
+            m.chmod(mode)
+        elif kind == "fifo":
+            os.mkfifo(m)
+        elif kind == "dir":
+            m.mkdir()
+        elif kind == "symlink":
+            real = self.tmp / f"real-marker-{name}"
+            real.write_text(text)
+            real.chmod(0o600)
+            m.symlink_to(real)
+        if kind != "symlink" and kind != "fifo" and kind != "dir":
+            old = time.time() - age_days * 86400
+            os.utime(m, (old, old))
+        return d
+
+    def test_only_directories_with_an_authenticated_marker_are_pruned(self):
+        old = self.made("doia-mc-old")
+        recent = self.made("doia-mc-recent", age_days=1)
+        spoofs = {
+            "touch": self.made("doia-mc-touch", content=""),
+            "wrongtoken": self.made("doia-mc-wrongtoken", content=f"{'0' * 64}\ndoia-mc-wrongtoken\n"),
+            "copied": self.made("doia-mc-copied", content=f"{self.token}\ndoia-mc-old\n"),
+            "mode": self.made("doia-mc-mode", mode=0o644),
+            "fifo": self.made("doia-mc-fifo", kind="fifo"),
+            "dir": self.made("doia-mc-dirmarker", kind="dir"),
+            "symlink": self.made("doia-mc-linkmarker", kind="symlink"),
+            "noprefix": self.made("keepme"),
+        }
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("x")
+        (self.scratch / "doia-mc-linkdir").symlink_to(victim)
+        pruned = mc.prune_old(str(self.scratch), 7, self.token)
+        self.assertEqual(pruned, ["doia-mc-old"])
+        self.assertFalse(old.exists())
+        self.assertTrue((recent / "payload.txt").exists())
+        for kind, d in spoofs.items():
+            self.assertTrue((d / "payload.txt").exists(), f"{kind}: a spoofed marker got a directory deleted")
+        self.assertTrue((victim / "precious.txt").exists())
+        self.assertTrue((self.scratch / "doia-mc-linkdir").is_symlink())
+
+    def test_marker_validation_by_fields(self):
+        name, token = "doia-mc-x", "t" * 64
+        good = os.stat_result((stat.S_IFREG | 0o600, 1, 1, 1, os.getuid(), 0, 10, 0, 100, 0))
+        content = f"{token}\n{name}\n".encode()
+        cutoff = 1000.0
+        self.assertTrue(mc.validate_marker(good, content, name, token, cutoff))
+        bad = {
+            "owner": os.stat_result((stat.S_IFREG | 0o600, 1, 1, 1, os.getuid() + 1, 0, 10, 0, 100, 0)),
+            "mode": os.stat_result((stat.S_IFREG | 0o644, 1, 1, 1, os.getuid(), 0, 10, 0, 100, 0)),
+            "fifo": os.stat_result((stat.S_IFIFO | 0o600, 1, 1, 1, os.getuid(), 0, 10, 0, 100, 0)),
+            "dir": os.stat_result((stat.S_IFDIR | 0o600, 1, 1, 1, os.getuid(), 0, 10, 0, 100, 0)),
+            "recent": os.stat_result((stat.S_IFREG | 0o600, 1, 1, 1, os.getuid(), 0, 10, 0, 2000, 0)),
+        }
+        for label, st in bad.items():
+            self.assertFalse(mc.validate_marker(st, content, name, token, cutoff), label)
+        self.assertFalse(mc.validate_marker(good, content, "doia-mc-y", token, cutoff), "name")
+        self.assertFalse(mc.validate_marker(good, b"nope", name, token, cutoff), "content")
+
+    def test_candidate_swapped_between_validation_and_deletion_is_not_followed(self):
+        victim = self.made("doia-mc-old")
+        other = self.tmp / "other"
+        other.mkdir()
+        (other / "innocent.txt").write_text("keep me")
+        moved = self.tmp / "moved"
+
+        def swap(name):
+            os.rename(self.scratch / name, moved)
+            os.rename(other, self.scratch / name)
+
+        self.addCleanup(setattr, mc, "_PRUNE_HOOK", None)
+        mc._PRUNE_HOOK = swap
+        mc.prune_old(str(self.scratch), 7, self.token)
+        self.assertEqual((victim / "innocent.txt").read_text(), "keep me", "the swapped-in directory was deleted")
+
+    def test_a_mount_point_candidate_is_refused(self):
+        d = self.made("doia-mc-mnt")
+        real_stat = os.stat
+
+        def fake(path, *a, **k):
+            r = real_stat(path, *a, **k)
+            if path == "doia-mc-mnt":
+                f = list(r)
+                f[2] = r.st_dev + 1  # st_dev
+                return os.stat_result(f)
+            return r
+
+        with mock.patch.object(mc.os, "stat", side_effect=fake):
+            pruned = mc.prune_old(str(self.scratch), 7, self.token)
+        self.assertEqual(pruned, [])
+        self.assertTrue((d / "payload.txt").exists())
+        self.assertTrue(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0, 0, 1) + (0,) * 7)))
+        self.assertFalse(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0,) * 10)))
+
+    def test_token_file_is_private_and_not_followed(self):
+        tok = self.priv / ".token"
+        self.assertEqual(stat.S_IMODE(tok.stat().st_mode), 0o600)
+        self.assertEqual(mc.get_token(str(self.priv)), self.token, "stable across calls")
+        tok.chmod(0o644)
+        with self.assertRaises(mc.Inconclusive):
+            mc.get_token(str(self.priv))
+        tok.unlink()
+        real = self.tmp / "elsewhere"
+        real.write_text("t" * 64)
+        real.chmod(0o600)
+        tok.symlink_to(real)
+        with self.assertRaises(mc.Inconclusive):
+            mc.get_token(str(self.priv))
+
+    def test_clean_old_zero_disables_pruning(self):
+        old = self.made("doia-mc-old")
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, c2, c2, extra=["--clean-old", "0"])
+        self.assertEqual((code, r["pruned"]), (0, []))
+        self.assertTrue((old / "payload.txt").exists())
+
+    def test_the_tool_prunes_with_the_authenticated_marker_it_wrote(self):
+        old = self.made("doia-mc-old")
+        spoof = self.made("doia-mc-spoof", content="")
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, c2, c2)
+        self.assertEqual(code, 0, r["reason"])
+        self.assertEqual(r["pruned"], ["doia-mc-old"])
+        self.assertFalse(old.exists())
+        self.assertTrue((spoof / "payload.txt").exists())
+        code, r = self.run_tool(repo, c2, c2, extra=["--keep"])
+        self.addCleanup(shutil.rmtree, r["work_dir"], ignore_errors=True)
+        marker = Path(r["work_dir"]) / mc.MARKER
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        self.assertEqual(marker.read_text(), f"{self.token}\n{os.path.basename(r['work_dir'])}\n")
+
+
+class SourceHashing(Base):
+    def test_a_65_mib_equal_length_rewrite_with_restored_times_is_detected(self):
+        repo, _, c2 = self.make_repo(check_src=BIGWRITE_SRC)
+        (repo / "big.bin").write_bytes(b"\0" * (65 * 1024 * 1024))
+        code, r = self.run_tool(repo, c2, c2)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"), r["reason"])
+        unchanged = r.get("source_repo_unchanged", r.get("source_unchanged_at_check"))
+        self.assertIs(unchanged, False)
+
+    def test_the_hashing_budget_is_enforced(self):
+        repo, _, c2 = self.make_repo()
+        (repo / "dirty.bin").write_bytes(b"x" * 4096)
+        code, r = self.run_tool(repo, c2, c2, extra=["--max-source-bytes", "1000"])
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
+        self.assertIn("budget", r["reason"])
+        code, r = self.run_tool(repo, c2, c2, extra=["--max-source-bytes", "100000"])
+        self.assertEqual(code, 0, r["reason"])  # negative case: inside the budget
+
+    def test_hash_file_reads_every_byte_of_a_large_file(self):
+        p = self.tmp / "large"
+        with open(p, "wb") as f:
+            f.truncate(mc.MAX_HASH_FILE_REMOVED if hasattr(mc, "MAX_HASH_FILE_REMOVED") else 70 * 1024 * 1024)
+        a = mc.hash_file(str(p), mc.Budget(10**12))
+        st = os.stat(p)
+        with open(p, "r+b") as f:
+            f.seek(-1, 2)
+            f.write(b"\1")
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertNotEqual(a, mc.hash_file(str(p), mc.Budget(10**12)))
+
+
+class ExitCodes(Base):
+    def test_signal_deaths_are_crashed_never_red(self):
+        repo, _, c2 = self.make_repo()
+        for sig in ("SIGSEGV", "SIGABRT", "SIGKILL"):
+            test = f'python3 -c "import os, signal; os.kill(os.getpid(), signal.{sig})"'
+            code, r = self.run_tool(repo, c2, c2, test=test, extra=["--red-exit", "1"])
+            self.assertEqual((code, r["verdict"]), (3, "inconclusive"), sig)
+            self.assertEqual(r["commands"][-1]["result"], "crashed", sig)
+            self.assertIn("crash", r["reason"], sig)
+
+    def test_a_crash_after_the_revert_is_inconclusive(self):
+        repo, _, c2 = self.make_repo(check_src=CRASH_RUN2_SRC)
+        code, r = self.run_tool(repo, c2, c2)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"), r["reason"])
+        last = [c for c in r["commands"] if c["phase"] == "test-after-revert"][0]
+        self.assertEqual(last["result"], "crashed")
+        self.assertIsNone(r["red_after_revert"])
+
+    def test_launcher_and_signal_codes_cannot_be_named_red(self):
+        base = ["--repo", "x", "--head", "h", "--revert", "r", "--test", "t"]
+        for bad in ("126", "127", "128", "134", "137", "139", "159", "255", "-11", "-1", "1,139", "256"):
+            with self.assertRaises(mc.Inconclusive, msg=bad):
+                mc.parse([*base, f"--red-exit={bad}"])
+        self.assertEqual(mc.parse([*base, "--red-exit=1,2,125"]).red_exit_codes, {1, 2, 125})
+
+
+class Storage(Base):
+    def inproc(self, repo, c2, *extra):
+        argv = ["--repo", str(repo), f"--head={c2}", f"--revert={c2}", "--test", "python3 tests/check.py"]
+        argv += ["--scratch", str(self.scratch), "--private-parent", str(self.tmp / "priv"), "--settle", "0.2"]
+        argv += list(extra)
+        if not host_has_pid_namespace():
+            argv.append("--allow-degraded-isolation")
+        out = io.StringIO()
+        saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = mc.main(argv)
+        finally:
+            restored = {s: signal.getsignal(s) for s in saved}
+            for s, h in saved.items():
+                signal.signal(s, h)
+        self.assertEqual(restored, saved, "main() must restore the caller's signal handlers")
+        return code, json.loads(out.getvalue())
+
+    def no_copy_made(self, r):
+        self.assertNotIn("clone", [c["phase"] for c in r["commands"]])
+        self.assertIsNone(r.get("work_dir"))
+        priv = self.tmp / "priv"
+        self.assertEqual([p.name for p in priv.glob("doia-mc-private-*")] if priv.exists() else [], [])
+
+    def test_too_little_free_space_is_inconclusive_before_any_copy(self):
+        repo, _, c2 = self.make_repo()
+        with mock.patch.object(mc, "free_bytes", return_value=10 * 1024 * 1024):
+            code, r = self.inproc(repo, c2)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
+        self.assertIn("free", r["reason"])
+        self.assertRegex(r["reason"], r"\d+")
+        self.no_copy_made(r)
+
+    def test_estimate_above_max_copy_bytes_is_inconclusive_before_any_copy(self):
+        repo, _, c2 = self.make_repo()
+        with mock.patch.object(mc, "estimate_copy_bytes", return_value=10**15):
+            code, r = self.inproc(repo, c2, "--max-copy-bytes", "1000000")
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
+        self.assertIn("--max-copy-bytes", r["reason"])
+        self.no_copy_made(r)
+
+    def test_free_space_requirement_is_two_and_a_half_times_the_estimate_plus_a_margin(self):
+        need = mc.required_free(1000)
+        self.assertEqual(need, int(2.5 * 1000) + mc.COPY_MARGIN)
+        repo, _, c2 = self.make_repo()
+        est = 100 * 1024 * 1024
+        with mock.patch.object(mc, "estimate_copy_bytes", return_value=est):
+            with mock.patch.object(mc, "free_bytes", return_value=mc.required_free(est) - 1):
+                code, r = self.inproc(repo, c2)
+            self.assertEqual(code, 3, "one byte short must be refused")
+            self.assertIn(str(est), r["reason"])
+            with mock.patch.object(mc, "free_bytes", return_value=mc.required_free(est)):
+                code, r = self.inproc(repo, c2)
+            self.assertEqual(code, 0, r["reason"])  # negative case: exactly enough
+
+    def test_enospc_during_the_copy_cleans_up_and_is_inconclusive(self):
+        repo, _, c2 = self.make_repo()
+        real = mc.run
+        for needle in ("--no-checkout", "--bare"):
+
+            def failing(argv, needle=needle, **kw):
+                if "clone" in argv and needle in argv:
+                    return mc.Result("exited", 128, 0.0, "fatal: write error: No space left on device", 0)
+                return real(argv, **kw)
+
+            with mock.patch.object(mc, "run", side_effect=failing):
+                code, r = self.inproc(repo, c2)
+            self.assertEqual((code, r["verdict"]), (3, "inconclusive"), needle)
+            self.assertIn("No space left", r["reason"], needle)
+            self.assertEqual(list(self.scratch.glob("doia-mc-*")) if self.scratch.exists() else [], [], needle)
+            self.assertEqual(list((self.tmp / "priv").glob("doia-mc-private-*")), [], needle)
+
+
+class PatchFile(Base):
+    def test_exactly_the_limit_is_read_and_one_more_byte_is_refused(self):
+        p = self.tmp / "p.patch"
+        p.write_bytes(b"x" * mc.MAX_PATCH)
+        self.assertEqual(len(mc.read_patch_file(str(p))), mc.MAX_PATCH)
+        p.write_bytes(b"x" * (mc.MAX_PATCH + 1))
+        with self.assertRaises(mc.Inconclusive):
+            mc.read_patch_file(str(p))
+
+    def test_a_file_that_grows_after_the_open_is_still_bounded(self):
+        p = self.tmp / "grow.patch"
+        p.write_bytes(b"small")
+
+        def grow():
+            with open(p, "ab") as f:
+                f.write(b"y" * (mc.MAX_PATCH + 10))
+
+        self.addCleanup(setattr, mc, "_AFTER_OPEN_HOOK", None)
+        mc._AFTER_OPEN_HOOK = grow
+        with self.assertRaises(mc.Inconclusive):
+            mc.read_patch_file(str(p))
+
+    def test_stat_size_is_not_trusted(self):
+        p = self.tmp / "lie.patch"
+        p.write_bytes(b"z" * (mc.MAX_PATCH + 5))
+        real = os.fstat
+
+        def lying(fd):
+            r = real(fd)
+            f = list(r)
+            f[6] = 10  # st_size
+            return os.stat_result(f)
+
+        with mock.patch.object(mc.os, "fstat", side_effect=lying):
+            with self.assertRaises(mc.Inconclusive):
+                mc.read_patch_file(str(p))
+
+    def test_the_path_swapped_after_the_open_does_not_change_what_is_read(self):
+        p = self.tmp / "swap.patch"
+        p.write_bytes(b"original")
+        other = self.tmp / "other.patch"
+        other.write_bytes(b"swapped-in")
+
+        def swap():
+            os.replace(other, p)
+
+        self.addCleanup(setattr, mc, "_AFTER_OPEN_HOOK", None)
+        mc._AFTER_OPEN_HOOK = swap
+        self.assertEqual(mc.read_patch_file(str(p)), b"original")
+
+    def test_symlink_and_fifo_are_refused_without_blocking(self):
+        real = self.tmp / "real.patch"
+        real.write_bytes(b"x")
+        link = self.tmp / "link.patch"
+        link.symlink_to(real)
+        with self.assertRaises(mc.Inconclusive):
+            mc.read_patch_file(str(link))
+        fifo = self.tmp / "fifo.patch"
+        os.mkfifo(fifo)
+        with self.assertRaises(mc.Inconclusive):
+            mc.read_patch_file(str(fifo))
+
+
+class ExitPaths(Base):
+    def test_a_closed_stdout_does_not_change_the_exit_code(self):
+        repo, _, c2 = self.make_repo()
+        argv = [sys.executable, str(SCRIPT), "--repo", str(repo), f"--head={c2}", f"--revert={c2}"]
+        argv += ["--test", "python3 tests/check.py", "--scratch", str(self.scratch), "--settle", "0.2"]
+        argv += ["--private-parent", str(self.tmp / "priv")]
+        if not host_has_pid_namespace():
+            argv.append("--allow-degraded-isolation")
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc.stdout.close()  # the reader goes away before the JSON is printed
+        err = proc.stderr.read()
+        proc.stderr.close()
+        self.assertEqual(proc.wait(), 0, err)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_child_that_does_not_read_its_stdin_is_not_an_error(self):
+        errors = []
+        with mock.patch.object(threading, "excepthook", lambda a: errors.append(a)):
+            res = mc.run(
+                ["true"], cwd=None, env=mc.sanitized_env("/nonexistent"), timeout=20, cap=1000, stdin=b"x" * (4 << 20)
+            )
+            time.sleep(0.5)
+        self.assertEqual((res.status, res.code), ("exited", 0))
+        self.assertEqual(errors, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

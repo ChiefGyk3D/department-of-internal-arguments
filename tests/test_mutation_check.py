@@ -19,7 +19,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import mutation_check as mc  # noqa: E402  (path set up above)
 
-BASE = Path.home() / ".local" / "share" / "doia-mutation-tests"
+# DOIA_MC_TEST_DIR moves every repository, scratch and private directory the tests make (read-only home).
+BASE = Path(os.environ.get("DOIA_MC_TEST_DIR") or Path.home() / ".local" / "share" / "doia-mutation-tests")
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "T",
     "GIT_AUTHOR_EMAIL": "t@example.invalid",
@@ -92,17 +93,26 @@ class Base(unittest.TestCase):
         for n, data in (fix_files or {}).items():
             (repo / n).write_bytes(data)
         (repo / "tests").mkdir()
-        (repo / "tests" / "check.py").write_text(check_src.replace("@SRC@", str(repo)).replace("@TMP@", str(self.tmp)))
+        (repo / "tests" / "check.py").write_text(
+            check_src.replace("@SRC@", str(repo))
+            .replace("@TMP@", str(self.tmp))
+            .replace("@PRIV@", str(self.tmp / "priv"))
+        )
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "fix")
         return repo, c1, git(repo, "rev-parse", "HEAD")
 
-    def run_tool(self, repo, head, revert, test=TEST_CMD, extra=(), env=None, scratch=True):
+    def run_tool(self, repo, head, revert, test=TEST_CMD, extra=(), env=None, scratch=True, strict=False):
+        """strict=True never adds --allow-degraded-isolation. Otherwise it is added on a host that cannot run the
+        PID + network namespaces, so the suite still checks everything else there (the default verdict on such a
+        host is inconclusive, and the strict tests prove it)."""
         argv = [sys.executable, str(SCRIPT), "--repo", str(repo), f"--head={head}", f"--revert={revert}"]
-        argv += ["--test", test]
+        argv += ["--test", test, "--private-parent", str(self.tmp / "priv")]
         if scratch:
             argv += ["--scratch", str(self.scratch)]
         argv += list(extra)
+        if not strict and not host_has_pid_namespace() and "--allow-degraded-isolation" not in argv:
+            argv.append("--allow-degraded-isolation")
         if "--settle" not in argv:
             argv += ["--settle", "0.3"]
         p = subprocess.run(argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=300)
@@ -365,6 +375,7 @@ class Confinement(Base):
         repo, _, c2 = self.make_repo(name="-dashrepo")
         p = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo=-dashrepo", f"--head={c2}", f"--revert={c2}", "--test", TEST_CMD]
+            + ["--private-parent", str(self.tmp / "priv")]
             + ["--scratch", str(self.scratch)],
             cwd=self.tmp,
             capture_output=True,
