@@ -2192,8 +2192,8 @@ MUTANTS = [
     ),
     (
         "directory fchmod",
-        "        os.fchmod(fd, 0o700)  # a tight umask",
-        "        pass  # a tight umask",
+        "        os.fchmod(fd, stat.S_IRWXU)  # 0700: a tight umask",
+        "        pass  # 0700: a tight umask",
         "WriteSafety.test_file_mode_is_0600_even_with_a_tight_umask",
     ),
     (

@@ -318,7 +318,7 @@ def _mkdir_private(name, dir_fd):
         made = False
     fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     if made:
-        os.fchmod(fd, 0o700)  # a tight umask must not leave the directory unusable
+        os.fchmod(fd, stat.S_IRWXU)  # 0700: a tight umask must not leave the directory unusable
     return fd
 
 
