@@ -250,6 +250,13 @@ class RecordReading(unittest.TestCase):
             "duplicate key": '{"case": 1, "case": 1}',
             "NaN cost": line(record()).replace("}", ', "cost": NaN}'),
             "too long": line(record(evidence="x" * 5000)),
+            "padded past the line cap": line(record()) + " " * 5000,
+            "null cost": line(record(cost=None)),
+            "null quantization": line(local_record(quantization=None)),
+            "null context": line(local_record(context=None)),
+            "local without quantization and context": line(
+                {k: v for k, v in local_record().items() if k not in ("quantization", "context")}
+            ),
             "extra field": line(record(note="x")),
             **{f"missing {k}": line(without(k)) for k in em.REQUIRED_FIELDS},
             **{f"null {k}": line(record(**{k: None})) for k in em.REQUIRED_FIELDS},
@@ -346,7 +353,7 @@ class RecordReading(unittest.TestCase):
             "callsign": "operator W1AW keyed up",
             "grid square": "grid EM15fd",
             "long token": "key " + "A1b2C3d4" * 5,
-            "over the cap": "x" * (em.MAX_EVIDENCE + 1),
+            "over the cap": ("ab " * 70)[: em.MAX_EVIDENCE + 1],
         }.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 parse(record(evidence=text))

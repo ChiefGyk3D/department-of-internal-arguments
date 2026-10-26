@@ -71,7 +71,6 @@ EVIDENCE_RE = re.compile(r"[A-Za-z0-9 ._:/#=,()+-]+")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
-NOT_A_MODEL = frozenset({"inherit", "latest", "default", "auto", "local", "model", UNSPECIFIED})
 
 # Identifier sweep for text that a record or the registry carries. Placeholders from the packs are allowed; any other
 # callsign-, grid-, address-, home-path- or host-shaped string is refused.
@@ -296,8 +295,7 @@ def exact_model(client, model):
     if client == "local":
         return valid_model(model)
     return (
-        model.lower() not in NOT_A_MODEL
-        and any(c.isdigit() for c in model)
+        any(c.isdigit() for c in model)  # a family name (sonnet, inherit, latest) has no digit
         and not identifier_problems(model.replace("/", " "))
     )
 
@@ -320,9 +318,6 @@ def parse_record(line, n, cases):
     extra = [k for k in row if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS]
     if missing or extra:
         fail(f"missing {missing} extra {extra}")
-    nulls = [k for k, v in row.items() if v is None]
-    if nulls:
-        fail(f"null is not a value: {nulls}")
 
     by_id = {c["id"]: c for c in cases}
     if not _is_int(row["case"]) or row["case"] not in by_id:
