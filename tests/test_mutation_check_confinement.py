@@ -77,7 +77,7 @@ else:
     assert f() == 2
     open(m, 'w').close()
 """
-BINARY_SRC = TEST_SRC + "assert open('data.bin', 'rb').read() == b'\\x00\\x02'\n"
+BINARY_SRC = "assert open('data.bin', 'rb').read() == b'\\x00\\x02'\n"  # independent of calc.py on purpose
 
 
 class Escapes(Base):
@@ -201,7 +201,7 @@ class CloneControlledGit(Base):
             for c in steps:
                 self.assertIn("--pid", c["argv"], c["argv"])
         for c in steps:
-            if c["phase"].startswith(("trusted", "revert", "restore")):
+            if c["phase"] != "trusted-base" and c["phase"].startswith(("trusted", "revert", "restore")):
                 self.assertIn("protocol.allow=never", c["argv"])
             for needle in (
                 "core.hooksPath=/dev/null",
@@ -367,12 +367,14 @@ class Pruning(Base):
         (child / "deep").mkdir(parents=True)
         with self.assertRaises(RuntimeError):
             mc.remove_tree(str(child / "deep"), str(self.scratch))  # not a direct child
-        (self.tmp / "outside").mkdir()
+        sibling = self.scratch / "sibling"
+        sibling.mkdir()
+        (sibling / "keep.txt").write_text("evidence")
         link = self.scratch / "link"
-        link.symlink_to(self.tmp / "outside")
+        link.symlink_to(sibling)  # a symlink whose target is itself a direct child of the scratch directory
         with self.assertRaises(RuntimeError):
-            mc.remove_tree(str(link), str(self.scratch))  # a symlink to a real directory
-        self.assertTrue((self.tmp / "outside").is_dir())
+            mc.remove_tree(str(link), str(self.scratch))
+        self.assertTrue((sibling / "keep.txt").exists())
         mc.remove_tree(str(child), str(self.scratch))  # negative case: a real child goes
         self.assertFalse(child.exists())
 
@@ -405,6 +407,18 @@ class Guards(Base):
             self.assertEqual(code, 3, name)
             self.assertIn(why, r["reason"], name)
             self.assertNotIn("test-at-head", self.phases(r), name)
+
+    def test_revisions_that_start_with_a_dash_are_refused_by_name(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.run_tool(repo, "-x", c2)
+        self.assertEqual(code, 3)
+        self.assertIn("must not start with '-'", r["reason"])
+        code, r = self.run_tool(repo, c2, "-x")
+        self.assertEqual(code, 3)
+        self.assertIn("--revert must not start with '-'", r["reason"])
+        code, r = self.run_tool(repo, c2, c2, extra=["--base=-x"])
+        self.assertEqual(code, 3)
+        self.assertIn("must not start with '-'", r["reason"])
 
     def test_revert_commit_must_be_an_ancestor_of_head(self):
         repo, c1, c2 = self.make_repo()
@@ -463,6 +477,7 @@ class Guards(Base):
         code, r = self.run_tool(repo, c2, c2)
         self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
         self.assertEqual(r["reverted"]["files"], ["calc.py", "data.bin"])
+        self.assertIs(r["red_after_revert"], True)
 
     def test_hostile_diff_drivers_in_the_source_do_not_change_the_patch(self):
         sentinel = self.tmp / "DIFFRAN"

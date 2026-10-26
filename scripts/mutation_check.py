@@ -59,15 +59,25 @@ only as a throwaway user, container or VM. What it does:
     was started in it, including daemons that left the process group. Without one, only the process group is
     killed and a process that called setsid survives; that is why the field name changes.
   * never reads git metadata the test could have written. The clone's own .git is used only for the clone and the
-    first checkout, before the test ran. After every test run the tool makes a fresh bare repository beside the
-    clone (own config, objects borrowed from the source through objects/info/alternates, a new index) and points
-    GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE at it for apply, checkout, clean, status and diff. A filter, hook,
-    fsmonitor, pager, ssh command, askpass, credential helper, external diff, include or attributes file planted in
-    the clone's .git/config or .git/info/attributes is never read. Every tool git call also gets core.hooksPath,
-    core.fsmonitor, core.pager, core.sshCommand, core.askPass, credential.helper and diff.external overridden,
-    protocol.allow=never after the clone, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM set to /dev/null and
-    GIT_CONFIG_NOSYSTEM set. A .gitignore the test writes can still hide untracked files from `git status`;
-    that is the test being dishonest, and the source hashes do not depend on it.
+    first checkout, before the test ran. Before the test starts the tool makes a private directory (random name,
+    0700, under ~/.local/share/doia-mutation-private/, outside the test's work directory, its path never put in the
+    test's environment) holding a bare copy of the source's objects. After every test run each tool step (apply,
+    checkout, clean, status, diff) gets a new random 0700 bare repository there (own config; objects borrowed from
+    the private copy through objects/info/alternates, created O_EXCL and O_NOFOLLOW; own index) and GIT_DIR,
+    GIT_WORK_TREE and GIT_INDEX_FILE point at it. A directory that is not new, empty and ours is refused.
+    What the trusted steps trust: the tool's own code, the private copy of the objects (made before the test
+    ran), git itself, and the worktree FILES (compared with the private objects by hashing them from disk; no
+    object written by the test is ever read). What they do not trust: the clone's .git (config, attributes, hooks,
+    index, refs, replace refs, grafts, objects), the source repository's object store after the copy, and the
+    test's HOME and XDG directories. The trusted steps run with their own environment (an empty HOME and
+    XDG_CONFIG_HOME the test never sees, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM=/dev/null, GIT_CONFIG_NOSYSTEM,
+    GIT_ATTR_NOSYSTEM, no other GIT_* variable except the three per-step paths) and with core.hooksPath,
+    core.fsmonitor, core.pager, core.sshCommand, core.askPass, core.attributesFile, core.excludesFile,
+    credential.helper and diff.external overridden and protocol.allow=never. Limits: the private directory is
+    reachable by any process of the same user that lists its parent; with a PID namespace none of the test's
+    processes exist when the trusted steps run, without one that is a race the tool does not claim to win. A
+    .gitignore the test writes inside the worktree can still hide untracked files from `git status`; that is the
+    test being dishonest, and the source hashes do not depend on it.
   * reads the source repository with its own configuration, minus hooks, fsmonitor and every filter driver it
     defines (neutralized one by one), and never runs anything the head's .gitattributes could name.
   * puts a timeout, an output cap and a process-group kill on every subprocess (--timeout, --max-output), and
@@ -275,6 +285,8 @@ class Git:
         "core.pager=cat",
         "core.sshCommand=",
         "core.askPass=",
+        f"core.attributesFile={DEVNULL_PATH}",
+        f"core.excludesFile={DEVNULL_PATH}",
         "credential.helper=",
         "diff.external=",
     )
@@ -308,28 +320,32 @@ class Git:
 
 
 class Trusted:
-    """Git metadata the test never saw. After the test has run, nothing is read from the clone's own .git (the
-    test can write its config, attributes, hooks and index). Before every tool step a fresh bare repository is made
-    beside the clone; it borrows the source's objects through objects/info/alternates (read only use), its index is
-    a new file, and GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE point at them. The worktree is the only thing the test
-    controls, and git reads nothing executable from a worktree."""
+    """Git metadata the test never saw and cannot reach. After the test has run, nothing is read from the clone's
+    own .git, from the source repository's object store, from the test's HOME or XDG directories, or from any path
+    the test could predict.
 
-    def __init__(self, git, work, clone, objects, sha):
-        self.git, self.work, self.clone, self.objects, self.sha = git, work, clone, objects, sha
-        self.n = 0
+    Everything lives in `private`, a random 0700 directory the tool made outside the test's work directory before
+    the test started; its path is never put in the test's environment. It holds a private object store (a bare
+    copy of the source made before the test ran, `objects`) and, for every step, a new random 0700 bare repository
+    that borrows those objects through objects/info/alternates (created O_EXCL and O_NOFOLLOW) and has its own index
+    inside it. GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE point there. The worktree is the only thing the test
+    controls: git compares its files against the private objects by hashing them from disk, and reads nothing
+    executable from a worktree."""
+
+    def __init__(self, git, private, clone, objects, sha):
+        self.git, self.private, self.clone, self.objects, self.sha = git, private, clone, objects, sha
 
     def prepare(self):
-        self.n += 1
-        gd = os.path.join(self.work, f"trusted-{self.n}.git")
-        self.git.run(self.work, "init", "--bare", "-q", "--", gd, phase="trusted-init")
-        os.makedirs(os.path.join(gd, "objects", "info"), mode=0o700, exist_ok=True)
-        with open(os.path.join(gd, "objects", "info", "alternates"), "w", encoding="utf-8") as f:
+        gd = tempfile.mkdtemp(prefix="g-", dir=self.private)  # random name, created atomically, mode 0700
+        st = os.lstat(gd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or os.listdir(gd):
+            raise Inconclusive("the trusted git directory is not a fresh empty directory of ours")
+        self.git.run(self.private, "init", "--bare", "-q", "--", gd, phase="trusted-init")
+        alternates = os.path.join(gd, "objects", "info", "alternates")
+        fd = os.open(alternates, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(self.objects + "\n")
-        envx = {
-            "GIT_DIR": gd,
-            "GIT_WORK_TREE": self.clone,
-            "GIT_INDEX_FILE": os.path.join(self.work, f"trusted-{self.n}.index"),
-        }
+        envx = {"GIT_DIR": gd, "GIT_WORK_TREE": self.clone, "GIT_INDEX_FILE": os.path.join(gd, "index")}
         self.git.run(
             self.clone, "-c", "core.bare=false", "read-tree", self.sha, phase="trusted-read-tree", env_extra=envx
         )
@@ -343,6 +359,23 @@ class Trusted:
 
     def out(self, *args, envx=None):
         return self.git.out(self.clone, "-c", "core.bare=false", *args, env_extra=envx or self.prepare())
+
+
+def trusted_env(home, tmp):
+    """The environment of the tool's own git steps after the test ran: nothing from the test's environment, an empty
+    HOME and XDG_CONFIG_HOME the test never sees, no global or system configuration or attributes, and no GIT_*
+    variable except these four (the caller adds GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE per step)."""
+    return {
+        "PATH": clean_path(),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home),
+        "TMPDIR": str(tmp),
+        "GIT_CONFIG_GLOBAL": DEVNULL_PATH,
+        "GIT_CONFIG_SYSTEM": DEVNULL_PATH,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+    }
 
 
 def sha256(data):
@@ -512,7 +545,9 @@ def under(child, parent):
 
 
 def sha_of(git, root, rev, what):
-    code, data = git.out(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+    if rev.startswith("-"):
+        raise Inconclusive(f"{what} must not start with '-'")
+    code, data = git.out(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
     sha = data.decode().strip()
     if code != 0 or not SHA_RE.fullmatch(sha):
         raise Inconclusive(f"{what} does not resolve to a commit")
@@ -522,10 +557,12 @@ def sha_of(git, root, rev, what):
 def build_revert(git, root, spec, head):
     """Return (patch bytes, files reverted, description of the source of the patch)."""
     info = {}
+    if spec.startswith("-"):
+        raise Inconclusive("--revert must not start with '-' (write ./-name for a patch file)")
     file_first = spec.startswith(".") or "/" in spec
     commit = None
     if not file_first:
-        code, data = git.out(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{spec}^{{commit}}")
+        code, data = git.out(root, "rev-parse", "--verify", "--quiet", f"{spec}^{{commit}}")
         if code == 0 and SHA_RE.fullmatch(data.decode().strip()):
             commit = data.decode().strip()
     if commit is None:
@@ -566,7 +603,6 @@ def build_revert(git, root, spec, head):
         "diff-tree",
         "-p",
         "-r",
-        "--binary",
         "--full-index",
         "--no-renames",
         parent,
@@ -717,6 +753,20 @@ def prune_old(scratch, days):
     return pruned
 
 
+PRIVATE_PARENT = "~/.local/share/doia-mutation-private"
+
+
+def make_private_dir(root):
+    """A random 0700 directory for the trusted git material, outside the scratch directory and the repository."""
+    parent = os.path.realpath(os.path.expanduser(PRIVATE_PARENT))
+    if under(root, parent) or under(parent, root):
+        raise Inconclusive(
+            "the private directory for trusted git material equals, contains or lies inside the repository"
+        )
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    return parent, tempfile.mkdtemp(prefix=PREFIX + "private-", dir=parent)
+
+
 def check(args, report, state):
     git_exe = shutil.which("git", path=clean_path())
     if not git_exe:
@@ -744,11 +794,11 @@ def check(args, report, state):
     patch, files, info = build_revert(src_git, root, args.revert, head)
     report["reverted"] = {"files": files, **info}
     scratch = resolve_scratch(args, root)
-    report["pruned"] = prune_old(scratch, args.clean_old)
-    code, objs = src_git.out(root, "rev-parse", "--git-path", "objects")
-    objects = os.path.join(root, objs.decode("utf-8", "surrogateescape").strip())
-    if code != 0 or not os.path.isdir(objects):
-        raise Inconclusive("could not find the source object directory")
+    pparent, private = make_private_dir(root)
+    state["private"], state["private_parent"] = private, pparent
+    with open(os.path.join(private, MARKER), "w", encoding="utf-8") as f:
+        f.write("made by mutation_check.py\n")
+    report["pruned"] = prune_old(scratch, args.clean_old) + prune_old(pparent, args.clean_old)
     state["src_git"], state["root"] = src_git, root
     before = snapshot(src_git, root)
     state["before"] = before
@@ -778,11 +828,21 @@ def check(args, report, state):
 
     # Every git step of the tool runs inside the same namespaces as the test.
     git = Git(git_exe, env, chk.record, wrap, strict=False)
-    tgit = Git(git_exe, env, chk.record, wrap, strict=True)
-    trusted = Trusted(tgit, work, clone, objects, head)
+    for d in ("home", "tmp"):
+        os.mkdir(os.path.join(private, d), 0o700)
+    tenv = trusted_env(os.path.join(private, "home"), os.path.join(private, "tmp"))
+    report["trusted"] = {"env_keys": sorted(tenv), "private_dir": private}
+    base = os.path.join(private, "base.git")
+    # The private object store: a bare copy of the source, made before the test runs, with its own configuration.
+    Git(git_exe, tenv, chk.record, wrap, strict=False).run(
+        private, "clone", "--bare", "--local", "--no-hardlinks", "--", root, base, phase="trusted-base"
+    )
+    trusted = Trusted(
+        Git(git_exe, tenv, chk.record, wrap, strict=True), private, clone, os.path.join(base, "objects"), head
+    )
 
     git.run(work, "clone", "--local", "--no-hardlinks", "--no-checkout", "--", root, clone, phase="clone")
-    git.run(clone, "checkout", "--detach", "--force", "--end-of-options", head, phase="checkout-head")
+    git.run(clone, "checkout", "--detach", "--force", head, phase="checkout-head")
     check_patch_paths(files, clone)
 
     kind = chk.test_run("test-at-head", test_argv, clone, env, wrap)
@@ -822,7 +882,7 @@ def check(args, report, state):
 
 def restore(trusted):
     envx = trusted.prepare()
-    trusted.run("checkout", "--force", "--detach", "--end-of-options", trusted.sha, phase="restore-checkout", envx=envx)
+    trusted.run("checkout", "--force", "--detach", trusted.sha, phase="restore-checkout", envx=envx)
     trusted.run("clean", "-ffdxq", phase="restore-clean", envx=envx)
 
 
@@ -953,6 +1013,13 @@ def main(argv=None):
     report["verdict"] = verdict
     code = {"bites": EXIT_BITES, "vacuous": EXIT_VACUOUS}.get(verdict, EXIT_INCONCLUSIVE)
     report["exit_code"] = code
+
+    private = state.get("private")
+    if private:
+        try:
+            remove_tree(private, state["private_parent"])
+        except Exception as e:  # reported, never hidden
+            report["cleanup_error_private"] = f"{type(e).__name__}: {e}"
 
     work = state.get("work")
     if work:
