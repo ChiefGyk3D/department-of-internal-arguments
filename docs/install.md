@@ -16,11 +16,11 @@ python3 scripts/install.py --target /path/to/project --adapter both --apply
 `templates/lead.md` is not an agent file, so the role installs above never load it, and a session that never loaded it is not governed by it. Install it as a marked block in the instruction file the controller session reads at start:
 
 ```
-python3 scripts/install.py --target /path/to/project --lead CLAUDE.md --update           # preview
-python3 scripts/install.py --target /path/to/project --lead CLAUDE.md --update --apply
+python3 scripts/install.py --target /path/to/project --adapter none --lead CLAUDE.md           # preview
+python3 scripts/install.py --target /path/to/project --adapter none --lead CLAUDE.md --apply
 ```
 
-`--lead FILE` is a path under the target (no absolute path, no `..`); use `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `.github/copilot-instructions.md` for Copilot. The option rides on the normal install, so give it the same `--adapter` and `--update` you use for the roles. The installed text is `templates/lead.md` without its leading comment, between two marker lines:
+`--lead FILE` is a path under the target (no absolute path, no `..`); use `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `.github/copilot-instructions.md` for Copilot. `--adapter none` installs only the lead block. With any other adapter `--lead` rides on the role install (same collision rules, same `--update`), and the preview prints a note saying so. The installed text is `templates/lead.md` without its leading comment, between two marker lines:
 
 ```
 <!-- doia-lead:begin release R sha256:HEX -->
@@ -28,14 +28,14 @@ python3 scripts/install.py --target /path/to/project --lead CLAUDE.md --update -
 <!-- doia-lead:end -->
 ```
 
-HEX is the sha256 of the text between the markers. A missing file is created. In an existing file the block is appended and nothing else in the file is touched. A re-run with the same text changes nothing. `--update` replaces a block whose hash still matches; a block you edited is refused, and `--force-edited` with `--update` discards your edits to the block only, never the text around it. A block with a missing, duplicated or misordered marker is refused even with `--force-edited`, and so is any file that mentions `doia-lead:` in prose, a non-UTF-8 file, a symlink or a file over 1 MiB. `--list-managed --lead FILE` reports the block as `current`, `stale`, `differs` or `edited` like any other managed file. The hash has the same limit as every marker here: it detects accidental edits, not a forger.
+HEX is the sha256 of the text between the markers. A missing file is created. In an existing file the block is appended and nothing else in the file is touched. A re-run with the same text changes nothing and needs no `--update`. `--update` replaces a block whose hash still matches; a block you edited is refused, and `--force-edited` with `--update` discards your edits to the block only, never the text around it. A block with a missing, duplicated or misordered marker is refused even with `--force-edited`, and so is any file that mentions `doia-lead:` in prose, a non-UTF-8 file, a symlink or a file over 1 MiB. `--list-managed --lead FILE` always prints a row for the named file, so it never reads as clean by omission: `current`, `stale` (older release), `differs`, `edited`, `missing` (no file, or no block in it) or `unsafe` (a symlink, not a regular file, over 1 MiB, not UTF-8); anything but `current` exits 3. The block is written with LF line endings, or CRLF when the file already uses CRLF; the hash is taken with LF endings and ignores a missing final newline, so an editor that converts either does not make the block read as edited. Replacing the file (any `--update`, including the lead block) writes a new file and renames it over the old one: it keeps the permission bits, but the new file belongs to the user running the installer, extended attributes and ACLs are not copied, and a hard link to the file stops sharing it. Just before the rename the installer re-reads the file and refuses, writing nothing, if it changed since the new content was built (`file changed while installing; re-run`); a write landing between that read and the rename is not caught, and no lock is taken because editors do not take one. The hash has the same limit as every marker here: it detects accidental edits, not a forger.
 
 Check that it loaded: start a new session in that project and ask it to state its rule about waiting, or the first thing the lead never does. A session that cannot has not loaded the text, whatever the file says.
 
 Where each host reads it, and what is verified:
 
 - Claude Code: `CLAUDE.md` in the project and `CLAUDE.md` in the user's Claude directory are read into the session's instructions at start. Observed in the session that produced this change (both files were present in its context); the documentation page was not re-read for this change, and how a subagent inherits them was not tested.
-- Codex: `AGENTS.md` discovery is documented in the Codex section above (32 KiB combined by default; the lead block is about 6 KB). UNVERIFIED: nothing was run in Codex.
+- Codex: `AGENTS.md` discovery is documented in the Codex section below (32 KiB combined by default; the lead block is about 6 KB). UNVERIFIED: nothing was run in Codex.
 - Copilot: `.github/copilot-instructions.md` is the file `templates/copilot-instructions.md` is meant for. UNVERIFIED: not run in Copilot, and a Copilot session may not be able to act as a controller.
 - ChatGPT or a local model: paste the block into the project or system instructions by hand. UNVERIFIED: no installer path, nothing run.
 

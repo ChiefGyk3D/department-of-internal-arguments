@@ -2,6 +2,7 @@
 
 python3 scripts/install.py --target <dir> --adapter claude|copilot|both|codex [--pack NAME ...] [--update] [--apply]
                            [--layout project|user] [--overlay DIR] [--force-edited] [--lead FILE]
+  (--adapter none with --lead FILE installs only the lead block)
 python3 scripts/install.py --target <dir> --list-managed [--layout project|user] [--overlay DIR] [--lead FILE]
 
 Layouts:
@@ -59,12 +60,13 @@ from lib import (
 )
 from overlay import load_overlay
 
-ADAPTERS = ("claude", "copilot", "both", "codex")
+ADAPTERS = ("claude", "copilot", "both", "codex", "none")
 HOSTS = {
     "claude": ("claude",),
     "copilot": ("copilot",),
     "both": ("claude", "copilot"),  # unchanged meaning; Codex is asked for by name
     "codex": ("codex",),
+    "none": (),  # only --lead
 }
 LAYOUTS = ("project", "user")
 MAX_MANAGED_BYTES = 1024 * 1024
@@ -105,14 +107,21 @@ def lead_inspect(text):
     idx = [i for i, ln in enumerate(lines) if LEAD_TOKEN in ln]
     if len(idx) != 2:
         return "edited", None, None, None
-    b, e = idx
+    b, e = idx  # idx is ascending, so the begin line is the first token line and the end line the second
     m = LEAD_BEGIN_RE.fullmatch(lines[b].rstrip("\r\n"))
-    if m is None or lines[e].rstrip("\r\n") != LEAD_END or e < b:
+    if m is None or lines[e].rstrip("\r\n") != LEAD_END:
         return "edited", None, None, None
     start = sum(len(x) for x in lines[:b])
     stop = start + sum(len(x) for x in lines[b : e + 1])
-    state = "owned" if body_sha256("".join(lines[b + 1 : e])) == m.group(2) else "edited"
+    # The hash is over the body with LF line endings, so a block an editor converted to CRLF is still the same block.
+    body = "".join(lines[b + 1 : e]).replace("\r\n", "\n")
+    state = "owned" if body_sha256(body) == m.group(2) else "edited"
     return state, m.group(1), start, stop
+
+
+def _same_block(found, block):
+    """True if the block found in a file is the one this release writes, ignoring CRLF and a missing last newline."""
+    return found.replace("\r\n", "\n").rstrip("\n") == block.rstrip("\n")
 
 
 def _lead_path(target, lead):
@@ -142,20 +151,23 @@ def _lead_item(target, lead, root, update, force_edited):
         raise ValueError(f"instruction file is not UTF-8: {dest.relative_to(target)}") from None
     state, _rel, start, stop = lead_inspect(text)
     seen = _sha(raw)
+    eol = "\r\n" if "\r\n" in text else "\n"  # a CRLF file gets a CRLF block; the hash ignores the difference
+    ours = block.replace("\n", eol)
     if state == "none":
-        sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
-        return src, dest, "append", (text + sep + block).encode("utf-8"), seen, False
+        lf = text.replace("\r\n", "\n")
+        sep = "" if not lf or lf.endswith("\n\n") else ("\n" if lf.endswith("\n") else "\n\n")
+        return src, dest, "append", (text + sep.replace("\n", eol) + ours).encode("utf-8"), seen, False
     if state == "edited":
         if start is not None and force_edited and update:
-            return src, dest, "forced", (text[:start] + block + text[stop:]).encode("utf-8"), seen, False
+            return src, dest, "forced", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
         if start is None and force_edited and update:
             raise ValueError(f"malformed lead block; fix it by hand: {dest.relative_to(target)}")
         return src, dest, "edited", raw, seen, False
-    if text[start:stop] == block:
+    if _same_block(text[start:stop], block):
         return src, dest, "unchanged", raw, seen, False
     if not update:
         raise ValueError(f"lead block differs from this release; use --update: {dest.relative_to(target)}")
-    return src, dest, "update", (text[:start] + block + text[stop:]).encode("utf-8"), seen, False
+    return src, dest, "update", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
 
 
 def inspect(path):
@@ -201,11 +213,13 @@ def assert_outside_repo(path, root=ROOT):
         raise ValueError(f"destination inside this repository refused: {Path(path).name}")
 
 
-def _check_options(adapter, layout):
+def _check_options(adapter, layout, lead=None):
     if adapter not in ADAPTERS:
         raise ValueError("unknown adapter")
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout: {layout}")
+    if adapter == "none" and not lead:
+        raise ValueError("--adapter none installs only the lead block; give --lead FILE")
     if layout == "user" and "copilot" in HOSTS[adapter]:
         raise ValueError("copilot has no user layout; use --adapter claude or codex with --layout user")
 
@@ -370,7 +384,7 @@ def _plan(
     """[(source, dest Path, action, bytes, sha of the existing file or None, overlay-sourced)]; raises before writing.
 
     action: new | update | unchanged | edited (not replaceable without force) | forced (edited, will be discarded)."""
-    _check_options(adapter, layout)
+    _check_options(adapter, layout, lead)
     if force_edited and not update:
         raise ValueError("--force-edited only makes sense with --update")
     ov = load_overlay(overlay, root) if overlay is not None else None
@@ -472,6 +486,25 @@ def _changed(dest):
     return ValueError(f"destination changed during install: {dest.name}")
 
 
+def _recheck(dfd, dest, old, mode, seen):
+    """Last look before the rename: the file must still be the same inode, with the same mode and the same bytes the
+    new content was built from. An editor that rewrote it in place since the first read would otherwise lose its edit.
+    The rename itself cannot be made conditional, so a write landing between this read and the rename is not caught;
+    the window is that small, and an advisory lock would not stop an editor that does not take one."""
+    try:
+        fd = os.open(dest.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        raise _changed(dest) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != old or stat.S_IMODE(st.st_mode) != mode:
+            raise _changed(dest)
+        if _sha(os.read(fd, MAX_MANAGED_BYTES + 1)) != seen:
+            raise ValueError(f"file changed while installing; re-run: {dest.name}")
+    finally:
+        os.close(fd)
+
+
 def _write_one(dest, action, data, seen, private):
     try:
         dfd = _open_dir_chain(dest.parent, create=True)
@@ -521,12 +554,7 @@ def _write_one(dest, action, data, seen, private):
                 _write_all(fd, data)
             finally:
                 os.close(fd)
-            try:
-                cur = os.stat(name, dir_fd=dfd, follow_symlinks=False)
-            except OSError:
-                raise _changed(dest) from None
-            if not stat.S_ISREG(cur.st_mode) or (cur.st_dev, cur.st_ino) != old:
-                raise _changed(dest)
+            _recheck(dfd, dest, old, keep_mode, seen)
             os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
             tmp = None
         _race_seam("written", dest)
@@ -612,30 +640,43 @@ def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
             else:
                 status = "differs" if release == ver else "stale"
             rows.append({"path": rel, "release": release, "source": source, "status": status})
-    if lead is not None:
-        row = _lead_row(target, lead, root)
-        if row:
-            rows.append(row)
+    if lead is not None:  # an explicitly named file always gets a row, so it can never read as clean by omission
+        rows.append(_lead_row(target, lead, root))
     return rows
 
 
 def _lead_row(target, lead, root):
+    """The row for the file named by --lead: current | stale | differs | edited, or missing (no file, or no block in
+    it) | unsafe (a symlink, not a regular file, over 1 MiB, not UTF-8). Anything but current exits 3."""
     dest = _lead_path(target, lead)
-    ensure_safe(dest)
+    rel = str(dest.relative_to(target))
+
+    def row(status, release="-"):
+        return {"path": rel, "release": release, "source": "public", "status": status}
+
+    try:
+        ensure_safe(dest)
+    except ValueError:
+        return row("unsafe")
+    if not (dest.exists() or dest.is_symlink()):
+        return row("missing")
     if dest.is_symlink() or not dest.is_file():
-        return None
+        return row("unsafe")
     raw = _read_capped(dest)
     if len(raw) > MAX_MANAGED_BYTES:
-        return None
-    state, release, start, stop = lead_inspect(raw.decode("utf-8", "replace"))
+        return row("unsafe")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return row("unsafe")
+    state, release, start, stop = lead_inspect(text)
     if state == "none":
-        return None
-    rel = str(dest.relative_to(target))
+        return row("missing")
     if state == "edited":
-        return {"path": rel, "release": release or "unknown", "source": "public", "status": "edited"}
-    text = raw.decode("utf-8", "replace")
-    status = "current" if text[start:stop] == lead_block(root) else ("stale" if release != version(root) else "differs")
-    return {"path": rel, "release": release, "source": "public", "status": status}
+        return row("edited", release or "unknown")
+    if _same_block(text[start:stop], lead_block(root)):
+        return row("current", release)
+    return row("stale" if release != version(root) else "differs", release)
 
 
 def _safe(text):
@@ -709,6 +750,8 @@ def main(argv=None):
             lead=a.lead,
         )
         target = Path(a.target).absolute()
+        if a.lead is not None and a.adapter != "none":
+            print(f"note: the {a.adapter} role agents are planned with --lead; use --adapter none for the lead only")
         for _, dest, action, data, _, from_overlay in items:
             # Provenance and digest of what would be written: the preview is the review control for personas and
             # packs, which become model instructions.

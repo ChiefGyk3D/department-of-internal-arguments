@@ -7,25 +7,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import install as installer  # noqa: E402  (path set up above)
+import validate as validate_mod  # noqa: E402
+from test_user_layout import copy_fixture  # noqa: E402
 
 LEAD = (ROOT / "templates" / "lead.md").read_text(encoding="utf-8")
-# Phrases that must stay in the lead text, one per rule the issue names. Collected loosely, asserted strictly.
-RULES = {
-    "waits": "You do not wait.",
-    "tracking": "`issue: owner/repo#N`",
-    "cwd": "same command as the worktree dispatch",
-    "look first": "## Before you tell the human to do something",
-    "access": "ask once for the union",
-    "done": "## Done",
-    "token": "approval token",
-    "public weakness": "unfixed weakness",
-    "rejected": "Re-suggest an option the human has rejected.",
-}
 # Words that would make the public template maintainer-specific (the validator sweeps hosts and paths separately).
 PRIVATE_HINTS = ("SAFO", "Cloudflare", "Doppler", "Twingate")
 
@@ -38,14 +30,22 @@ def run_main(*args):
 
 
 class LeadText(unittest.TestCase):
-    def test_every_rule_is_present(self):
-        self.assertEqual(len(RULES), 9)
-        for name, phrase in RULES.items():
-            self.assertIn(phrase, LEAD, name)
+    def fixture_errors(self, mutate):
+        with tempfile.TemporaryDirectory() as d:
+            fx = copy_fixture(d)
+            lead = fx / "templates" / "lead.md"
+            lead.write_text(mutate(lead.read_text(encoding="utf-8")), encoding="utf-8")
+            return [e for e in validate_mod.validate(fx) if "lead.md" in e]
 
-    def test_guard_bites_when_a_rule_is_removed(self):
-        broken = LEAD.replace(RULES["waits"], "")
-        self.assertNotIn(RULES["waits"], broken)
+    def test_the_real_validator_accepts_the_template(self):
+        self.assertEqual(self.fixture_errors(lambda s: s), [])
+        self.assertEqual(len(validate_mod.LEAD_RULES), 9)
+
+    def test_the_real_validator_fails_when_any_rule_is_removed(self):
+        for rule, phrase in validate_mod.LEAD_RULES.items():
+            with self.subTest(rule):
+                errors = self.fixture_errors(lambda s, p=phrase: s.replace(p, "REMOVED"))
+                self.assertTrue(any(rule in e for e in errors), errors)
 
     def test_no_maintainer_specific_text(self):
         for word in PRIVATE_HINTS:
@@ -54,8 +54,11 @@ class LeadText(unittest.TestCase):
     def test_installed_body_is_the_template_without_its_header_comment(self):
         body = installer.lead_body()
         self.assertTrue(body.startswith("# The lead"))
+        self.assertTrue(body.endswith("\n") and not body.endswith("\n\n"))
         self.assertNotIn("<!--", body)
         self.assertIn("## What you never do", body)
+        # No blank lines or spaces between the begin marker and the text.
+        self.assertIn("-->\n# The lead", installer.lead_block())
 
     def test_growth_stays_modest(self):
         # lead.md is injected into a controller session; the installed text stays under 6.5 KB (it was 4.3 KB).
@@ -69,14 +72,15 @@ class LeadInstall(unittest.TestCase):
         self.target = Path(self._tmp.name) / "proj"
         self.target.mkdir()
         self.file = self.target / "CLAUDE.md"
-        # --lead rides on an install; put the agents in once so each test exercises only the lead block.
-        run_main("--target", str(self.target), "--adapter", "claude", "--apply")
 
-    def lead(self, *extra, apply=True):
-        args = ["--target", str(self.target), "--lead", "CLAUDE.md", "--update", *extra]
+    def lead(self, *extra, apply=True, adapter="none"):
+        args = ["--target", str(self.target), "--adapter", adapter, "--lead", "CLAUDE.md", *extra]
         if apply:
             args.append("--apply")
         return run_main(*args)
+
+    def listed(self):
+        return run_main("--target", str(self.target), "--list-managed", "--lead", "CLAUDE.md")
 
     def test_creates_the_file_with_a_marked_block(self):
         code, out, err = self.lead()
@@ -86,6 +90,7 @@ class LeadInstall(unittest.TestCase):
         self.assertEqual((state, start, stop), ("owned", 0, len(text)))
         self.assertEqual(release, installer.version())
         self.assertIn("new: CLAUDE.md", out)
+        self.assertEqual(sorted(p.name for p in self.target.iterdir()), ["CLAUDE.md"])
 
     def test_appends_and_leaves_existing_text_alone(self):
         self.file.write_text("# My project\n\nKeep this.\n")
@@ -105,20 +110,23 @@ class LeadInstall(unittest.TestCase):
     def test_rerun_is_idempotent_and_needs_no_update_flag(self):
         self.lead()
         first = self.file.read_bytes()
-        code, out, _err = run_main("--target", str(self.target), "--lead", "CLAUDE.md", "--update", "--apply")
-        self.assertEqual(code, 0)
+        code, out, err = self.lead()  # no --update anywhere
+        self.assertEqual(code, 0, err)
         self.assertIn("unchanged: CLAUDE.md", out)
         self.assertEqual(self.file.read_bytes(), first)
         self.assertEqual(self.file.read_text().count("doia-lead:begin"), 1)
 
-    def test_stale_block_needs_update_and_only_the_block_is_replaced(self):
+    def test_stale_block_is_refused_without_update_with_the_lead_message(self):
         body = "# The lead\nold text\n"
         begin = f"<!-- doia-lead:begin release 0.0.1 sha256:{installer.body_sha256(body)} -->\n"
-        self.file.write_text("before\n" + begin + body + installer.LEAD_END + "\nafter\n")
-        code, _out, err = run_main("--target", str(self.target), "--lead", "CLAUDE.md")
-        self.assertEqual(code, 1)
-        self.assertIn("--update", err)
+        stale = "before\n" + begin + body + installer.LEAD_END + "\nafter\n"
+        self.file.write_text(stale)
         code, _out, err = self.lead()
+        self.assertEqual(code, 1)
+        self.assertIn("lead block differs from this release; use --update", err)
+        self.assertEqual(self.file.read_text(), stale)
+        self.assertEqual(self.listed()[0], 3)
+        code, _out, err = self.lead("--update")
         self.assertEqual(code, 0, err)
         new = self.file.read_text()
         self.assertTrue(new.startswith("before\n<!-- doia-lead:begin release " + installer.version()))
@@ -129,11 +137,11 @@ class LeadInstall(unittest.TestCase):
         self.lead()
         edited = self.file.read_text().replace("You do not wait.", "You wait.", 1)
         self.file.write_text("top\n" + edited + "bottom\n")
-        code, _out, err = self.lead()
+        code, _out, err = self.lead("--update")
         self.assertEqual(code, 1)
         self.assertIn("edited files refused", err)
         self.assertIn("You wait.", self.file.read_text())
-        code, _out, err = self.lead("--force-edited")
+        code, _out, err = self.lead("--update", "--force-edited")
         self.assertEqual(code, 0, err)
         text = self.file.read_text()
         self.assertTrue(text.startswith("top\n<!-- doia-lead:begin"))
@@ -151,14 +159,17 @@ class LeadInstall(unittest.TestCase):
         for name, content in cases.items():
             with self.subTest(name):
                 self.file.write_text(content)
-                for extra in ((), ("--force-edited",)):
-                    code, _out, _err = self.lead(*extra)
-                    self.assertEqual(code, 1)
+                code, _out, err = self.lead("--update")
+                self.assertEqual(code, 1)
+                self.assertIn("edited files refused", err)
+                code, _out, err = self.lead("--update", "--force-edited")
+                self.assertEqual(code, 1)
+                self.assertIn("malformed lead block; fix it by hand", err)
                 self.assertEqual(self.file.read_text(), content)
 
     def test_paths_outside_the_target_and_symlinks_are_refused(self):
         for bad in ("../CLAUDE.md", "/etc/x.md"):
-            code, _o, err = run_main("--target", str(self.target), "--lead", bad, "--update")
+            code, _o, err = run_main("--target", str(self.target), "--adapter", "none", "--lead", bad)
             self.assertEqual(code, 1, bad)
             self.assertIn("under the target", err)
         real = self.target / "real.md"
@@ -174,15 +185,82 @@ class LeadInstall(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("UTF-8", err)
 
-    def test_list_managed_covers_the_block(self):
+    def test_file_over_the_size_cap_is_refused_untouched(self):
+        big = b"x" * (installer.MAX_MANAGED_BYTES + 1)
+        self.file.write_bytes(big)
+        code, _o, err = self.lead()
+        self.assertEqual(code, 1)
+        self.assertIn("too large", err)
+        self.assertEqual(self.file.read_bytes(), big)
+
+    def test_adapter_none_needs_lead_and_other_adapters_warn(self):
+        code, _o, err = run_main("--target", str(self.target), "--adapter", "none")
+        self.assertEqual(code, 1)
+        self.assertIn("--lead", err)
+        _code, out, _e = self.lead(apply=False)
+        self.assertNotIn("note:", out)
+        _code, out, _e = self.lead(apply=False, adapter="claude")
+        self.assertIn("note: the claude role agents are planned with --lead", out)
+        self.assertIn(".claude/agents/reviewer.md", out)
+
+    def test_crlf_file_gets_a_crlf_block_that_stays_current(self):
+        self.file.write_bytes(b"# Mine\r\n\r\nKeep.\r\n")
+        code, _o, err = self.lead()
+        self.assertEqual(code, 0, err)
+        raw = self.file.read_bytes()
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertEqual(self.listed()[0], 0)
+        _code, out, _e = self.lead()
+        self.assertIn("unchanged: CLAUDE.md", out)
+        self.assertEqual(self.file.read_bytes(), raw)
+
+    def test_block_converted_to_crlf_or_stripped_of_its_final_newline_is_still_current(self):
         self.lead()
-        code, out, _e = run_main("--target", str(self.target), "--list-managed", "--lead", "CLAUDE.md")
+        lf = self.file.read_bytes()
+        self.file.write_bytes(lf.replace(b"\n", b"\r\n"))
+        self.assertEqual(self.listed()[0], 0)
+        self.file.write_bytes(lf.rstrip(b"\n"))
+        code, out, _e = self.listed()
+        self.assertEqual(code, 0, out)
+        _code, out, _e = self.lead()
+        self.assertIn("unchanged: CLAUDE.md", out)
+        self.assertEqual(self.file.read_bytes(), lf.rstrip(b"\n"))
+
+    def test_list_managed_current_and_edited(self):
+        self.lead()
+        code, out, _e = self.listed()
         self.assertEqual(code, 0, out)
         self.assertRegex(out, r"current\s+\S+\s+public\s+CLAUDE\.md")
         self.file.write_text(self.file.read_text().replace("You do not wait.", "You wait.", 1))
-        code, out, _e = run_main("--target", str(self.target), "--list-managed", "--lead", "CLAUDE.md")
+        code, out, _e = self.listed()
         self.assertEqual(code, 3)
         self.assertRegex(out, r"edited\s+\S+\s+public\s+CLAUDE\.md")
+
+    def test_list_managed_never_reads_a_named_lead_file_as_clean(self):
+        def expect(status):
+            code, out, _e = self.listed()
+            self.assertEqual(code, 3, out)
+            self.assertRegex(out, status + r"\s+-\s+public\s+CLAUDE\.md")
+
+        expect("missing")  # no file
+        self.file.write_text("# nothing here\n")
+        expect("missing")  # a file with no block
+        self.file.write_bytes(b"\xff\xfe")
+        expect("unsafe")  # not UTF-8
+        self.file.write_bytes(b"x" * (installer.MAX_MANAGED_BYTES + 1))
+        expect("unsafe")  # over the cap
+        self.file.unlink()
+        real = self.target / "real.md"
+        real.write_text("x\n")
+        self.file.symlink_to(real)
+        expect("unsafe")  # a symlink
+        self.file.unlink()
+        self.file.mkdir()
+        expect("unsafe")  # not a regular file
+        # Without --lead the file is simply not looked at.
+        code, out, _e = run_main("--target", str(self.target), "--list-managed")
+        self.assertEqual(code, 0)
+        self.assertNotIn("CLAUDE.md", out)
 
     def test_block_hash_matches_its_body(self):
         block = installer.lead_block()
@@ -190,6 +268,44 @@ class LeadInstall(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(2), installer.body_sha256(installer.lead_body()))
         self.assertTrue(re.search(r"\n<!-- doia-lead:end -->\n$", block))
+
+
+class LeadRace(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.target = Path(self._tmp.name) / "proj"
+        self.target.mkdir()
+        self.file = self.target / "CLAUDE.md"
+
+    def run_with_edit_at(self, stage, edit):
+        def seam(where, dest):
+            if where == stage and dest.name == "CLAUDE.md":
+                edit()
+
+        with mock.patch.object(installer, "_race_seam", side_effect=seam):
+            return run_main("--target", str(self.target), "--adapter", "none", "--lead", "CLAUDE.md", "--apply")
+
+    def test_an_in_place_edit_between_read_and_rename_is_refused_and_kept(self):
+        self.file.write_text("mine\n")
+        inode = self.file.stat().st_ino
+
+        def edit():  # same inode, same mode: only the bytes change, which is what an editor's save does
+            with open(self.file, "r+") as f:
+                f.write("mine\nplus a late edit\n")
+
+        code, _out, err = self.run_with_edit_at("checked", edit)
+        self.assertEqual(code, 1)
+        self.assertIn("file changed while installing; re-run", err)
+        self.assertEqual(self.file.read_text(), "mine\nplus a late edit\n")
+        self.assertEqual(self.file.stat().st_ino, inode)
+        self.assertEqual([p.name for p in self.target.iterdir()], ["CLAUDE.md"])  # no temp file left behind
+
+    def test_without_a_concurrent_edit_the_same_path_succeeds(self):
+        self.file.write_text("mine\n")
+        code, _out, err = self.run_with_edit_at("checked", lambda: None)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.file.read_text().startswith("mine\n"))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 <!--
 Template. Not an agent file: nothing loads it by itself, and a session that never
 loaded this text is not governed by it. Install it into the controller session's
-instructions (python3 scripts/install.py --target DIR --lead CLAUDE.md --apply,
-or paste it by hand; see docs/install.md) and check that the session can state
-its first rule. The installer writes everything below this comment and not the
-comment itself. Use it when that session will dispatch the role agents. The lead is a person or the session the person drives;
-it is the only place approval can be received, and the only place pushes happen.
+instructions (python3 scripts/install.py --target DIR --adapter none --lead
+CLAUDE.md --apply, or paste it by hand; see docs/install.md) and check that the
+session can state its first rule. The installer writes everything below this
+comment and not the comment itself. Use it when that session will dispatch the
+role agents. The lead is a person or the session the person drives; it is the
+only place approval can be received, and the only place pushes happen.
 Keep it free of hostnames, addresses and personal identifiers.
 -->
 
@@ -65,6 +66,6 @@ Append one line per task to the pilot log (`evals/log-schema.md`) from the repor
 - Dispatch the most capable tier without the human's recorded OK.
 - Let an agent push, or push yourself before the review loop has closed.
 - Paste raw transcripts, private hostnames, or secrets into a brief, a log, or a handoff.
-- Read or use an approval token a guard holds for the human, except on the human's own message, quoted with its time.
+- Use an approval token meant for the human (from a hook, gate or prompt) unless the human's own message supplies it, quoted with its time.
 - Write an unfixed weakness (the item, the file, the attack path) into a public issue, pull request or comment.
 - Re-suggest an option the human has rejected.

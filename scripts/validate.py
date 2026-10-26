@@ -57,6 +57,19 @@ REPORT_FIELDS = (
 )
 LOCAL_LLM_TOKENS = ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:")
 TEMPLATES = ("adr", "brief", "copilot-instructions", "handoff", "lead")
+# One phrase per orchestrator rule in templates/lead.md (issue #33); the template is injected into a controller session,
+# so a rule that silently disappears from it must fail the gate.
+LEAD_RULES = {
+    "waits": "You do not wait.",
+    "tracking": "`issue: owner/repo#N`",
+    "working directory": "same command as the worktree dispatch",
+    "look first": "## Before you tell the human to do something",
+    "access": "ask once for the union",
+    "done": "## Done",
+    "approval token": "approval token",
+    "public weakness": "unfixed weakness",
+    "rejected option": "Re-suggest an option the human has rejected.",
+}
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
@@ -264,6 +277,9 @@ def validate(root=ROOT):
         for tok in LOCAL_LLM_TOKENS:
             require(tok in copilot, f"templates/copilot-instructions.md lacks local-model report token {tok!r}")
         require({f.stem for f in (root / "templates").glob("*.md")} == set(TEMPLATES), "unexpected or missing template")
+        lead = (root / "templates/lead.md").read_text(encoding="utf-8")
+        for rule, phrase in LEAD_RULES.items():
+            require(phrase in lead, f"templates/lead.md lacks the {rule} rule ({phrase!r})")
 
         packs = load_packs(root)
         require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the six packs")

@@ -30,7 +30,7 @@ The orchestrator rules in it, with the reason for each (the template keeps them 
 - Done. "Done" means observed through the path the user will use, in this turn: the real command, the public address, the merge target's run. A state read has a time; the human's newer report outranks it. A destructive step gets a fresh read of the target, a script that stops at the first error, and a read-back.
 - Tracking. An issue and a board card exist before work starts, and every brief carries an `issue: owner/repo#N` line. Move the card in the same response as the dispatch, pull request, merge or block.
 - Working directory. A worktree agent starts wherever the session's shell is. Run `cd <the issue's repository>` in the same command as the dispatch, or the agent lands in the wrong repository.
-- Never: use an approval token a guard holds for the human without the human's own quoted message; write an unfixed weakness into a public issue, pull request or comment; re-suggest an option the human rejected.
+- Never: use an approval token meant for the human (from a hook, gate or prompt) unless the human's own message supplies it, quoted with its time; write an unfixed weakness into a public issue, pull request or comment; re-suggest an option the human rejected.
 
 - Name the role by what the work is: a plan whose code is complete goes to the transcriber; everything else that changes files goes to the implementer; a finished task goes to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also goes to the adversarial reviewer, after the reviewer, never instead of it.
 - Name packs by the domain the diff touches. A pack named in a brief is not proof it was loaded; read `PACKS LOADED`.
