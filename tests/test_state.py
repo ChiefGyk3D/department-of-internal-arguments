@@ -586,10 +586,10 @@ class Confinement(StateCase):
                 state.load(self.target, LAYOUT)
 
     def test_state_directory_inside_this_repository(self):
-        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(ROOT / "scripts" / ".state-test")}):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(state._REPO_ROOT / "scripts" / ".state-test")}):
             with self.assertRaisesRegex(state.StateError, "inside this repository"):
                 state.save(self.target, LAYOUT, {"x.md": entry()})
-        self.assertFalse((ROOT / "scripts" / ".state-test").exists())
+        self.assertFalse((state._REPO_ROOT / "scripts" / ".state-test").exists())
 
     def test_target_inside_the_repository_does_not_matter_but_state_must_be_outside(self):
         with self.assertRaises(state.StateError):
@@ -668,9 +668,9 @@ class WriteSafety(StateCase):
         state.save(self.target, LAYOUT, {"first.md": entry()})
         first = self.file.read_bytes()
         with state.Store(self.target, LAYOUT):
-            with self.assertRaisesRegex(state.StateError, "another install is running"):
+            with self.assertRaisesRegex(state.StateLocked, "another install is running"):
                 state.save(self.target, LAYOUT, {"second.md": entry()})
-            with self.assertRaisesRegex(state.StateError, "another install is running"):
+            with self.assertRaisesRegex(state.StateLocked, "another install is running"):
                 state.Store(self.target, LAYOUT)
         self.assertEqual(self.file.read_bytes(), first)
         self.assertEqual(self.listing(), [self.file.name])
@@ -687,7 +687,7 @@ class WriteSafety(StateCase):
         state.save(self.target, LAYOUT, {"old.md": entry()})
         old = self.file.read_bytes()
         with mock.patch.object(state.os, "rename", side_effect=OSError("crash")):
-            with self.assertRaises(OSError):
+            with self.assertRaises(state.StateError):
                 state.save(self.target, LAYOUT, {"new.md": entry()})
         self.assertEqual(self.file.read_bytes(), old)
         self.assertEqual(self.listing(), [self.file.name])
@@ -696,7 +696,7 @@ class WriteSafety(StateCase):
         state.save(self.target, LAYOUT, {"old.md": entry()})
         old = self.file.read_bytes()
         with mock.patch.object(state.os, "fsync", side_effect=OSError("crash")):
-            with self.assertRaises(OSError):
+            with self.assertRaises(state.StateError):
                 state.save(self.target, LAYOUT, {"new.md": entry()})
         self.assertEqual(self.file.read_bytes(), old)
         self.assertEqual(self.listing(), [self.file.name])
@@ -906,6 +906,489 @@ class TwoPhase(StateCase):
         self.assertFalse(state.accepts(got["a.md"], "c" * 64))
 
 
+CHILD = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import state
+target, step, tag = sys.argv[2], sys.argv[3], sys.argv[4]
+entries = {"f-" + tag + ".md": {"kind": "file", "release": "1", "source": "public", "body_sha256": tag * 64}}
+def die(*a, **k):
+    os.kill(os.getpid(), signal.SIGKILL)
+if step == "kill-fsync":
+    state.os.fsync = die
+elif step == "kill-write":
+    state.os.write = die
+elif step == "kill-rename":
+    state.os.rename = die
+elif step == "kill-dirsync":
+    state._fsync_dir = die
+if step == "hold":
+    with state.Store(target, "project"):
+        print("held", flush=True)
+        sys.stdin.readline()
+    sys.exit(0)
+if step == "race":
+    ok = locked = 0
+    for _ in range(40):
+        try:
+            state.save(target, "project", entries)
+            ok += 1
+        except state.StateLocked:
+            locked += 1
+    print(ok, locked)
+    sys.exit(0)
+try:
+    state.save(target, "project", entries)
+except state.StateLocked:
+    sys.exit(3)
+except state.StateError:
+    sys.exit(4)
+"""
+
+
+def scripts_dir():
+    return os.environ.get("DOIA_STATE_SCRIPTS") or str(ROOT / "scripts")
+
+
+def child_args(target, step, tag):
+    return [sys.executable, "-I", "-c", CHILD, scripts_dir(), str(target), step, tag]
+
+
+class Errors(StateCase):
+    """Every I/O failure surfaces as StateError; a raw OSError never escapes (callers catch one type)."""
+
+    def saved(self):
+        state.save(self.target, LAYOUT, {"old.md": entry()})
+        return self.file.read_bytes()
+
+    def assertTypedAndIntact(self, old, *, exc=state.StateError):
+        self.assertEqual(self.file.read_bytes(), old)
+        self.assertEqual(self.listing(), [self.file.name])  # no temp file left
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory modes")
+    def test_unwritable_state_directory_on_save(self):
+        old = self.saved()
+        os.chmod(self.sdir, 0o500)  # passes the owner and mode checks, cannot take a new file
+        self.addCleanup(os.chmod, self.sdir, 0o700)
+        with self.assertRaises(state.StateError) as cm:
+            state.save(self.target, LAYOUT, {"new.md": entry()})
+        self.assertNotIsInstance(cm.exception, OSError)
+        self.assertEqual(list(state.load(self.target, LAYOUT)), ["old.md"])
+        os.chmod(self.sdir, 0o700)
+        self.assertTypedAndIntact(old)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory modes")
+    def test_unwritable_state_directory_on_first_save(self):
+        self.mkdir_state(0o500)
+        self.addCleanup(os.chmod, self.sdir, 0o700)
+        with self.assertRaises(state.StateError):
+            state.save(self.target, LAYOUT, {"new.md": entry()})
+
+    def test_write_failures_each_step(self):
+        old = self.saved()
+        steps = [
+            ("write", state.os, "write", OSError(28, "No space left on device")),
+            ("fsync", state.os, "fsync", OSError(5, "Input/output error")),
+            ("rename", state.os, "rename", OSError(18, "Invalid cross-device link")),
+            ("fchmod", state.os, "fchmod", OSError(1, "Operation not permitted")),
+        ]
+        for name, owner, attr, err in steps:
+            with self.subTest(name), mock.patch.object(owner, attr, side_effect=err):
+                with self.assertRaises(state.StateError) as cm:
+                    state.save(self.target, LAYOUT, {"new.md": entry()})
+                self.assertNotIsInstance(cm.exception, OSError)
+            self.assertTypedAndIntact(old)
+
+    def test_temp_file_open_failure(self):
+        old = self.saved()
+        real_open = os.open
+
+        def failing(path, flags, *a, **kw):
+            if str(path).endswith(".tmp"):
+                raise OSError(28, "No space left on device")
+            return real_open(path, flags, *a, **kw)
+
+        with mock.patch.object(state.os, "open", side_effect=failing):
+            with self.assertRaises(state.StateError):
+                state.save(self.target, LAYOUT, {"new.md": entry()})
+        self.assertTypedAndIntact(old)
+
+    def test_read_failures(self):
+        self.saved()
+        for attr, err in (("read", OSError(5, "Input/output error")), ("fstat", OSError(5, "Input/output error"))):
+            with self.subTest(attr), mock.patch.object(state.os, attr, side_effect=err):
+                with self.assertRaises(state.StateError) as cm:
+                    state.load(self.target, LAYOUT)
+                self.assertNotIsInstance(cm.exception, OSError)
+
+    def test_first_open_failure(self):
+        with mock.patch.object(state.os, "open", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaises(state.StateError):
+                state.load(self.target, LAYOUT)
+            with self.assertRaises(state.StateError):
+                state.save(self.target, LAYOUT, {})
+
+    def test_messages_carry_only_escaped_text(self):
+        self.saved()
+        with mock.patch.object(state.os, "write", side_effect=OSError(5, "bad\x1b[31m\nthing")):
+            with self.assertRaises(state.StateError) as cm:
+                state.save(self.target, LAYOUT, {"new.md": entry()})
+        self.assertTrue(all(" " <= c <= "~" for c in str(cm.exception)), repr(str(cm.exception)))
+
+
+class Sweep(StateCase):
+    def tmp_name(self, stem=None, uid="0123456789abcdef0123456789abcdef"):
+        return f".{stem or self.stem}.{uid}.tmp"
+
+    def leftover(self, name, age=60, data=b"x"):
+        self.mkdir_state()
+        path = self.sdir / name
+        path.write_bytes(data)
+        os.chmod(path, 0o600)
+        t = path.stat().st_mtime - age
+        os.utime(path, (t, t))
+        return path
+
+    def test_old_leftover_temp_files_are_removed_by_the_next_save(self):
+        gone = [self.leftover(self.tmp_name(uid=f"{i:032x}")) for i in range(3)]
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        for path in gone:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual(self.listing(), [self.file.name])
+
+    def test_a_fresh_temp_file_is_left_alone(self):
+        fresh = self.leftover(self.tmp_name(), age=0)
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        self.assertTrue(fresh.exists())
+
+    def test_nothing_else_is_ever_touched(self):
+        self.mkdir_state()
+        outside = self.tmp / "outside.txt"
+        outside.write_text("keep")
+        os.utime(outside, (outside.stat().st_mtime - 60,) * 2)  # old enough to be reaped if it were followed
+        link = self.sdir / self.tmp_name(uid="1" * 32)
+        os.symlink(outside, link)
+        adir = self.sdir / self.tmp_name(uid="2" * 32)
+        adir.mkdir()
+        (adir / "inner").write_text("keep")
+        keep = [
+            self.leftover(self.tmp_name(stem="f" * 32)),  # another target's temp file
+            self.leftover(self.tmp_name(uid="3" * 31)),  # wrong uid length
+            self.leftover(self.tmp_name(uid="G" * 32)),  # not hex
+            self.leftover("notes.txt"),
+            self.leftover(self.tmp_name() + ".bak"),
+            self.leftover(self.tmp_name()[1:]),  # no leading dot
+        ]
+        fifo = self.sdir / self.tmp_name(uid="4" * 32)
+        os.mkfifo(fifo, 0o600)
+        for odd in (link, adir, fifo):  # old enough to be reaped if their type were not checked
+            old = os.lstat(odd).st_mtime - 60
+            os.utime(odd, (old, old), follow_symlinks=False)
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        self.assertTrue(link.is_symlink() and outside.read_text() == "keep")
+        self.assertTrue(adir.is_dir() and (adir / "inner").exists())
+        self.assertTrue(fifo.exists())
+        for path in keep:
+            self.assertTrue(path.exists(), path)
+
+    def test_a_temp_file_owned_by_someone_else_is_left_alone(self):
+        path = self.leftover(self.tmp_name())
+        real_euid = os.geteuid()
+        with mock.patch.object(state, "_euid", return_value=real_euid + 1):
+            # only the sweep sees the changed identity: call it directly on a directory descriptor
+            dfd = os.open(self.sdir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                state._sweep(dfd, self.stem)
+            finally:
+                os.close(dfd)
+        self.assertTrue(path.exists())
+
+    def test_sweep_failure_does_not_fail_the_save(self):
+        path = self.leftover(self.tmp_name())
+        real_unlink = os.unlink
+
+        def failing(name, *a, **kw):
+            if str(name).endswith(".tmp") and str(name).startswith("."):
+                raise OSError(1, "nope")
+            return real_unlink(name, *a, **kw)
+
+        with mock.patch.object(state.os, "unlink", side_effect=failing):
+            state.save(self.target, LAYOUT, {"a.md": entry()})
+        self.assertTrue(path.exists())
+        self.assertEqual(list(state.load(self.target, LAYOUT)), ["a.md"])
+
+
+class ClosedStore(StateCase):
+    def test_every_method_refuses_after_close(self):
+        store = state.Store(self.target, LAYOUT)
+        store.save({"a.md": entry()})
+        store.close()
+        store.close()  # idempotent
+        with self.assertRaisesRegex(state.StateError, "closed"):
+            store.load()
+        with self.assertRaisesRegex(state.StateError, "closed"):
+            store.save({})
+        self.assertEqual(list(state.load(self.target, LAYOUT)), ["a.md"])
+
+    def test_context_manager_closes(self):
+        with state.Store(self.target, LAYOUT) as store:
+            pass
+        with self.assertRaises(state.StateError):
+            store.load()
+
+    def test_no_resolution_against_the_current_directory(self):
+        store = state.Store(self.target, LAYOUT)
+        store.close()
+        stray = Path.cwd() / (self.stem + ".json")
+        self.assertFalse(stray.exists())
+        with self.assertRaises(state.StateError):
+            store.load()
+
+
+class Containment(StateCase):
+    def test_state_directory_that_contains_the_target(self):
+        for d in (self.tmp, self.tmp.parent):
+            with self.subTest(d=d.name), mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(d)}):
+                with self.assertRaisesRegex(state.StateError, "contains the target"):
+                    state.save(self.target, LAYOUT, {})
+                with self.assertRaisesRegex(state.StateError, "contains the target"):
+                    state.load(self.target, LAYOUT)
+
+    def test_state_directory_that_contains_this_repository(self):
+        for d in (state._REPO_ROOT.parent,):
+            with self.subTest(d=d.name), mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(d)}):
+                with self.assertRaisesRegex(state.StateError, "contains this repository"):
+                    state.load(self.target, LAYOUT)
+
+    def test_containing_by_symlink_alias(self):
+        alias = self.tmp.parent / ("doia-alias-" + self.tmp.name)
+        os.symlink(self.tmp, alias)
+        self.addCleanup(os.unlink, alias)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(alias)}):
+            with self.assertRaisesRegex(state.StateError, "contains the target"):
+                state.load(self.target, LAYOUT)
+
+    def test_siblings_are_fine(self):
+        other = self.tmp / "sibling-state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(other)}):
+            state.save(self.target, LAYOUT, {})
+            self.assertEqual(state.load(self.target, LAYOUT), {})
+
+
+class Api(StateCase):
+    """The helpers the installer needs, so it never re-implements hashing, probing or KeyError handling."""
+
+    def test_body_sha256(self):
+        import hashlib
+
+        self.assertEqual(state.body_sha256(b"abc"), hashlib.sha256(b"abc").hexdigest())
+        self.assertEqual(state.body_sha256(bytearray(b"abc")), hashlib.sha256(b"abc").hexdigest())
+        for bad in ("abc", None, 5, ["a"]):
+            with self.subTest(bad=repr(bad)), self.assertRaises(state.StateError):
+                state.body_sha256(bad)
+        self.assertRegex(state.body_sha256(b""), r"^[0-9a-f]{64}$")
+
+    def test_state_path(self):
+        self.assertEqual(state.state_path(self.target, LAYOUT), self.file)
+        self.assertFalse(self.sdir.exists())  # pure: nothing created
+        self.assertNotEqual(state.state_path(self.target, "user"), self.file)
+
+    def test_error_classes(self):
+        self.assertTrue(issubclass(state.StateLocked, state.StateError))
+        self.assertTrue(issubclass(state.StateCorrupt, state.StateError))
+        self.assertFalse(issubclass(state.StateLocked, state.StateCorrupt))
+        self.assertFalse(issubclass(state.StateCorrupt, state.StateLocked))
+
+    def test_locked_is_distinguishable_from_corrupt(self):
+        with state.Store(self.target, LAYOUT):
+            with self.assertRaises(state.StateLocked):
+                state.save(self.target, LAYOUT, {})
+        self.plant(b"not json")
+        with self.assertRaises(state.StateCorrupt):
+            state.load(self.target, LAYOUT)
+        with self.assertRaises(state.StateCorrupt):
+            state.save(self.target, LAYOUT, {})
+        for raw, mode in (
+            (json.dumps(self.doc()).encode(), 0o644),
+            (b"", 0o600),
+            (b" " * (state.MAX_BYTES + 1), 0o600),
+        ):
+            self.plant(raw, mode)
+            with self.subTest(mode=oct(mode), size=len(raw)), self.assertRaises(state.StateCorrupt):
+                state.load(self.target, LAYOUT)
+        self.plant_doc(target="/elsewhere")
+        with self.assertRaises(state.StateCorrupt):
+            state.load(self.target, LAYOUT)
+
+    def test_environment_and_location_errors_are_neither(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": "relative"}):
+            with self.assertRaises(state.StateError) as cm:
+                state.load(self.target, LAYOUT)
+        self.assertNotIsInstance(cm.exception, (state.StateLocked, state.StateCorrupt))
+        self.mkdir_state(0o775)
+        with self.assertRaises(state.StateError) as cm:
+            state.load(self.target, LAYOUT)
+        self.assertNotIsInstance(cm.exception, (state.StateLocked, state.StateCorrupt))
+
+    def test_lock_held_probe_does_not_create_anything(self):
+        self.assertFalse(state.lock_held(self.target, LAYOUT))
+        self.assertFalse(self.sdir.exists())
+        self.mkdir_state()
+        self.assertFalse(state.lock_held(self.target, LAYOUT))
+        self.assertEqual(os.listdir(self.sdir), [])  # no lock file created either
+
+    def test_lock_held_probe_sees_a_holder_and_lets_go(self):
+        with state.Store(self.target, LAYOUT):
+            self.assertTrue(state.lock_held(self.target, LAYOUT))
+            self.assertTrue(state.lock_held(self.target, LAYOUT))  # probing twice changes nothing
+        self.assertFalse(state.lock_held(self.target, LAYOUT))
+        state.save(self.target, LAYOUT, {})  # the probe left no lock behind
+
+    def test_lock_held_other_targets_are_independent(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        with state.Store(other, LAYOUT):
+            self.assertFalse(state.lock_held(self.target, LAYOUT))
+            self.assertTrue(state.lock_held(other, LAYOUT))
+
+    def test_lock_held_refuses_a_bad_directory(self):
+        self.mkdir_state(0o775)
+        with self.assertRaises(state.StateError):
+            state.lock_held(self.target, LAYOUT)
+
+    def test_lock_held_does_not_follow_a_symlinked_lock_file(self):
+        self.mkdir_state()
+        decoy = self.tmp / "decoy"
+        decoy.write_text("")
+        os.symlink(decoy, self.sdir / (self.stem + ".lock"))
+        with self.assertRaises(state.StateError):
+            state.lock_held(self.target, LAYOUT)
+
+    def test_with_entry_and_without_entry_copy_and_validate(self):
+        base = {"a.md": entry()}
+        added = state.with_entry(base, "b/c.md", entry(kind="lead"))
+        self.assertEqual(sorted(added), ["a.md", "b/c.md"])
+        self.assertEqual(sorted(base), ["a.md"])  # the input is untouched
+        added["a.md"]["release"] = "9"
+        self.assertEqual(base["a.md"]["release"], "0.4.0")  # and not shared
+        replaced = state.with_entry(base, "a.md", entry(body_sha256=D2))
+        self.assertEqual(replaced["a.md"]["body_sha256"], D2)
+        for rel, e in (("../x", entry()), ("a.md", {"kind": "file"}), ("A.MD", entry()), ("x.md", entry(extra=1))):
+            with self.subTest(rel=rel), self.assertRaises(state.StateError):
+                state.with_entry(base, rel, e)
+        dropped = state.without_entry(added, "b/c.md")
+        self.assertEqual(sorted(dropped), ["a.md"])
+        self.assertEqual(sorted(added), ["a.md", "b/c.md"])
+        with self.assertRaisesRegex(state.StateError, "no entry"):
+            state.without_entry(base, "zzz.md")
+
+    def test_verdict(self):
+        e = {
+            "a.md": entry(pending_sha256=D2),
+            "n.md": {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2},
+        }
+        self.assertEqual(state.verdict(e, "a.md", D1), "owned")
+        self.assertEqual(state.verdict(e, "a.md", D2), "owned")
+        self.assertEqual(state.verdict(e, "n.md", D2), "owned")
+        self.assertEqual(state.verdict(e, "n.md", D1), "unverified")
+        self.assertEqual(state.verdict(e, "a.md", "c" * 64), "unverified")
+        self.assertEqual(state.verdict(e, "missing.md", D1), "unverified")  # no KeyError by construction
+        self.assertEqual(state.verdict(None, "a.md", D1), "unverified")  # a missing state file
+        self.assertEqual(state.verdict({}, "a.md", D1), "unverified")
+        for bad in (None, "", b"x" * 64, 7, "A" * 64, "a" * 63):
+            with self.subTest(digest=repr(bad)[:12]):
+                self.assertEqual(state.verdict(e, "a.md", bad), "unverified")
+        for rel in (None, 5, b"a.md", ["a.md"]):
+            with self.subTest(rel=repr(rel)):
+                self.assertEqual(state.verdict(e, rel, D1), "unverified")
+
+    def test_load_or_empty(self):
+        self.assertEqual(state.load_or_empty(self.target, LAYOUT), {})
+        self.assertFalse(self.sdir.exists())
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        self.assertEqual(list(state.load_or_empty(self.target, LAYOUT)), ["a.md"])
+        self.plant(b"not json")
+        with self.assertRaises(state.StateCorrupt):
+            state.load_or_empty(self.target, LAYOUT)
+
+
+class Processes(StateCase):
+    """Real processes: lock contention and kills at each step of a save."""
+
+    def run_child(self, step, tag, **kw):
+        return subprocess.run(child_args(self.target, step, tag), capture_output=True, text=True, timeout=60, **kw)
+
+    def test_a_held_lock_makes_every_other_process_lose_with_statelocked(self):
+        holder = subprocess.Popen(
+            child_args(self.target, "hold", "1"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            self.assertTrue(state.lock_held(self.target, LAYOUT))
+            for tag in "234":
+                self.assertEqual(self.run_child("save", tag).returncode, 3, tag)
+            self.assertIsNone(state.load(self.target, LAYOUT))  # nobody wrote anything
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=30)
+        self.assertFalse(state.lock_held(self.target, LAYOUT))
+        self.assertEqual(self.run_child("save", "5").returncode, 0)
+
+    def test_four_processes_racing_never_corrupt_the_file(self):
+        procs = [
+            subprocess.Popen(child_args(self.target, "race", tag), stdout=subprocess.PIPE, text=True) for tag in "abcd"
+        ]
+        results = []
+        for proc in procs:
+            out, _ = proc.communicate(timeout=120)
+            self.assertEqual(proc.returncode, 0)
+            results.append(tuple(int(x) for x in out.split()))
+        self.assertGreaterEqual(sum(ok for ok, _ in results), 4)
+        self.assertEqual(sum(ok + locked for ok, locked in results), 4 * 40)  # nothing but ok or StateLocked
+        got = state.load(self.target, LAYOUT)  # a clean, valid file written by exactly one of them
+        self.assertEqual(len(got), 1)
+        self.assertIn(list(got)[0], {f"f-{t}.md" for t in "abcd"})
+        self.assertEqual(self.listing(), [self.file.name])
+
+    def test_a_kill_at_any_step_leaves_old_or_new_state_and_the_next_run_converges(self):
+        for step in ("kill-write", "kill-fsync", "kill-rename", "kill-dirsync"):
+            with self.subTest(step):
+                if self.sdir.exists():
+                    shutil.rmtree(self.sdir)
+                state.save(self.target, LAYOUT, {"old.md": entry()})
+                proc = self.run_child(step, "9")
+                self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stderr)
+                got = state.load(self.target, LAYOUT)  # never a torn or corrupt file
+                self.assertIn(list(got), (["old.md"], ["f-9.md"]))
+                self.assertFalse(state.lock_held(self.target, LAYOUT))  # the kernel released the lock
+                for name in os.listdir(self.sdir):
+                    if name.endswith(".tmp"):
+                        path = self.sdir / name
+                        os.utime(path, (path.stat().st_mtime - 60,) * 2)
+                state.save(self.target, LAYOUT, {"final.md": entry()})
+                self.assertEqual(list(state.load(self.target, LAYOUT)), ["final.md"])
+                self.assertEqual(self.listing(), [self.file.name])  # the orphan was reaped
+
+    def test_a_kill_between_the_phases_of_an_update_converges(self):
+        state.save(self.target, LAYOUT, {"a.md": entry()})
+        with state.Store(self.target, LAYOUT) as store:
+            store.save(state.with_pending(store.load(), {"a.md": D2}, new={"n.md": dict(NEW, pending_sha256=D2)}))
+        # the process dies here: both digests are owned, the new file only for its intended content
+        got = state.load(self.target, LAYOUT)
+        self.assertEqual(state.verdict(got, "a.md", D1), "owned")
+        self.assertEqual(state.verdict(got, "a.md", D2), "owned")
+        self.assertEqual(state.verdict(got, "n.md", D2), "owned")
+        self.assertEqual(state.verdict(got, "n.md", D1), "unverified")
+        with state.Store(self.target, LAYOUT) as store:  # the re-run writes only a.md this time
+            store.save(state.settle(store.load(), {"a.md"}))
+        done = state.load(self.target, LAYOUT)
+        self.assertEqual(sorted(done), ["a.md"])
+        self.assertEqual(done["a.md"]["body_sha256"], D2)
+
+
+NEW = {"kind": "file", "release": "0.5.0", "source": "public"}
+
+
 # Each row weakens one guard in a scratch copy of scripts/state.py and runs ONE named test against the copy in a
 # subprocess (DOIA_STATE_SCRIPTS). The test must go red (or hang past the timeout, which also counts as red). A row
 # whose "old" text is no longer in state.py fails loudly, so the table cannot go stale unnoticed.
@@ -958,8 +1441,8 @@ MUTANTS = [
     ("target field", 'or doc["target"] != real', "or False", "StrictParse.test_target_field_not_matching_the_key"),
     (
         "file owner",
-        '        if st.st_uid != _euid():\n            raise StateError(f"state file',
-        '        if False:\n            raise StateError(f"state file',
+        '        if st.st_uid != _euid():\n            raise StateCorrupt(f"state file',
+        '        if False:\n            raise StateCorrupt(f"state file',
         "Confinement.test_file_owned_by_another_user",
     ),
     ("file mode", "        if stat.S_IMODE(st.st_mode) != 0o600:", "        if False:", "Confinement.test_file_modes"),
@@ -1019,8 +1502,8 @@ MUTANTS = [
     ),
     (
         "crash cleanup",
-        "            with contextlib.suppress(OSError):\n                os.unlink(tmp",
-        "            with contextlib.suppress(OSError):\n                pass #",
+        "            os.unlink(tmp, dir_fd=self._dfd)",
+        "            pass",
         "WriteSafety.test_crash_before_rename_keeps_old_file_and_leaves_no_temp",
     ),
     (
@@ -1066,6 +1549,135 @@ MUTANTS = [
         "if False",
         "TwoPhase.test_pending_only_entry_needs_a_pending_digest",
     ),
+    (
+        "write errors typed",
+        "        except OSError as exc:\n            self._discard(tmp)",
+        "        except ZeroDivisionError as exc:\n            self._discard(tmp)",
+        "Errors.test_write_failures_each_step",
+    ),
+    (
+        "read errors typed",
+        '    except OSError as exc:\n        raise StateError(f"state file {name}: read failed',
+        '    except ZeroDivisionError as exc:\n        raise StateError(f"state file {name}: read failed',
+        "Errors.test_read_failures",
+    ),
+    (
+        "sweep pattern",
+        "        if not pattern.fullmatch(name):",
+        "        if False:",
+        "Sweep.test_nothing_else_is_ever_touched",
+    ),
+    (
+        "sweep no-follow",
+        "follow_symlinks=False)\n            if not stat.S_ISREG",
+        "follow_symlinks=True)\n            if not stat.S_ISREG",
+        "Sweep.test_nothing_else_is_ever_touched",
+    ),
+    (
+        "sweep regular only",
+        "if not stat.S_ISREG(st.st_mode) or st.st_uid != _euid() or now",
+        "if False or st.st_uid != _euid() or now",
+        "Sweep.test_nothing_else_is_ever_touched",
+    ),
+    ("sweep age", " or now - st.st_mtime < MIN_TMP_AGE:", " or False:", "Sweep.test_a_fresh_temp_file_is_left_alone"),
+    (
+        "sweep owner",
+        "st.st_uid != _euid() or now - st.st_mtime",
+        "False or now - st.st_mtime",
+        "Sweep.test_a_temp_file_owned_by_someone_else_is_left_alone",
+    ),
+    (
+        "sweep is called",
+        "        _sweep(self._dfd, self.stem)\n",
+        "        pass\n",
+        "Sweep.test_old_leftover_temp_files_are_removed_by_the_next_save",
+    ),
+    (
+        "sweep called (kills)",
+        "        _sweep(self._dfd, self.stem)\n",
+        "        pass\n",
+        "Processes.test_a_kill_at_any_step_leaves_old_or_new_state_and_the_next_run_converges",
+    ),
+    (
+        "closed store",
+        '        if self._dfd is None:\n            raise StateError("the state store is closed")',
+        '        if False:\n            raise StateError("the state store is closed")',
+        "ClosedStore.test_every_method_refuses_after_close",
+    ),
+    (
+        "contains",
+        '            if _inside(base, cand):\n                raise StateError(f"the state directory contains',
+        '            if False:\n                raise StateError(f"the state directory contains',
+        "Containment.test_state_directory_that_contains_the_target",
+    ),
+    (
+        "contains repo",
+        "            if _inside(base, cand):\n",
+        "            if _inside(base, cand) and label == 'the target':\n",
+        "Containment.test_state_directory_that_contains_this_repository",
+    ),
+    (
+        "StateLocked",
+        'raise StateLocked("another install is running")',
+        'raise StateError("another install is running")',
+        "Api.test_locked_is_distinguishable_from_corrupt",
+    ),
+    (
+        "StateCorrupt",
+        "raise StateCorrupt(str(exc)) from None",
+        "raise StateError(str(exc)) from None",
+        "Api.test_locked_is_distinguishable_from_corrupt",
+    ),
+    (
+        "lock_held shared nonblocking",
+        "fcntl.LOCK_SH | fcntl.LOCK_NB",
+        "fcntl.LOCK_SH",
+        "Api.test_lock_held_probe_sees_a_holder_and_lets_go",
+    ),
+    (
+        "lock_held holder",
+        "            except BlockingIOError:\n                return True",
+        "            except BlockingIOError:\n                return False",
+        "Api.test_lock_held_probe_sees_a_holder_and_lets_go",
+    ),
+    (
+        "verdict total",
+        "    if type(entry) is not dict or type(digest) is not str or not _DIGEST.fullmatch(digest):",
+        "    if False:",
+        "Api.test_verdict",
+    ),
+    (
+        "verdict entries",
+        "    if not isinstance(entries, dict) or type(rel) is not str:",
+        "    if False:",
+        "Api.test_verdict",
+    ),
+    (
+        "with_entry validates",
+        "    out[rel] = dict(entry) if type(entry) is dict else entry\n    return check_entries(out)",
+        "    out[rel] = entry\n    return out",
+        "Api.test_with_entry_and_without_entry_copy_and_validate",
+    ),
+    (
+        "without_entry unknown",
+        '    if type(rel) is not str or rel not in out:\n        raise StateError(f"no entry to remove',
+        '    if False:\n        raise StateError(f"no entry to remove',
+        "Api.test_with_entry_and_without_entry_copy_and_validate",
+    ),
+    (
+        "body_sha256 type",
+        "    if not isinstance(data, (bytes, bytearray, memoryview)):",
+        "    if False:",
+        "Api.test_body_sha256",
+    ),
+    ("load_or_empty", "    return {} if got is None else got", "    return got", "Api.test_load_or_empty"),
+    ("state_path", '    return state_dir() / (stem + ".json")', "    return state_dir() / stem", "Api.test_state_path"),
+    (
+        "race lock",
+        "fcntl.LOCK_EX | fcntl.LOCK_NB",
+        "fcntl.LOCK_SH | fcntl.LOCK_NB",
+        "Processes.test_a_held_lock_makes_every_other_process_lose_with_statelocked",
+    ),
 ]
 
 
@@ -1086,7 +1698,7 @@ class GuardTable(unittest.TestCase):
         return r.returncode == 0
 
     def test_every_listed_guard_goes_red_when_weakened_and_green_when_intact(self):
-        self.assertGreaterEqual(len(MUTANTS), 28)
+        self.assertGreaterEqual(len(MUTANTS), 50)
         source = (ROOT / "scripts" / "state.py").read_text()
         tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
         self.addCleanup(shutil.rmtree, tmp, True)

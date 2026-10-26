@@ -33,6 +33,7 @@ DOIA_STATE_DIR) is the user's own choice and is resolved once with realpath, so 
 macOS /var link works. Everything below the resolved base is walked with O_NOFOLLOW through directory descriptors and
 no link is ever followed there. The base must be owned by the user or root and not group or world writable unless
 sticky; the state directory must be owned by the user and not group or world writable. Created directories are 0700.
+Directories above the base are only resolved, not checked: the rule covers the base and the state directory.
 
 Reading is strict and fails closed. Absent, null or mistyped is an error; there is no fallback to anything weaker. A
 missing file is the one non-error "no" answer: load returns None (every marked file is then merely unverified).
@@ -45,6 +46,17 @@ Writes are atomic: a temporary 0600 file created with O_EXCL through the directo
 of the directory, all under an exclusive non-blocking flock so two installers cannot interleave. If the directory
 fsync fails after the rename, save raises StateError saying the state may already have been replaced: re-load to learn
 the truth.
+
+Hand-off notes for the installer (#40). Use `load_or_empty` or `load` (None = no file) and `verdict(entries, rel,
+digest)` with `body_sha256(bytes)` for every ownership decision; `accepts` is only the low-level predicate. Catch
+StateLocked and StateCorrupt to tell "another install is running" from "the file is not trustworthy" (a dry run or
+`--list-managed` reports either read-only; a write run refuses both, `--force-edited` included); any other StateError
+is an environment or location problem and refuses too. `lock_held` is the read-only probe and `state_path` the value
+for a `state:` line. `with_entry` and `without_entry` are the copy-and-validate edits for adopt and drop. Hold one
+`Store` across both phases of an update. A dry run must call only load, load_or_empty, lock_held and state_path (none
+creates the directory or the lock file). The state directory may not be, be inside, or contain the target or this
+repository, so a `--layout user` target that is the home directory cannot use the default location under it; set
+DOIA_STATE_DIR to a directory elsewhere (to be decided in #40). A raw OSError never escapes this module.
 
 Two-phase update. Phase 1: with_pending records the digest each file is about to get (an existing path gets a
 pending_sha256 next to its body_sha256; a NEW path is added with only pending_sha256, via `new=`). Save. Write the
@@ -62,6 +74,7 @@ import json
 import os
 import re
 import stat
+import time
 import unicodedata
 import uuid
 from pathlib import Path
@@ -71,6 +84,7 @@ MAX_BYTES = 1024 * 1024
 MAX_ENTRIES = 4096
 MAX_DEPTH = 4
 MAX_PATH_BYTES = 1024
+MIN_TMP_AGE = 5.0  # seconds before an orphaned temporary file may be reaped
 APP_DIR = "department-of-internal-arguments"
 
 KINDS = ("file", "lead")
@@ -94,7 +108,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StateError(ValueError):
-    """Anything about the state store that is not fine. The caller refuses the whole write run."""
+    """Anything about the state store that is not fine. The caller refuses the whole write run. Raw OSError never
+    escapes this module: every I/O failure is reported as a StateError with escaped text."""
+
+
+class StateLocked(StateError):
+    """Another install holds the lock. A dry run or a listing may carry on read-only; a write run refuses."""
+
+
+class StateCorrupt(StateError):
+    """The state FILE is not trustworthy: bad content, wrong owner, mode, type, links or size, or it belongs to another
+    target or layout. A write run refuses; recovery is deleting the file (everything then reads as unverified)."""
 
 
 def _shown(text, limit=80):
@@ -144,13 +168,15 @@ def _inside(path, parent):
 
 
 def check_location(target, directory=None):
-    """The state directory must not be inside the target or inside this repository (checked on resolved paths)."""
+    """The state directory must not be, be inside, or contain the target or this repository (resolved and literal)."""
     directory = state_dir() if directory is None else directory
     real = Path(os.path.realpath(directory))
     for label, base in (("the target", Path(os.path.realpath(target))), ("this repository", _REPO_ROOT.resolve())):
         for cand in (real, directory):
             if _inside(cand, base):
                 raise StateError(f"the state directory is inside {label}; refused")
+            if _inside(base, cand):
+                raise StateError(f"the state directory contains {label}; refused")
 
 
 def state_key(target, layout):
@@ -162,6 +188,19 @@ def state_key(target, layout):
         raise StateError("target path must be valid UTF-8 (the state file could not hold it)")
     stem = hashlib.sha256(f"{real}\0{layout}".encode()).hexdigest()[:32]
     return real, layout, stem
+
+
+def state_path(target, layout):
+    """The state file path for (target, layout), for display (a `state:` line). Nothing is created or opened."""
+    _, _, stem = state_key(target, layout)
+    return state_dir() / (stem + ".json")
+
+
+def body_sha256(data):
+    """The one definition of a body digest, for the installer and the store alike: lowercase hex sha256 of the bytes."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise StateError("body_sha256 takes bytes")
+    return hashlib.sha256(data).hexdigest()
 
 
 # --- descriptor walk -------------------------------------------------------------------------------------------
@@ -369,7 +408,16 @@ def _no_constant(name):
 
 
 def parse(data, real, layout):
-    """Strictly parse state bytes for (real, layout); returns the entries mapping or raises StateError."""
+    """Strictly parse state bytes for (real, layout); returns the entries mapping or raises StateCorrupt."""
+    try:
+        return _parse(data, real, layout)
+    except StateCorrupt:
+        raise
+    except StateError as exc:
+        raise StateCorrupt(str(exc)) from None
+
+
+def _parse(data, real, layout):
     if len(data) > MAX_BYTES:
         raise StateError("state file over the size limit")
     try:
@@ -414,19 +462,19 @@ def _read_file(dfd, name, real, layout):
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise StateError(f"state file {name}: cannot open as a plain file ({exc.strerror})") from None
+        raise StateCorrupt(f"state file {name}: cannot open as a plain file ({_shown(exc.strerror)})") from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise StateError(f"state file {name}: not a regular file")
+            raise StateCorrupt(f"state file {name}: not a regular file")
         if st.st_uid != _euid():
-            raise StateError(f"state file {name}: not owned by the current user")
+            raise StateCorrupt(f"state file {name}: not owned by the current user")
         if stat.S_IMODE(st.st_mode) != 0o600:
-            raise StateError(f"state file {name}: mode must be 0600")
+            raise StateCorrupt(f"state file {name}: mode must be 0600")
         if st.st_nlink != 1:
-            raise StateError(f"state file {name}: has more than one link")
+            raise StateCorrupt(f"state file {name}: has more than one link")
         if st.st_size > MAX_BYTES:
-            raise StateError(f"state file {name}: over the size limit")
+            raise StateCorrupt(f"state file {name}: over the size limit")
         chunks, total = [], 0
         while True:
             chunk = os.read(fd, 65536)
@@ -434,8 +482,10 @@ def _read_file(dfd, name, real, layout):
                 break
             total += len(chunk)
             if total > MAX_BYTES:
-                raise StateError(f"state file {name}: over the size limit")
+                raise StateCorrupt(f"state file {name}: over the size limit")
             chunks.append(chunk)
+    except OSError as exc:
+        raise StateError(f"state file {name}: read failed ({_shown(exc.strerror or exc)})") from None
     finally:
         os.close(fd)
     return parse(b"".join(chunks), real, layout)
@@ -451,6 +501,45 @@ def load(target, layout):
         return None
     try:
         return _read_file(dfd, stem + ".json", real, layout)
+    finally:
+        os.close(dfd)
+
+
+def load_or_empty(target, layout):
+    """Like load, but a missing file is {} (corrupt still raises); for callers that treat no record as no entries."""
+    got = load(target, layout)
+    return {} if got is None else got
+
+
+def lock_held(target, layout):
+    """True if another process holds the write lock. Read-only probe: creates no directory and no lock file, holds
+    nothing afterwards (it takes a shared lock for an instant), so a dry run or a listing can use it."""
+    _, _, stem = state_key(target, layout)
+    directory = state_dir()
+    check_location(target, directory)
+    dfd = _open_state_dir(directory, create=False)
+    if dfd is None:
+        return False
+    try:
+        try:
+            lfd = os.open(stem + ".lock", _READ_FLAGS, dir_fd=dfd)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StateError(f"state lock: cannot open as a plain file ({_shown(exc.strerror)})") from None
+        try:
+            if not stat.S_ISREG(os.fstat(lfd).st_mode):
+                raise StateError("state lock: not a regular file")
+            try:
+                fcntl.flock(lfd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(lfd, fcntl.LOCK_UN)
+            return False
+        except OSError as exc:
+            raise StateError(f"state lock: probe failed ({_shown(exc.strerror or exc)})") from None
+        finally:
+            os.close(lfd)
     finally:
         os.close(dfd)
 
@@ -477,7 +566,7 @@ class Store:
         try:
             lfd = os.open(self.stem + ".lock", _LOCK_FLAGS, 0o600, dir_fd=self._dfd)
         except OSError as exc:
-            raise StateError(f"state lock: cannot open ({exc.strerror})") from None
+            raise StateError(f"state lock: cannot open ({_shown(exc.strerror)})") from None
         try:
             st = os.fstat(lfd)
             if not stat.S_ISREG(st.st_mode) or st.st_uid != _euid():
@@ -485,8 +574,11 @@ class Store:
             os.fchmod(lfd, 0o600)
             try:
                 fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                raise StateError("another install is running") from None
+            except BlockingIOError:
+                raise StateLocked("another install is running") from None
+        except OSError as exc:
+            os.close(lfd)
+            raise StateError(f"state lock: {_shown(exc.strerror or exc)}") from None
         except BaseException:
             os.close(lfd)
             raise
@@ -499,6 +591,10 @@ class Store:
                 os.close(fd)
                 setattr(self, attr, None)
 
+    def _require_open(self):
+        if self._dfd is None:
+            raise StateError("the state store is closed")
+
     def __enter__(self):
         return self
 
@@ -506,16 +602,24 @@ class Store:
         self.close()
 
     def load(self):
+        self._require_open()
         return _read_file(self._dfd, self.stem + ".json", self.real, self.layout)
 
+    def _discard(self, tmp):
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=self._dfd)
+
     def save(self, entries):
-        """Replace the state atomically. An existing file that does not read cleanly refuses the write."""
+        """Replace the state atomically. An existing file that does not read cleanly refuses the write. Orphaned
+        temporary files of this state (a killed earlier run) are reaped first."""
+        self._require_open()
         data = serialize(self.real, self.layout, entries)
         self.load()  # tampered or corrupt state refuses the write; recovery is deleting the file
+        _sweep(self._dfd, self.stem)
         name = self.stem + ".json"
         tmp = f".{self.stem}.{uuid.uuid4().hex}.tmp"
-        fd = os.open(tmp, _TMP_FLAGS, 0o600, dir_fd=self._dfd)
         try:
+            fd = os.open(tmp, _TMP_FLAGS, 0o600, dir_fd=self._dfd)
             try:
                 os.fchmod(fd, 0o600)
                 view = memoryview(data)
@@ -525,9 +629,11 @@ class Store:
             finally:
                 os.close(fd)
             os.rename(tmp, name, src_dir_fd=self._dfd, dst_dir_fd=self._dfd)
+        except OSError as exc:
+            self._discard(tmp)
+            raise StateError(f"cannot write the state ({_shown(exc.strerror or exc)})") from None
         except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp, dir_fd=self._dfd)
+            self._discard(tmp)
             raise
         try:
             _fsync_dir(self._dfd)
@@ -536,6 +642,27 @@ class Store:
                 "state directory fsync failed after the rename: the state may already have been replaced; "
                 "re-load to learn which"
             ) from None
+
+
+def _sweep(dfd, stem):
+    """Remove orphaned `.<stem>.<32 hex>.tmp` files: regular files owned by the current user, older than
+    MIN_TMP_AGE. Exact name pattern only, nothing followed, every failure ignored. Call with the lock held."""
+    pattern = re.compile(rf"\.{re.escape(stem)}\.[0-9a-f]{{32}}\.tmp")
+    try:
+        names = os.listdir(dfd)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        if not pattern.fullmatch(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != _euid() or now - st.st_mtime < MIN_TMP_AGE:
+                continue
+            os.unlink(name, dir_fd=dfd)
+        except OSError:
+            continue
 
 
 def save(target, layout, entries):
@@ -598,3 +725,32 @@ def accepts(entry, digest):
     length or case; an absent digest is never a candidate."""
     stored = [d for d in (entry.get("body_sha256"), entry.get("pending_sha256")) if d is not None]
     return any(d == digest for d in stored)
+
+
+def with_entry(entries, rel, entry):
+    """Copy of entries with `rel` set to `entry` (added or replaced), validated. For adopt and record-after-write."""
+    if type(rel) is not str:
+        raise StateError("with_entry: path must be text")
+    out = check_entries(entries)
+    out[rel] = dict(entry) if type(entry) is dict else entry
+    return check_entries(out)
+
+
+def without_entry(entries, rel):
+    """Copy of entries without `rel`; an unknown path is an error (no silent no-op)."""
+    out = check_entries(entries)
+    if type(rel) is not str or rel not in out:
+        raise StateError(f"no entry to remove: {_shown(rel)}")
+    del out[rel]
+    return out
+
+
+def verdict(entries, rel, digest):
+    """'owned' if the entry for `rel` accepts `digest`, else 'unverified'. Total: a missing state file (None), a
+    missing entry or a missing, mistyped or malformed digest is 'unverified', never an exception."""
+    if not isinstance(entries, dict) or type(rel) is not str:
+        return "unverified"
+    entry = entries.get(rel)
+    if type(entry) is not dict or type(digest) is not str or not _DIGEST.fullmatch(digest):
+        return "unverified"
+    return "owned" if accepts(entry, digest) else "unverified"
