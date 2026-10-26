@@ -1,4 +1,4 @@
-"""Summarise a pilot log (one JSON object per line, schema in evals/log-schema.md) as a Markdown table.
+"""Summarize a pilot log (one JSON object per line, schema in evals/log-schema.md) as a Markdown table.
 
     python3 scripts/summarize_log.py evals/example-log.jsonl
 
@@ -32,10 +32,26 @@ REQUIRED = (
 )
 OPTIONAL = ("notes", "local_model", "local_discrepancies")
 MAX_MODEL = 64
-# name:size with an optional tag suffix such as a quantization (gemma4:12b, qwen3.5:4b, llama3.2:1b-instruct-q4_K_M).
-# fullmatch, ASCII only: no surrounding whitespace, newline, control or zero-width character gets through.
-MODEL_RE = re.compile(r"[A-Za-z0-9._-]+:[0-9]+(?:\.[0-9]+)?[bB](?:-[A-Za-z0-9_.]+)*", re.ASCII)
 MAX_LINE = 4096
+# An Ollama tag: [namespace/]name:tag, ASCII only. The tag must name a size (12b, 0.6b, 270m, e4b, 8x7b, optionally
+# followed by a quantization such as -q4_K_M) or be exactly "latest". fullmatch, so no surrounding whitespace, newline,
+# control or zero-width character gets through; [0-9] and re.ASCII keep fullwidth digits and lookalikes out.
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+", re.ASCII)
+SIZE_RE = re.compile(r"(?:e|[0-9]+x)?[0-9]+(?:\.[0-9]+)?[bBmM]", re.ASCII)
+# Words that name no model. A single-character name is also refused; nothing short of a registry can say more.
+NOT_A_MODEL = frozenset({"ollama", "local", "model", "models", "inherit", "latest", "default"})
+
+
+def valid_model(model):
+    """True for an exact Ollama tag: a plausible name plus a size tag or an explicit latest."""
+    if not (isinstance(model, str) and len(model) <= MAX_MODEL and MODEL_RE.fullmatch(model)):
+        return False
+    name, tag = model.rsplit(":", 1)
+    if len(name) < 2 or not any(c.isalpha() for c in name) or "//" in name:
+        return False
+    if name.lower() in NOT_A_MODEL or name.startswith("/") or name.endswith("/"):
+        return False
+    return tag == "latest" or any(SIZE_RE.fullmatch(part) for part in tag.split("-"))
 
 
 def parse_line(line, n):
@@ -87,8 +103,8 @@ def parse_line(line, n):
         raise ValueError(f"line {n}: local_model and local_discrepancies come as a pair")
     if local[0] in row:
         model, count = row["local_model"], row["local_discrepancies"]
-        if not (isinstance(model, str) and len(model) <= MAX_MODEL and MODEL_RE.fullmatch(model)):
-            raise ValueError(f"line {n}: local_model must be an exact name:size tag such as gemma4:12b")
+        if not valid_model(model):
+            raise ValueError(f"line {n}: local_model must be an exact Ollama tag such as gemma4:12b or llama3.2:latest")
         if not (isinstance(count, int) and not isinstance(count, bool) and count >= 0):
             raise ValueError(f"line {n}: local_discrepancies must be a non-negative int")
     return row

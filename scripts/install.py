@@ -89,7 +89,7 @@ def is_generated(path):
 
 
 def assert_outside_repo(path, root=ROOT):
-    """Defence in depth: nothing this installer writes may land inside the repository (overlay content included)."""
+    """Defense in depth: nothing this installer writes may land inside the repository (overlay content included)."""
     resolved = Path(os.path.realpath(path))
     if resolved.is_relative_to(Path(os.path.realpath(root))):
         raise ValueError(f"destination inside this repository refused: {Path(path).name}")
