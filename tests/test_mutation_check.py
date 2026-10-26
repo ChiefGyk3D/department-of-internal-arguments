@@ -401,10 +401,10 @@ class Confinement(Base):
         repo, _, c2 = self.make_repo()
         srv = socket.socket()
         self.addCleanup(srv.close)
-        srv.bind(("127.0.0.1", 0))
+        srv.bind(("localhost", 0))
         srv.listen(1)
         port = srv.getsockname()[1]
-        cmd = f"python3 -c \"import socket; socket.create_connection(('127.0.0.1', {port}), 2)\""
+        cmd = f"python3 -c \"import socket; socket.create_connection(('localhost', {port}), 2)\""
         code, r = self.run_tool(repo, c2, c2, test=cmd)
         probe = (shutil.which("unshare"), "--net", "--map-current-user", "--", "true")  # independent of the tool's own
         if probe[0] and subprocess.run(probe, capture_output=True).returncode == 0:
