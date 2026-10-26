@@ -15,6 +15,8 @@ One file per target and layout: <first 32 hex of sha256(realpath(target) NUL lay
 
 body_sha256 and pending_sha256 are each optional but an entry carries at least one. A target path must be valid UTF-8
 (a path the JSON file cannot hold is refused by load and save alike, so save never writes a file load cannot read).
+Public functions never leak a raw exception: mutators raise StateError on any hostile argument, and accepts() and
+verdict() are total (they accept only plain dict entries and plain str digests and answer False or unverified).
 
 Threat model. The defended case: a marker-valid file that arrived by clone, synced dotfiles, a copy or a lower
 privileged writer is not treated as owned, because nothing it ships can add an entry here. Not defended, by design:
@@ -62,9 +64,20 @@ Two-phase update. Phase 1: with_pending records the digest each file is about to
 pending_sha256 next to its body_sha256; a NEW path is added with only pending_sha256, via `new=`). Save. Write the
 files. Phase 2: settle(entries, written) with the set of relative paths actually written, then save. Settling promotes
 the pending digest of written paths, keeps the old digest of paths not written, removes a new path that was not written,
-and clears every pending field. accepts() takes the recorded digest or the pending one, and only those: a crash after
-phase 1 leaves a file with exactly the intended content owned, and nothing else, including a file that was never
-written for a new path.
+and clears every pending field.
+
+Crash recovery. accepts() and verdict() honor a pending digest only NEXT TO a recorded body digest: that file was
+already ours and the pending bytes are the installer's own next release content. An entry with no body digest (a NEW
+path recorded in phase 1) is never owned, whatever the digest, because a digest proves equal content and not who wrote
+the file, and anyone who controls the target can create the planned bytes. A crashed install therefore leaves its new
+paths `unverified`; the files it did write are recovered by the explicit adopt step of the installer (#42), after the
+user has looked at the preview; a re-run that writes the path promotes it through settle().
+
+Limits, stated so nobody relies on more than this gives. flock is advisory and its behavior on network filesystems
+(NFS and the like) is not guaranteed; keep the state directory on a local filesystem. The sweep of orphaned temporary
+files checks a name with lstat and then unlinks it, so a same-user process racing it can swap the file in between: a
+same-user attacker is out of scope. lock_held takes a shared lock for an instant, so a same-user process probing in a
+loop could starve a writer; that is also out of scope. Neither flock nor the sweep defends against root.
 """
 
 import contextlib
@@ -123,7 +136,10 @@ class StateCorrupt(StateError):
 
 def _shown(text, limit=80):
     """Echo-safe form of untrusted text: printable ASCII only, bounded."""
-    text = str(text)
+    try:
+        text = str(text)
+    except Exception:
+        text = "?"
     out = "".join(c if " " <= c <= "~" else "?" for c in text[:limit])
     return out + ("..." if len(text) > limit else "")
 
@@ -167,11 +183,25 @@ def _inside(path, parent):
     return path == parent or parent in path.parents
 
 
+def _real_path(target):
+    """realpath of a target given as str or os.PathLike; anything else, a NUL, or a failure is a StateError."""
+    try:
+        path = os.fspath(target)
+    except Exception:
+        raise StateError("the target must be a path") from None
+    if type(path) is not str:
+        raise StateError("the target must be a text path")
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        raise StateError("the target path cannot be resolved") from None
+
+
 def check_location(target, directory=None):
     """The state directory must not be, be inside, or contain the target or this repository (resolved and literal)."""
     directory = state_dir() if directory is None else directory
     real = Path(os.path.realpath(directory))
-    for label, base in (("the target", Path(os.path.realpath(target))), ("this repository", _REPO_ROOT.resolve())):
+    for label, base in (("the target", Path(_real_path(target))), ("this repository", _REPO_ROOT.resolve())):
         for cand in (real, directory):
             if _inside(cand, base):
                 raise StateError(f"the state directory is inside {label}; refused")
@@ -181,9 +211,9 @@ def check_location(target, directory=None):
 
 def state_key(target, layout):
     """(realpath of target, layout, 32-hex file stem)."""
-    if not isinstance(layout, str) or not _LAYOUT.fullmatch(layout):
+    if type(layout) is not str or not _LAYOUT.fullmatch(layout):
         raise StateError(f"invalid layout: {_shown(layout)}")
-    real = os.path.realpath(target)
+    real = _real_path(target)
     if not _text_ok(real):
         raise StateError("target path must be valid UTF-8 (the state file could not hold it)")
     stem = hashlib.sha256(f"{real}\0{layout}".encode()).hexdigest()[:32]
@@ -201,6 +231,23 @@ def body_sha256(data):
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise StateError("body_sha256 takes bytes")
     return hashlib.sha256(data).hexdigest()
+
+
+def _check_lock_file(fd, created):
+    """The lock file gets the state file's discipline: a regular file, owned by the user, a single link, mode 0600.
+    A file this call just created is set to 0600 (a tight umask may have narrowed it); an existing one is validated
+    first and never repaired, so a hostile or damaged lock file refuses the run."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise StateCorrupt("state lock: not a regular file")
+    if st.st_uid != _euid():
+        raise StateCorrupt("state lock: not owned by the current user")
+    if st.st_nlink != 1:
+        raise StateCorrupt("state lock: has more than one link")
+    if created:
+        os.fchmod(fd, 0o600)
+    elif stat.S_IMODE(st.st_mode) != 0o600:
+        raise StateCorrupt("state lock: mode must be 0600")
 
 
 # --- descriptor walk -------------------------------------------------------------------------------------------
@@ -320,7 +367,7 @@ def _text_ok(s):
 
 def check_rel_path(rel):
     """A relative, normalized path with no link-like or control content."""
-    if not _text_ok(rel) or not rel:
+    if type(rel) is not str or not _text_ok(rel) or not rel:
         raise StateError("invalid path: empty or not text")
     if len(rel.encode("utf-8")) > MAX_PATH_BYTES:
         raise StateError(f"invalid path (too long): {_shown(rel)}")
@@ -528,8 +575,7 @@ def lock_held(target, layout):
         except OSError as exc:
             raise StateError(f"state lock: cannot open as a plain file ({_shown(exc.strerror)})") from None
         try:
-            if not stat.S_ISREG(os.fstat(lfd).st_mode):
-                raise StateError("state lock: not a regular file")
+            _check_lock_file(lfd, created=False)
             try:
                 fcntl.flock(lfd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -562,16 +608,26 @@ class Store:
             self.close()
             raise
 
+    def _open_lock(self, name):
+        """(descriptor, created): create the lock file exclusively, else open the existing one without following it."""
+        for _ in range(3):
+            try:
+                return os.open(name, _LOCK_FLAGS | os.O_EXCL, 0o600, dir_fd=self._dfd), True
+            except FileExistsError:
+                pass
+            try:
+                return os.open(name, _READ_FLAGS, dir_fd=self._dfd), False
+            except FileNotFoundError:
+                continue  # removed between the two calls: try again
+        raise StateError("state lock: the lock file keeps vanishing")
+
     def _lock(self):
         try:
-            lfd = os.open(self.stem + ".lock", _LOCK_FLAGS, 0o600, dir_fd=self._dfd)
+            lfd, created = self._open_lock(self.stem + ".lock")
         except OSError as exc:
             raise StateError(f"state lock: cannot open ({_shown(exc.strerror)})") from None
         try:
-            st = os.fstat(lfd)
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != _euid():
-                raise StateError("state lock: not a regular file owned by the current user")
-            os.fchmod(lfd, 0o600)
+            _check_lock_file(lfd, created)
             try:
                 fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -684,13 +740,17 @@ def with_pending(entries, pending, new=None):
     WITHOUT a body digest, so after a crash it reads as owned only for exactly that content, and settle removes it
     if the file was never written."""
     out = check_entries(entries)
+    if type(pending) is not dict:
+        raise StateError("with_pending: pending must be a plain dict of path to digest")
+    if new is not None and type(new) is not dict:
+        raise StateError("with_pending: new must be a plain dict or None")
     for rel, digest in pending.items():
-        if rel not in out:
+        if type(rel) is not str or rel not in out:
             raise StateError(f"no entry to update: {_shown(rel)}")
         out[rel]["pending_sha256"] = digest
     for rel, spec in (new or {}).items():
-        if rel in out:
-            raise StateError(f"new entry already exists: {_shown(rel)}")
+        if type(rel) is not str or rel in out:
+            raise StateError(f"new entry is not a fresh path: {_shown(rel)}")
         if type(spec) is not dict or set(spec) != {"kind", "release", "source", "pending_sha256"}:
             raise StateError(f"new entry {_shown(rel)}: needs exactly kind, release, source and pending_sha256")
         out[rel] = dict(spec)
@@ -704,9 +764,14 @@ def settle(entries, written):
     an entry that exists only as a pending new path and was not written is removed; every pending field is cleared
     (including stale ones). A path in `written` that has no entry is an error."""
     out = check_entries(entries)
+    if type(written) not in (set, frozenset, list, tuple):
+        raise StateError("settle: written must be a set (or list or tuple) of paths")
+    for rel in written:
+        if type(rel) is not str:
+            raise StateError(f"settle: unknown path {_shown(rel)}")
     written = set(written)
     for rel in written:
-        if type(rel) is not str or rel not in out:
+        if rel not in out:
             raise StateError(f"settle: unknown path {_shown(rel)}")
     for rel in list(out):
         entry = out[rel]
@@ -719,11 +784,22 @@ def settle(entries, written):
 
 
 def accepts(entry, digest):
-    """True only if digest is exactly the recorded body digest or the pending one (a crash left both acceptable).
+    """True only if digest is exactly the recorded body digest, or the pending one NEXT TO a recorded body digest.
 
-    Anything that is not one of the entry's stored digests is False, including None, empty, bytes, numbers and wrong
-    length or case; an absent digest is never a candidate."""
-    stored = [d for d in (entry.get("body_sha256"), entry.get("pending_sha256")) if d is not None]
+    Total: any argument that is not a plain dict entry and a plain str digest is False. An entry with no body_sha256
+    (a pending-only entry, a path the installer has not yet been seen to write) is NEVER owned, whatever the digest:
+    a digest proves the content is equal, not who wrote the file, and anyone who controls the target can create the
+    planned bytes. For a path that already has a body digest the file was already ours, and the pending bytes are the
+    installer's own next release content, so a crash after phase 1 still reads as owned there."""
+    if type(entry) is not dict or type(digest) is not str:
+        return False
+    body = entry.get("body_sha256")
+    if type(body) is not str:
+        return False  # pending-only: not owned until settle() promotes it because phase 2 wrote that exact path
+    stored = [body]
+    pending = entry.get("pending_sha256")
+    if type(pending) is str:
+        stored.append(pending)
     return any(d == digest for d in stored)
 
 
@@ -748,9 +824,6 @@ def without_entry(entries, rel):
 def verdict(entries, rel, digest):
     """'owned' if the entry for `rel` accepts `digest`, else 'unverified'. Total: a missing state file (None), a
     missing entry or a missing, mistyped or malformed digest is 'unverified', never an exception."""
-    if not isinstance(entries, dict) or type(rel) is not str:
+    if type(entries) is not dict or type(rel) is not str:
         return "unverified"
-    entry = entries.get(rel)
-    if type(entry) is not dict or type(digest) is not str or not _DIGEST.fullmatch(digest):
-        return "unverified"
-    return "owned" if accepts(entry, digest) else "unverified"
+    return "owned" if accepts(entries.get(rel), digest) else "unverified"  # accepts() is total

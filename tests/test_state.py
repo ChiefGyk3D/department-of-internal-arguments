@@ -42,7 +42,7 @@ class StateCase(unittest.TestCase):
     def setUp(self):
         # A regression that makes the lock or a read block must fail the test, not hang the suite.
         old = signal.signal(signal.SIGALRM, _hang)
-        signal.alarm(20)
+        signal.alarm(10)
         self.addCleanup(signal.signal, signal.SIGALRM, old)
         self.addCleanup(signal.alarm, 0)
         self.tmp = Path(tempfile.mkdtemp(prefix="doia-state-")).resolve()
@@ -807,11 +807,24 @@ class Accepts(StateCase):
         self.assertFalse(state.accepts(e, "c" * 64))
         self.assertFalse(state.accepts(entry(), D2))
 
-    def test_pending_only_entry_accepts_only_the_pending_digest(self):
+    def test_pending_only_entry_is_never_owned(self):
         e = {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2}
+        for digest in (D2, D1, "c" * 64, None, "", b"x"):
+            with self.subTest(digest=repr(digest)[:12]):
+                self.assertFalse(state.accepts(e, digest))
+                self.assertEqual(state.verdict({"new.md": e}, "new.md", digest), "unverified")
+
+    def test_exact_repro_of_the_review_finding(self):
+        entries = {"new.md": {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2}}
+        self.assertEqual(state.verdict(entries, "new.md", D2), "unverified")
+
+    def test_existing_owned_path_still_accepts_its_pending_digest(self):
+        # The file was already ours (it has a recorded body digest); the pending bytes are the installer's own next
+        # release content. This is the only case in which a pending digest is evidence.
+        e = entry(pending_sha256=D2)
+        self.assertTrue(state.accepts(e, D1))
         self.assertTrue(state.accepts(e, D2))
-        self.assertFalse(state.accepts(e, D1))
-        self.assertFalse(state.accepts(e, None))
+        self.assertEqual(state.verdict({"a.md": e}, "a.md", D2), "owned")
 
 
 class TwoPhase(StateCase):
@@ -865,10 +878,10 @@ class TwoPhase(StateCase):
         self.assertNotIn("n.md", base)
         state.save(self.target, LAYOUT, pend)  # phase 1 hits disk
         got = state.load(self.target, LAYOUT)  # ... and the process dies here
-        self.assertTrue(state.accepts(got["n.md"], D2))  # a file with exactly the intended content reads as owned
-        self.assertFalse(state.accepts(got["n.md"], D1))  # nothing else does
-        self.assertFalse(state.accepts(got["n.md"], None))
+        for digest in (D2, D1, None):  # a crashed install leaves a NEW path unverified, whatever the bytes are
+            self.assertFalse(state.accepts(got["n.md"], digest))
         self.assertEqual(state.settle(got, {"n.md"})["n.md"]["body_sha256"], D2)
+        self.assertEqual(state.verdict(state.settle(got, {"n.md"}), "n.md", D2), "owned")  # only once written
         self.assertNotIn("n.md", state.settle(got, set()))  # never written: no ownership claim remains
 
     def test_new_entry_rules(self):
@@ -914,8 +927,14 @@ target, step, tag = sys.argv[2], sys.argv[3], sys.argv[4]
 entries = {"f-" + tag + ".md": {"kind": "file", "release": "1", "source": "public", "body_sha256": tag * 64}}
 def die(*a, **k):
     os.kill(os.getpid(), signal.SIGKILL)
-if step == "kill-fsync":
-    state.os.fsync = die
+if step.startswith("kill-fsync-"):
+    nth, calls, real_fsync = int(step.rsplit("-", 1)[1]), [0], state.os.fsync
+    def counting(fd):
+        calls[0] += 1
+        if calls[0] == nth:
+            die()
+        return real_fsync(fd)
+    state.os.fsync = counting
 elif step == "kill-write":
     state.os.write = die
 elif step == "kill-rename":
@@ -1289,7 +1308,7 @@ class Api(StateCase):
         }
         self.assertEqual(state.verdict(e, "a.md", D1), "owned")
         self.assertEqual(state.verdict(e, "a.md", D2), "owned")
-        self.assertEqual(state.verdict(e, "n.md", D2), "owned")
+        self.assertEqual(state.verdict(e, "n.md", D2), "unverified")  # pending-only: never owned
         self.assertEqual(state.verdict(e, "n.md", D1), "unverified")
         self.assertEqual(state.verdict(e, "a.md", "c" * 64), "unverified")
         self.assertEqual(state.verdict(e, "missing.md", D1), "unverified")  # no KeyError by construction
@@ -1310,6 +1329,244 @@ class Api(StateCase):
         self.plant(b"not json")
         with self.assertRaises(state.StateCorrupt):
             state.load_or_empty(self.target, LAYOUT)
+
+
+class StrSub(str):
+    pass
+
+
+class EvilEq(str):
+    def __eq__(self, other):
+        return True
+
+    __hash__ = str.__hash__
+
+
+class DictSub(dict):
+    pass
+
+
+class ListSub(list):
+    pass
+
+
+class SetSub(set):
+    pass
+
+
+class HostileDict(dict):
+    def _boom(self, *a, **k):
+        raise RuntimeError("hostile dict touched")
+
+    get = __getitem__ = __iter__ = __contains__ = items = keys = values = __len__ = copy = _boom
+
+
+class HostileStr:
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+    __repr__ = __str__
+
+
+def other_user_inside(*names):
+    """A _euid replacement that reports a different user only when called from one of the named functions."""
+    real = os.geteuid()
+
+    def euid():
+        f = sys._getframe(1)
+        while f:
+            if f.f_code.co_name in names:
+                return real + 1
+            f = f.f_back
+        return real
+
+    return euid
+
+
+class Hostile(StateCase):
+    """Hostile input never leaks a raw exception: mutators raise StateError, predicates fail closed."""
+
+    def test_accepts_and_verdict_are_total(self):
+        entries_variants = [
+            None,
+            5,
+            "x",
+            [],
+            b"",
+            HostileDict(),
+            DictSub({"a.md": entry()}),
+            {"a.md": DictSub(entry())},
+            {"a.md": None},
+            {"a.md": []},
+            {"a.md": HostileDict()},
+            {"a.md": {"body_sha256": EvilEq(D1)}},
+        ]
+        rels = ["a.md", StrSub("a.md"), None, 5, b"a.md", ["a.md"], HostileStr()]
+        digests = [D1, EvilEq(D1), StrSub(D1), None, 5, b"x", [D1], HostileStr()]
+        for entries in entries_variants:
+            for rel in rels:
+                for digest in digests:
+                    with self.subTest(
+                        entries=type(entries).__name__, rel=type(rel).__name__, digest=type(digest).__name__
+                    ):
+                        self.assertEqual(state.verdict(entries, rel, digest), "unverified")
+        self.assertEqual(state.verdict({"a.md": entry()}, "a.md", D1), "owned")  # the positive control
+        for entry_value in (None, 5, "x", [], b"", HostileDict(), DictSub(entry()), {"body_sha256": EvilEq(D1)}):
+            for digest in digests:
+                with self.subTest(entry=type(entry_value).__name__, digest=type(digest).__name__):
+                    self.assertIs(state.accepts(entry_value, digest), False)
+
+    def test_accepts_does_not_trust_a_digest_object_with_its_own_equality(self):
+        self.assertIs(state.accepts(entry(), EvilEq("x")), False)
+        self.assertIs(state.accepts(entry(), StrSub(D1)), False)
+        self.assertEqual(state.verdict({"a.md": entry()}, "a.md", EvilEq(D1)), "unverified")
+
+    def test_verdict_does_not_touch_a_dict_subclass(self):
+        self.assertEqual(state.verdict(HostileDict(), "a.md", D1), "unverified")
+        self.assertEqual(state.verdict(DictSub({"a.md": entry()}), "a.md", D1), "unverified")
+
+    def test_mutators_raise_state_error_on_hostile_arguments(self):
+        calls = {
+            "with_pending(entries=None)": lambda: state.with_pending(None, {}),
+            "with_pending(list)": lambda: state.with_pending({}, []),
+            "with_pending(None)": lambda: state.with_pending({}, None),
+            "with_pending(DictSub)": lambda: state.with_pending({}, DictSub()),
+            "with_pending(Hostile)": lambda: state.with_pending({}, HostileDict()),
+            "with_pending(StrSub key)": lambda: state.with_pending({"a.md": entry()}, {StrSub("a.md"): D2}),
+            "with_pending(new=list)": lambda: state.with_pending({}, {}, new=[]),
+            "with_pending(new=DictSub)": lambda: state.with_pending({}, {}, new=DictSub()),
+            "with_pending(new=Hostile)": lambda: state.with_pending({}, {}, new=HostileDict()),
+            "with_pending(new spec Hostile)": lambda: state.with_pending({}, {}, new={"n.md": HostileDict()}),
+            "with_pending(new StrSub key)": lambda: state.with_pending(
+                {}, {}, new={StrSub("n"): dict(NEW, pending_sha256=D1)}
+            ),
+            "with_pending(Hostile entries)": lambda: state.with_pending(HostileDict(), {}),
+            "settle(list in list)": lambda: state.settle({}, [[]]),
+            "settle(None)": lambda: state.settle({}, None),
+            "settle(str)": lambda: state.settle({}, "abc"),
+            "settle(int)": lambda: state.settle({}, 5),
+            "settle(bytes)": lambda: state.settle({}, b"abc"),
+            "settle(dict)": lambda: state.settle({}, {"a.md": 1}),
+            "settle(generator)": lambda: state.settle({}, (x for x in ())),
+            "settle(StrSub member)": lambda: state.settle({"a.md": entry()}, {StrSub("a.md")}),
+            "settle(None member)": lambda: state.settle({}, {None}),
+            "settle(DictSub entries)": lambda: state.settle(DictSub(), set()),
+            "settle(Hostile entries)": lambda: state.settle(HostileDict(), set()),
+            "with_entry(StrSub rel)": lambda: state.with_entry({}, StrSub("a.md"), entry()),
+            "with_entry(Hostile entries)": lambda: state.with_entry(HostileDict(), "a.md", entry()),
+            "with_entry(DictSub entry)": lambda: state.with_entry({}, "a.md", DictSub(entry())),
+            "with_entry(Hostile entry)": lambda: state.with_entry({}, "a.md", HostileDict()),
+            "with_entry(None entry)": lambda: state.with_entry({}, "a.md", None),
+            "without_entry(Hostile)": lambda: state.without_entry(HostileDict(), "a.md"),
+            "without_entry(None rel)": lambda: state.without_entry({}, None),
+            "without_entry(HostileStr rel)": lambda: state.without_entry({}, HostileStr()),
+            "check_entries(DictSub)": lambda: state.check_entries(DictSub()),
+            "check_entries(StrSub key)": lambda: state.check_entries({StrSub("a.md"): entry()}),
+            "check_rel_path(HostileStr)": lambda: state.check_rel_path(HostileStr()),
+            "body_sha256(HostileStr)": lambda: state.body_sha256(HostileStr()),
+        }
+        for name, call in calls.items():
+            with self.subTest(name), self.assertRaises(state.StateError):
+                call()
+
+    def test_settle_rejects_hostile_containers_but_accepts_the_documented_ones(self):
+        base = state.with_pending({"a.md": entry()}, {"a.md": D2})
+        for ok in (set(), frozenset({"a.md"}), ["a.md"], ("a.md",), {"a.md"}):
+            with self.subTest(type(ok).__name__):
+                self.assertEqual(state.settle(base, ok)["a.md"]["body_sha256"], D2 if ok else D1)
+
+    def test_nul_and_non_text_targets_raise_state_error_not_value_error(self):
+        for target in ("x\0y", "/tmp/a\0", None, 5, b"/tmp", ["/tmp"], StrSub("/tmp"), HostileStr()):
+            with self.subTest(target=type(target).__name__):
+                for call in (
+                    lambda t=target: state.state_key(t, LAYOUT),
+                    lambda t=target: state.state_path(t, LAYOUT),
+                    lambda t=target: state.load(t, LAYOUT),
+                    lambda t=target: state.load_or_empty(t, LAYOUT),
+                    lambda t=target: state.save(t, LAYOUT, {}),
+                    lambda t=target: state.Store(t, LAYOUT),
+                    lambda t=target: state.lock_held(t, LAYOUT),
+                    lambda t=target: state.check_location(t),
+                ):
+                    with self.assertRaises(state.StateError):
+                        call()
+        self.assertFalse(self.sdir.exists())
+
+    def test_a_path_like_target_is_fine(self):
+        self.assertEqual(state.state_key(self.target, LAYOUT)[0], os.path.realpath(self.target))
+
+    def test_layout_must_be_a_plain_str(self):
+        for layout in (StrSub(LAYOUT), None, 5, b"project", HostileStr()):
+            with self.subTest(type(layout).__name__), self.assertRaises(state.StateError):
+                state.state_key(self.target, layout)
+
+
+class LockFile(StateCase):
+    """The lock file gets the state file's discipline: owner, type, link count and mode, checked before any fix."""
+
+    def lock_path(self):
+        return self.sdir / (self.stem + ".lock")
+
+    def make_lock(self, mode=0o600):
+        self.mkdir_state()
+        path = self.lock_path()
+        path.write_bytes(b"")
+        os.chmod(path, mode)
+        return path
+
+    def test_hard_linked_lock_file_with_a_loose_mode_is_corrupt(self):
+        path = self.make_lock(0o644)
+        os.link(path, self.tmp / "second-name")
+        with self.assertRaises(state.StateCorrupt):
+            state.lock_held(self.target, LAYOUT)
+        with self.assertRaises(state.StateCorrupt):
+            state.Store(self.target, LAYOUT)
+
+    def test_hard_linked_lock_file_alone_is_corrupt(self):
+        path = self.make_lock(0o600)
+        os.link(path, self.tmp / "second-name")
+        with self.assertRaisesRegex(state.StateCorrupt, "link"):
+            state.lock_held(self.target, LAYOUT)
+        with self.assertRaisesRegex(state.StateCorrupt, "link"):
+            state.Store(self.target, LAYOUT)
+
+    def test_loose_mode_alone_is_corrupt_and_is_not_repaired(self):
+        path = self.make_lock(0o644)
+        with self.assertRaisesRegex(state.StateCorrupt, "mode"):
+            state.lock_held(self.target, LAYOUT)
+        with self.assertRaisesRegex(state.StateCorrupt, "mode"):
+            state.Store(self.target, LAYOUT)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)  # validated before any fchmod, not fixed up
+
+    def test_lock_file_owned_by_someone_else_is_corrupt(self):
+        self.make_lock()
+        with mock.patch.object(state, "_euid", other_user_inside("_check_lock_file")):
+            with self.assertRaisesRegex(state.StateCorrupt, "owned"):
+                state.lock_held(self.target, LAYOUT)
+            with self.assertRaisesRegex(state.StateCorrupt, "owned"):
+                state.Store(self.target, LAYOUT)
+
+    def test_lock_file_that_is_not_regular_is_refused(self):
+        self.mkdir_state()
+        os.mkfifo(self.lock_path(), 0o600)
+        with self.assertRaises(state.StateError):
+            state.lock_held(self.target, LAYOUT)
+        with self.assertRaises(state.StateError):
+            state.Store(self.target, LAYOUT)
+
+    def test_a_clean_lock_file_still_works_and_a_fresh_one_is_created_0600(self):
+        with state.Store(self.target, LAYOUT):
+            self.assertEqual(stat.S_IMODE(self.lock_path().stat().st_mode), 0o600)
+        with state.Store(self.target, LAYOUT):
+            self.assertTrue(state.lock_held(self.target, LAYOUT))
+
+    def test_a_symlinked_lock_file_is_refused_by_the_writer_too(self):
+        self.mkdir_state()
+        decoy = self.tmp / "decoy"
+        decoy.write_text("")
+        os.symlink(decoy, self.lock_path())
+        with self.assertRaises(state.StateError):
+            state.Store(self.target, LAYOUT)
 
 
 class Processes(StateCase):
@@ -1351,7 +1608,7 @@ class Processes(StateCase):
         self.assertEqual(self.listing(), [self.file.name])
 
     def test_a_kill_at_any_step_leaves_old_or_new_state_and_the_next_run_converges(self):
-        for step in ("kill-write", "kill-fsync", "kill-rename", "kill-dirsync"):
+        for step in ("kill-write", "kill-fsync-1", "kill-fsync-2", "kill-rename", "kill-dirsync"):
             with self.subTest(step):
                 if self.sdir.exists():
                     shutil.rmtree(self.sdir)
@@ -1369,15 +1626,33 @@ class Processes(StateCase):
                 self.assertEqual(list(state.load(self.target, LAYOUT)), ["final.md"])
                 self.assertEqual(self.listing(), [self.file.name])  # the orphan was reaped
 
+    def test_attacker_planted_bytes_for_a_new_path_stay_unverified_before_and_after_a_crash(self):
+        planted = b"bytes the installer planned to write\n"
+        digest = state.body_sha256(planted)
+        (self.target / "n.md").write_bytes(planted)  # the attacker controls the target
+        base = {"a.md": entry()}
+        phase1 = state.with_pending(base, {}, new={"n.md": dict(NEW, pending_sha256=digest)})
+        self.assertEqual(
+            state.verdict(phase1, "n.md", state.body_sha256((self.target / "n.md").read_bytes())), "unverified"
+        )
+        state.save(self.target, LAYOUT, phase1)  # phase 1 on disk, then the installer dies
+        crashed = state.load(self.target, LAYOUT)
+        self.assertEqual(state.verdict(crashed, "n.md", digest), "unverified")
+        again = state.settle(crashed, set())  # the next run reports nothing written
+        self.assertEqual(state.verdict(again, "n.md", digest), "unverified")
+        self.assertNotIn("n.md", again)
+        written = state.settle(crashed, {"n.md"})  # only an install that wrote that exact path owns it
+        self.assertEqual(state.verdict(written, "n.md", digest), "owned")
+
     def test_a_kill_between_the_phases_of_an_update_converges(self):
         state.save(self.target, LAYOUT, {"a.md": entry()})
         with state.Store(self.target, LAYOUT) as store:
             store.save(state.with_pending(store.load(), {"a.md": D2}, new={"n.md": dict(NEW, pending_sha256=D2)}))
-        # the process dies here: both digests are owned, the new file only for its intended content
+        # the process dies here: the existing path accepts both digests, the new path is unverified
         got = state.load(self.target, LAYOUT)
         self.assertEqual(state.verdict(got, "a.md", D1), "owned")
         self.assertEqual(state.verdict(got, "a.md", D2), "owned")
-        self.assertEqual(state.verdict(got, "n.md", D2), "owned")
+        self.assertEqual(state.verdict(got, "n.md", D2), "unverified")
         self.assertEqual(state.verdict(got, "n.md", D1), "unverified")
         with state.Store(self.target, LAYOUT) as store:  # the re-run writes only a.md this time
             store.save(state.settle(store.load(), {"a.md"}))
@@ -1484,7 +1759,7 @@ MUTANTS = [
     ),
     (
         "inside target",
-        'for label, base in (("the target", Path(os.path.realpath(target))), ',
+        'for label, base in (("the target", Path(_real_path(target))), ',
         "for label, base in (",
         "Confinement.test_state_directory_inside_the_target",
     ),
@@ -1524,7 +1799,6 @@ MUTANTS = [
         '    if False:\n        raise StateError("target path must be valid UTF-8',
         "Targets.test_non_utf8_target_is_refused_at_save_and_at_load",
     ),
-    ("accepts None", " if d is not None]", "]", "Accepts.test_non_digest_values_are_never_accepted"),
     (
         "settle promotes all",
         '        if rel in written and "pending_sha256" in entry:',
@@ -1641,14 +1915,8 @@ MUTANTS = [
         "Api.test_lock_held_probe_sees_a_holder_and_lets_go",
     ),
     (
-        "verdict total",
-        "    if type(entry) is not dict or type(digest) is not str or not _DIGEST.fullmatch(digest):",
-        "    if False:",
-        "Api.test_verdict",
-    ),
-    (
         "verdict entries",
-        "    if not isinstance(entries, dict) or type(rel) is not str:",
+        "    if type(entries) is not dict or type(rel) is not str:",
         "    if False:",
         "Api.test_verdict",
     ),
@@ -1678,11 +1946,179 @@ MUTANTS = [
         "fcntl.LOCK_SH | fcntl.LOCK_NB",
         "Processes.test_a_held_lock_makes_every_other_process_lose_with_statelocked",
     ),
+    (
+        "pending-only never owned",
+        '    body = entry.get("body_sha256")\n    if type(body) is not str:\n        return False',
+        '    body = entry.get("body_sha256")\n    if False:\n        return False',
+        "Accepts.test_pending_only_entry_is_never_owned",
+    ),
+    (
+        "pending-only repro",
+        '    body = entry.get("body_sha256")\n    if type(body) is not str:\n        return False',
+        '    body = entry.get("body_sha256")\n    body = body or entry.get("pending_sha256")',
+        "Accepts.test_exact_repro_of_the_review_finding",
+    ),
+    (
+        "pending-only attacker bytes",
+        '    body = entry.get("body_sha256")\n    if type(body) is not str:\n        return False',
+        '    body = entry.get("body_sha256")\n    body = body or entry.get("pending_sha256")',
+        "Processes.test_attacker_planted_bytes_for_a_new_path_stay_unverified_before_and_after_a_crash",
+    ),
+    (
+        "pending next to body",
+        "    return any(d == digest for d in stored)",
+        "    return digest == body",
+        "Accepts.test_existing_owned_path_still_accepts_its_pending_digest",
+    ),
+    (
+        "accepts plain entry",
+        "    if type(entry) is not dict or type(digest) is not str:\n        return False",
+        "    if type(digest) is not str:\n        return False",
+        "Hostile.test_accepts_and_verdict_are_total",
+    ),
+    (
+        "accepts plain digest",
+        "    if type(entry) is not dict or type(digest) is not str:\n        return False",
+        "    if type(entry) is not dict:\n        return False",
+        "Hostile.test_accepts_does_not_trust_a_digest_object_with_its_own_equality",
+    ),
+    (
+        "plain dict verdict",
+        "    if type(entries) is not dict or type(rel) is not str:",
+        "    if not isinstance(entries, dict) or type(rel) is not str:",
+        "Hostile.test_verdict_does_not_touch_a_dict_subclass",
+    ),
+    (
+        "verdict plain rel",
+        "    if type(entries) is not dict or type(rel) is not str:",
+        "    if type(entries) is not dict:",
+        "Hostile.test_accepts_and_verdict_are_total",
+    ),
+    (
+        "NUL target wrapped",
+        "except (OSError, ValueError)",
+        "except OSError",
+        "Hostile.test_nul_and_non_text_targets_raise_state_error_not_value_error",
+    ),
+    (
+        "non-text target",
+        "    if type(path) is not str:",
+        "    if False:",
+        "Hostile.test_nul_and_non_text_targets_raise_state_error_not_value_error",
+    ),
+    (
+        "layout plain str",
+        "if type(layout) is not str or not _LAYOUT.fullmatch(layout):",
+        "if not isinstance(layout, str) or not _LAYOUT.fullmatch(layout):",
+        "Hostile.test_layout_must_be_a_plain_str",
+    ),
+    (
+        "settle container",
+        "    if type(written) not in (set, frozenset, list, tuple):",
+        "    if False:",
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "settle members",
+        "    for rel in written:\n        if type(rel) is not str:",
+        "    for rel in []:\n        if type(rel) is not str:",
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "settle accepted containers",
+        "    if type(written) not in (set, frozenset, list, tuple):",
+        "    if type(written) not in (set,):",
+        "Hostile.test_settle_rejects_hostile_containers_but_accepts_the_documented_ones",
+    ),
+    (
+        "with_pending container",
+        "    if type(pending) is not dict:",
+        "    if False:",
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "with_pending new container",
+        "    if new is not None and type(new) is not dict:",
+        "    if False:",
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "plain str rel",
+        "    if type(rel) is not str or not _text_ok(rel) or not rel:",
+        "    if not _text_ok(rel) or not rel:",
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "shown total",
+        '    except Exception:\n        text = "?"',
+        '    except ZeroDivisionError:\n        text = "?"',
+        "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
+    ),
+    (
+        "lock owner",
+        '    if st.st_uid != _euid():\n        raise StateCorrupt("state lock',
+        '    if False:\n        raise StateCorrupt("state lock',
+        "LockFile.test_lock_file_owned_by_someone_else_is_corrupt",
+    ),
+    (
+        "lock link count",
+        '    if st.st_nlink != 1:\n        raise StateCorrupt("state lock',
+        '    if False:\n        raise StateCorrupt("state lock',
+        "LockFile.test_hard_linked_lock_file_alone_is_corrupt",
+    ),
+    (
+        "lock mode",
+        "    elif stat.S_IMODE(st.st_mode) != 0o600:",
+        "    elif False:",
+        "LockFile.test_loose_mode_alone_is_corrupt_and_is_not_repaired",
+    ),
+    (
+        "lock validated before fix",
+        "    if created:\n        os.fchmod",
+        "    if True:\n        os.fchmod",
+        "LockFile.test_loose_mode_alone_is_corrupt_and_is_not_repaired",
+    ),
+    (
+        "lock regular",
+        '    if not stat.S_ISREG(st.st_mode):\n        raise StateCorrupt("state lock',
+        '    if False:\n        raise StateCorrupt("state lock',
+        "LockFile.test_lock_file_that_is_not_regular_is_refused",
+    ),
+    (
+        "lock_held validates",
+        "            _check_lock_file(lfd, created=False)",
+        "            pass",
+        "LockFile.test_hard_linked_lock_file_with_a_loose_mode_is_corrupt",
+    ),
+    (
+        "writer creates exclusively",
+        "_LOCK_FLAGS | os.O_EXCL",
+        "_LOCK_FLAGS",
+        "LockFile.test_loose_mode_alone_is_corrupt_and_is_not_repaired",
+    ),
+    (
+        "state file link count",
+        '        if st.st_nlink != 1:\n            raise StateCorrupt(f"state file',
+        '        if False:\n            raise StateCorrupt(f"state file',
+        "Confinement.test_hard_linked_state_file",
+    ),
+    (
+        "O_NONBLOCK read open",
+        "_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC",
+        "_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC",
+        "Confinement.test_file_not_regular",
+    ),
 ]
+
+
+# Rows whose test can only notice the weakened guard by blocking (the 10 s alarm in StateCase turns the hang into a
+# failure). Every other row must be caught by an assertion; a hang there would mean the test proves nothing useful.
+HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
 class GuardTable(unittest.TestCase):
     def run_one(self, scripts_dir, test_id):
+        """'green', 'red' (a test failed by assertion or error) or 'hang' (it blocked until the alarm or timeout)."""
         env = dict(os.environ, DOIA_STATE_SCRIPTS=str(scripts_dir))
         try:
             r = subprocess.run(
@@ -1694,11 +2130,13 @@ class GuardTable(unittest.TestCase):
                 timeout=60,
             )
         except subprocess.TimeoutExpired:
-            return False  # a hang is a failure of the guard's test, which is the point
-        return r.returncode == 0
+            return "hang"
+        if r.returncode == 0:
+            return "green"
+        return "hang" if "test hung" in r.stderr else "red"
 
     def test_every_listed_guard_goes_red_when_weakened_and_green_when_intact(self):
-        self.assertGreaterEqual(len(MUTANTS), 50)
+        self.assertGreaterEqual(len(MUTANTS), 60)
         source = (ROOT / "scripts" / "state.py").read_text()
         tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1707,33 +2145,56 @@ class GuardTable(unittest.TestCase):
         intact = tmp / "intact" / "scripts"
         intact.mkdir(parents=True)
         (intact / "state.py").write_text(source)
-        survivors = []
+        survivors, bad_hangs = [], []
         for n, (name, old, new, test_id) in enumerate(MUTANTS):
             with self.subTest(name):
                 self.assertTrue(old in source, f"stale mutant row: {name}")
-                self.assertTrue(hasattr(sys.modules[__name__], test_id.split(".")[0]))
-                self.assertTrue(self.run_one(intact, test_id), f"{test_id} is not green on the intact copy")
+                cls_name, _, method = test_id.partition(".")
+                cls = getattr(sys.modules[__name__], cls_name, None)
+                self.assertTrue(callable(getattr(cls, method, None)), f"row {name}: no test {test_id}")
+                self.assertEqual(self.run_one(intact, test_id), "green", f"{test_id} is not green on the intact copy")
                 mutant = tmp / f"m{n}" / "scripts"
                 mutant.mkdir(parents=True)
                 (mutant / "state.py").write_text(source.replace(old, new, 1))
-                if self.run_one(mutant, test_id):
+                status = self.run_one(mutant, test_id)
+                if status == "green":
                     survivors.append(name)
+                elif status == "hang" and name not in HANG_ROWS:
+                    bad_hangs.append(name)
         self.assertEqual(survivors, [], "weakened guards whose test stayed green")
+        self.assertEqual(bad_hangs, [], "guards caught only by a hang although they are not blocking guards")
 
     def test_the_runner_itself_detects_a_survivor(self):
-        """Negative case: a no-op 'mutation' leaves the test green, and the runner reports it as green."""
+        """Negative case: a no-op 'mutation' leaves the test green, and a real one is red."""
         tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         copy = tmp / "x" / "scripts"
         copy.mkdir(parents=True)
         (copy / "state.py").write_text((ROOT / "scripts" / "state.py").read_text())
-        self.assertTrue(self.run_one(copy, "StrictParse.test_duplicate_key"))
+        self.assertEqual(self.run_one(copy, "StrictParse.test_duplicate_key"), "green")
         (copy / "state.py").write_text(
             (ROOT / "scripts" / "state.py")
             .read_text()
             .replace('            raise StateError(f"duplicate key: {_shown(key)}")', "            pass", 1)
         )
-        self.assertFalse(self.run_one(copy, "StrictParse.test_duplicate_key"))
+        self.assertEqual(self.run_one(copy, "StrictParse.test_duplicate_key"), "red")
+
+    def test_a_blocking_guard_is_reported_as_a_hang_not_an_assertion(self):
+        tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        copy = tmp / "x" / "scripts"
+        copy.mkdir(parents=True)
+        src = (ROOT / "scripts" / "state.py").read_text()
+        (copy / "state.py").write_text(src.replace("fcntl.LOCK_EX | fcntl.LOCK_NB", "fcntl.LOCK_EX", 1))
+        test_id = "WriteSafety.test_second_save_while_lock_held_fails_and_first_file_unchanged"
+        self.assertEqual(self.run_one(copy, test_id), "hang")
+
+    def test_every_row_names_a_real_test_method(self):
+        for name, _old, _new, test_id in MUTANTS:
+            cls_name, _, method = test_id.partition(".")
+            cls = getattr(sys.modules[__name__], cls_name, None)
+            self.assertTrue(callable(getattr(cls, method, None)), f"row {name}: no test {test_id}")
+        self.assertTrue(HANG_ROWS <= {row[0] for row in MUTANTS})
 
 
 if __name__ == "__main__":
