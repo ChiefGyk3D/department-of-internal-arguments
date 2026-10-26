@@ -15,6 +15,8 @@ from pathlib import Path
 from lib import (
     CAPABILITY_ORDER,
     CLAUDE_TOOLS,
+    CODEX_AGENTS_DIR,
+    CODEX_SKILLS_DIR,
     COPILOT_TOOLS,
     GENERATED_DIRS,
     GENERATED_MARK,
@@ -104,6 +106,73 @@ def render_copilot_agent(role, policies, ver, source=None, additions=None):
     return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
+CODEX_NOTES_HEADING = "## Codex capability notes"
+TOML_LITERAL_END = "'''"
+
+
+def codex_notes(role):
+    """What Codex can and cannot honor for this role, written into the generated text. Source: OpenAI's Codex
+    documentation (subagents, sandboxing and skills pages), retrieved 2026-10-26; nothing has been run in Codex."""
+    caps = _capabilities(role)
+    lines = [
+        CODEX_NOTES_HEADING,
+        "",
+        "This is a Codex custom agent generated from the same role text as the Claude Code and Copilot agents. "
+        "Where the text above names a Claude Code tool (the Skill tool, Bash, Grep), use the Codex equivalent. "
+        "UNVERIFIED: no run in Codex is logged yet, so treat the handling below as documented, not measured.",
+        "",
+        "- Sandbox and approvals: a Codex custom agent inherits the parent session's sandbox and approval settings, "
+        "and this file cannot set or change them. Run the parent in the sandbox the task needs.",
+        "- Model: this file does not pin a model; the agent inherits the parent's model and reasoning effort. The "
+        "`MODEL:` line of the report is the exact model id the session reports, never a family name.",
+        "- read, search: honored through Codex's own file and search tools, inside the inherited sandbox.",
+    ]
+    if "edit" in caps:
+        lines.append(
+            "- edit: honored, limited by the inherited sandbox (`workspace-write` allows edits in the workspace)."
+        )
+    else:
+        lines.append(
+            "- edit: this role has no edit capability, and Codex cannot remove it from a custom agent. "
+            "The rule that you never edit is therefore an instruction only. A `read-only` parent sandbox would "
+            "enforce it but also blocks running commands without approval, so choose per task, and report any "
+            "edit you were unable to avoid."
+        )
+    if "shell" in caps:
+        lines.append("- shell: honored through Codex's shell tool, inside the inherited sandbox and approval policy.")
+    if "skills" in caps:
+        lines.append(
+            "- skills: the domain packs are Codex skills named `pack-<name>`; a brief that names a pack loads it by "
+            "explicit `$pack-<name>` mention or by selecting it in the skill picker."
+        )
+    else:
+        lines.append(
+            "- skills: this role has no skills capability; do not load packs. Whatever the brief pastes is all you get."
+        )
+    lines.append(
+        "- Dispatch: this role never dispatches agents. Codex can spawn subagents when asked, and this file cannot "
+        "turn that off, so the rule is an instruction only."
+    )
+    return "\n".join(lines)
+
+
+def render_codex_agent(role, policies, ver, source=None, additions=None):
+    """A Codex custom agent: one TOML file with name, description and developer_instructions.
+
+    The ownership marker is the first line of developer_instructions (a TOML multi-line literal string, so nothing
+    is escaped), which keeps the same line-based marker and sha256 as the Markdown adapters."""
+    head = (
+        f"name = {_q(role['name'])}\n"
+        f"description = {_q(role['description'])}\n"
+        f"developer_instructions = {TOML_LITERAL_END}"
+    )
+    tail = f"{role['body']}\n\n{codex_notes(role)}\n\n{policies}\n"
+    tail += additions_section(additions) if additions else ""
+    if TOML_LITERAL_END in tail:
+        raise ValueError(f"roles/{role['file']}: text must not contain three single quotes (they end the TOML string)")
+    return _seal(head, tail + TOML_LITERAL_END + "\n", source or "roles/" + role["file"], ver)
+
+
 def render_skill(pack, ver, source=None, additions=None):
     head = f"---\nname: pack-{pack['dir']}\ndescription: {_q(pack['description'])}\n---\n"
     updated = pack.get("updated")
@@ -122,8 +191,10 @@ def render_all(root=ROOT):
     for role in load_roles(root):
         out[f".claude/agents/{role['name']}.md"] = render_claude_agent(role, policies, ver)
         out[f".github/agents/{role['name']}.agent.md"] = render_copilot_agent(role, policies, ver)
+        out[f"{CODEX_AGENTS_DIR}/{role['name']}.toml"] = render_codex_agent(role, policies, ver)
     for pack in load_packs(root):
         out[f".claude/skills/pack-{pack['dir']}/SKILL.md"] = render_skill(pack, ver)
+        out[f"{CODEX_SKILLS_DIR}/pack-{pack['dir']}/SKILL.md"] = render_skill(pack, ver)
     return out
 
 

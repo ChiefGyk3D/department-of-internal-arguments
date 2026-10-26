@@ -2,11 +2,14 @@
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 from generate import ADDITIONS_HEADING, drift
 from lib import (
     CAPABILITY_ORDER,
+    CODEX_AGENTS_DIR,
+    CODEX_SKILLS_DIR,
     FRAGMENT_NAMES,
     FRAGMENT_RE,
     GENERATED_MARK,
@@ -284,11 +287,24 @@ def validate(root=ROOT):
         for f in sorted((root / ".github/agents").glob("*.agent.md")):
             d, _ = frontmatter(f)
             require(set(d) == {"name", "description", "tools"}, f"{f.name}: unreviewed Copilot fields")
-        for f in sorted((root / ".claude/skills").glob("*/SKILL.md")):
-            d, b = frontmatter(f)
-            require(set(d) == {"name", "description"} and d["name"] == f.parent.name and bool(b), f"{f}: invalid skill")
-        for d_ in (".claude/agents", ".claude/skills", ".github/agents"):
-            for f in sorted((root / d_).rglob("*.md")):
+        for f in sorted((root / CODEX_AGENTS_DIR).glob("*.toml")):
+            try:
+                d = tomllib.loads(f.read_text(encoding="utf-8"))
+            except tomllib.TOMLDecodeError as exc:
+                errors.append(f"{f.name}: invalid TOML ({exc})")
+                continue
+            require(
+                set(d) == {"name", "description", "developer_instructions"} and d.get("name") == f.stem,
+                f"{f.name}: unreviewed Codex fields (a model, sandbox or approval key must not be set)",
+            )
+        for d_ in (".claude/skills", CODEX_SKILLS_DIR):
+            for f in sorted((root / d_).glob("*/SKILL.md")):
+                d, b = frontmatter(f)
+                require(
+                    set(d) == {"name", "description"} and d["name"] == f.parent.name and bool(b), f"{f}: invalid skill"
+                )
+        for d_ in (".claude/agents", ".claude/skills", ".github/agents", CODEX_AGENTS_DIR, CODEX_SKILLS_DIR):
+            for f in sorted(p for p in (root / d_).rglob("*") if p.is_file()):
                 require(
                     f"{GENERATED_MARK} (release {version})" in f.read_text(encoding="utf-8"),
                     f"{f.relative_to(root)}: generated marker lacks the current release",

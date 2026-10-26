@@ -10,6 +10,14 @@ Local-model output is a draft, and the report says whether and how it was checke
 - `evals/behavioral-evals.md`: rows 24 and 25 for the new line.
 - A SAFO hook or audit check for the line is a separate SAFO issue.
 
+Codex adapter (issue #22). Everything about Codex below comes from OpenAI's Codex documentation, retrieved 2026-10-26, and has not been run in Codex.
+
+- `scripts/generate.py` now also writes `.codex/agents/<role>.toml` (a Codex custom agent per role: `name`, `description`, `developer_instructions`, no model, sandbox or approval key) and `.agents/skills/pack-<name>/SKILL.md` (the packs, byte-identical to the Claude Code skills). The instructions are the role text, the shared report header with the `LOCAL-LLM:` line, the four policies and a generated "Codex capability notes" section that says what Codex cannot honor (no per-tool allow list, sandbox and approvals inherited from the parent so a role without edit is only told not to edit, no way to forbid dispatch). The ownership marker is the first line of `developer_instructions`; the sha256 rule is unchanged.
+- `scripts/install.py --adapter codex`, with `--update`, `--force-edited`, `--overlay` (append-only for public names), `--list-managed`, symlink and collision refusal as for the other adapters. `--adapter both` keeps its meaning. `--layout user` is accepted for Codex with the home directory as the target (Codex keeps user agents and skills under two roots).
+- `scripts/validate.py` parses each Codex agent with `tomllib`, requires exactly the three keys and checks the release in every generated Codex file.
+- `evals/behavioral-evals.md` row 26 for a hand run in Codex (not executed). `docs/install.md` records what was verified, with the page URLs, and what is UNVERIFIED.
+- Not done here: an `AGENTS.md` (the project's own file; a merged one would not fit the 32 KiB default), and a read-only researcher or planner role (waits for issue #20).
+
 ## [0.3.1] - 2026-10-11
 
 - `local-llm-routing` pack: upstreamed generic measured knowledge from a maintainer's private copy. `keep_alive` does not stop a context-change eviction; the 12B-plus-second-model fit measurement (8192 yes, 16384 no, Ollama 0.33.2); the `using device` journal grep and the 100% GPU check for multi-GPU placement; stale-probe and brief-versus-call guard notes; the Codex-over-Ollama command shape (still UNVERIFIED). A comparison of the `linux-platform` and `rf-emcomm` private copies found nothing to add.
