@@ -74,7 +74,7 @@ The routine, from a checkout pinned to a release tag:
 
 ```
 git -C /path/to/department-of-internal-arguments fetch --tags
-git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.3.1
+git -C /path/to/department-of-internal-arguments checkout <tag>   # <tag> is a placeholder for the release tag you pin; the current release is 0.4.0
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update
 python3 /path/to/department-of-internal-arguments/scripts/install.py --target ~/dotfiles/claude --layout user --update --apply
 git -C ~/dotfiles/claude status   # review the diff, then commit
