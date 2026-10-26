@@ -169,9 +169,14 @@ class UserTextInMessages(unittest.TestCase):
         self.assertEqual(sum(": error:" in ln for ln in err.splitlines()), 1)
         self.assertIn("expected one argument", self.argparse_error("--target"))
 
-    def test_a_plain_error_message_is_unchanged_apart_from_escaping(self):
+    def test_a_plain_bad_choice_message_keeps_its_content(self):
+        # Only version-independent properties: argparse quotes the choice list differently across Python versions.
         err = self.argparse_error("--target", "/tmp", "--adapter", "nope")
-        self.assertIn("invalid choice: 'nope' (choose from claude, copilot, both, codex)", err)
+        msg = next(ln for ln in err.splitlines() if ": error:" in ln).split(": error:", 1)[1]
+        self.assertIn("invalid choice", msg)
+        self.assertIn("nope", msg)
+        for name in installer.ADAPTERS:
+            self.assertIn(name, msg)
 
 
 class FilesystemIdentity(unittest.TestCase):
