@@ -32,6 +32,20 @@ TEST_SRC = "import os, sys\nsys.path.insert(0, os.getcwd())\nfrom calc import f\
 TEST_CMD = "python3 tests/check.py"
 
 
+def unchanged(report):
+    """The source-unchanged claim, under whichever name the tool gave it (see process_isolation in the JSON)."""
+    return report.get("source_repo_unchanged", report.get("source_unchanged_at_check"))
+
+
+def host_has_pid_namespace():
+    """Independent of the tool: can this host run a user + net + pid namespace?"""
+    exe, true = shutil.which("unshare"), shutil.which("true")
+    if not exe or not true:
+        return False
+    argv = [exe, "--user", "--map-current-user", "--net", "--pid", "--fork", "--kill-child", "--mount-proc", "--", true]
+    return subprocess.run(argv, capture_output=True).returncode == 0
+
+
 def git(cwd, *args, check=True):
     p = subprocess.run(
         ["git", *args], cwd=cwd, env={**os.environ, **GIT_ENV}, capture_output=True, text=True, check=check
@@ -59,21 +73,26 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.scratch = self.tmp / "scratch"
 
-    def make_repo(self, name="src", check_src=TEST_SRC, setup=None):
-        """c1: calc.f() == 1 and README. c2: the fix (f() == 2) plus tests/check.py. Returns (repo, c1, c2)."""
+    def make_repo(self, name="src", check_src=TEST_SRC, setup=None, base_files=None, fix_files=None):
+        """c1: calc.f() == 1 and README. c2: the fix (f() == 2) plus tests/check.py. Returns (repo, c1, c2).
+        base_files and fix_files are {name: bytes} added in c1 and changed in c2."""
         repo = self.tmp / name
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")
         (repo / "calc.py").write_text("def f():\n    return 1\n")
         (repo / "README").write_text("readme\n")
+        for n, data in (base_files or {}).items():
+            (repo / n).write_bytes(data)
         if setup:
             setup(repo)
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "base")
         c1 = git(repo, "rev-parse", "HEAD")
         (repo / "calc.py").write_text("def f():\n    return 2\n")
+        for n, data in (fix_files or {}).items():
+            (repo / n).write_bytes(data)
         (repo / "tests").mkdir()
-        (repo / "tests" / "check.py").write_text(check_src.replace("@SRC@", str(repo)))
+        (repo / "tests" / "check.py").write_text(check_src.replace("@SRC@", str(repo)).replace("@TMP@", str(self.tmp)))
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "fix")
         return repo, c1, git(repo, "rev-parse", "HEAD")
@@ -84,6 +103,8 @@ class Base(unittest.TestCase):
         if scratch:
             argv += ["--scratch", str(self.scratch)]
         argv += list(extra)
+        if "--settle" not in argv:
+            argv += ["--settle", "0.3"]
         p = subprocess.run(argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=300)
         report = json.loads(p.stdout)
         self.assertEqual(p.returncode, report["exit_code"])
@@ -104,7 +125,7 @@ class Verdicts(Base):
         self.assertTrue(r["green_before"] and r["green_after_restore"])
         self.assertIs(r["red_after_revert"], True)
         self.assertTrue(r["tree_clean"]["clean"])
-        self.assertIs(r["source_repo_unchanged"], True)
+        self.assertIs(unchanged(r), True)
         self.assertEqual(tree_hash(repo), before)
         self.assertEqual(r["reverted"]["files"], ["calc.py"])
         self.assertEqual(r["reverted"]["excluded_test_files"], ["tests/check.py"])
@@ -185,7 +206,7 @@ class Verdicts(Base):
         self.assertEqual(code, 3)
         self.assertEqual(r["commands"][-1]["status"], "timeout")
         spam = "python3 -c \"import sys\nwhile True: sys.stdout.write('x' * 4096)\""
-        code, r = self.run_tool(repo, c2, c2, test=spam, extra=["--max-output", "10000"])
+        code, r = self.run_tool(repo, c2, c2, test=spam, extra=["--max-output", "10000", "--timeout", "20"])
         self.assertEqual(code, 3)
         self.assertEqual(r["commands"][-1]["status"], "output-cap")
         self.assertLessEqual(len(r["commands"][-1]["output_tail"]), mc.TAIL_BYTES)
@@ -217,21 +238,21 @@ class Confinement(Base):
         before = tree_hash(repo)
         code, r = self.run_tool(repo, c2, c2)
         self.assertEqual(tree_hash(repo), before)
-        self.assertIs(r["source_repo_unchanged"], True)
+        self.assertIs(unchanged(r), True)
 
     def test_absolute_path_write_to_the_source_is_detected_not_prevented(self):
         src = TEST_SRC + "open('@SRC@/leak.txt', 'w').write('x')\n"
         repo, _, c2 = self.make_repo(check_src=src)
         code, r = self.run_tool(repo, c2, c2)
         self.assertTrue((repo / "leak.txt").exists(), "documented limit: the tool cannot prevent this")
-        self.assertIs(r["source_repo_unchanged"], False)
+        self.assertIs(unchanged(r), False)
         self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
 
     def test_absolute_path_edit_of_a_tracked_source_file_is_detected(self):
         src = TEST_SRC + "open('@SRC@/README', 'w').write('changed')\n"
         repo, _, c2 = self.make_repo(check_src=src)
         code, r = self.run_tool(repo, c2, c2)
-        self.assertEqual((code, r["source_repo_unchanged"]), (3, False))
+        self.assertEqual((code, unchanged(r)), (3, False))
 
     def test_edit_of_an_already_dirty_source_file_is_detected(self):
         """The status text is identical (still ' M'), so only the content hash catches it."""
@@ -239,7 +260,7 @@ class Confinement(Base):
         repo, _, c2 = self.make_repo(check_src=src)
         (repo / "README").write_text("first edit\n")
         code, r = self.run_tool(repo, c2, c2)
-        self.assertEqual((code, r["source_repo_unchanged"]), (3, False))
+        self.assertEqual((code, unchanged(r)), (3, False))
 
     def test_untracked_leftover_after_restore_is_detected(self):
         src = (
@@ -408,8 +429,8 @@ class Confinement(Base):
         code, r = self.run_tool(repo, c2, c2, test=cmd)
         probe = (shutil.which("unshare"), "--net", "--map-current-user", "--", "true")  # independent of the tool's own
         if probe[0] and subprocess.run(probe, capture_output=True).returncode == 0:
-            self.assertEqual(r["network_isolation"], "unshare", "the host can isolate the network; the tool must")
-        if r["network_isolation"] == "unshare":
+            self.assertEqual(r["network_isolation"], "net-namespace", "the host can isolate the network; the tool must")
+        if r["network_isolation"] == "net-namespace":
             self.assertEqual((code, r["green_before"]), (3, False))
         else:
             self.assertEqual(r["network_isolation"], "none")
@@ -461,7 +482,8 @@ class PatchGuards(Base):
         sneaky.write_bytes(self.patch(".git/hooks/post-checkout"))
         code, r = base.run_tool(repo, c2, sneaky)
         self.assertEqual(code, 3)
-        self.assertIn(".git", r["reason"])
+        self.assertIn("dot component or .git", r["reason"])
+        self.assertNotIn("test-at-head", self.phases(r), "the path check runs before the first test run")
         link = base.tmp / "link.patch"
         real = base.tmp / "real.patch"
         real.write_bytes(self.patch("calc.py"))
@@ -495,6 +517,9 @@ class ProcessGuards(unittest.TestCase):
 
         time.sleep(4)
         self.assertFalse(marker.exists(), "a child of the test survived the timeout")
+
+
+# NEWTESTS
 
 
 if __name__ == "__main__":

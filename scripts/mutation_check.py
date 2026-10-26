@@ -2,56 +2,88 @@
 
     python3 scripts/mutation_check.py --repo PATH --head SHA --revert SHA_OR_PATCH --test "CMD" [--scratch DIR]
 
-Steps, all in a clone made with `git clone --local --no-hardlinks` and a detached checkout of --head:
-run --test at head (must pass), revert the fix (`git apply -R` of the named commit's non-test hunks, or of a
-given patch file), run --test (must fail), restore (`git checkout --force --detach SHA` and `git clean`), run
---test again (must pass), then prove the restore: `git status --porcelain` is empty and `git diff SHA` is empty
-(checked after the restore and again after the last run). The source repository's status, HEAD, symbolic ref, refs,
-stash, .git/config, .git/index and the content of every dirty or untracked file are hashed before and after.
+Steps, in a clone made with `git clone --local --no-hardlinks` and a detached checkout of --head: run --test at
+head (must pass), revert the fix (`git apply -R` of the named commit's non-test hunks, or of a given patch file),
+run --test (must fail), restore (`git checkout --force --detach SHA` and `git clean -ffdx`), run --test again (must
+pass), then prove the restore: `git status --porcelain` is empty and `git diff SHA` is empty, checked after the
+restore and again after the last run. The source repository's status, HEAD, symbolic ref, refs, stash,
+.git/config, .git/index and the content of every dirty or untracked file are hashed before the run, after the last
+test run, and once more after a settle time (--settle, default 1 s).
 
 Output is one JSON object on stdout: head, base, reverted, commands, green_before, red_after_revert,
-green_after_restore, tree_clean (with evidence), source_repo_unchanged (with the hashes), verdict and reason.
+green_after_restore, tree_clean (with evidence), the source-unchanged claim (with the hashes), isolation, verdict
+and reason. The claim is `source_repo_unchanged` when the run had a PID namespace ("process_isolation":
+"pid-namespace": every process the test started died with the run, so the hashes are final) and
+`source_unchanged_at_check` when it did not (an escaped process can still change the source later; the claim is
+only that nothing had changed when the tool looked, twice, one settle time apart).
 
-Exit codes (a usage error is also reported as JSON and exits 3, so 2 always means "vacuous"):
+Exit codes (usage errors and -h also print JSON and exit 3, so 2 always means "vacuous" and 0 only "bites"):
     0  bites: green, red after the revert, green after the restore, tree clean, source repository unchanged
     2  vacuous: the test stays green with the fix reverted (tree clean, source unchanged)
     3  inconclusive: anything else. Not green at head, a revert that does not apply or changes nothing, a test that
        failed with an exit code outside --red-exit, timed out, produced too much output or could not start, an
-       unclean tree, a changed source repository, an unresolvable argument, any unexpected error. Never a pass.
+       unclean tree, a changed source repository, an interrupt (SIGINT, SIGTERM, SIGHUP kill the whole run first),
+       an unresolvable argument, any unexpected error. Never a pass.
 
 The copy is deleted on a bites result and kept (its path is in the JSON, "work_dir", and on stderr) on every other
-result so evidence is not thrown away; --keep keeps it on bites too.
+result so evidence is not thrown away; --keep keeps it on bites too. Copies this tool made (a `doia-mc-*`
+directory holding a marker file) and left behind are removed after --clean-old days (default 7, 0 turns it off)
+when the next run starts; nothing else in the scratch directory is touched and symlinks are never followed.
 
-Security. This runs code from the commit under review. The tool itself:
+What `bites` means. It means the test passed at head, failed with the fix reverted and passed again after the
+restore, in a tree the tool measured with git metadata the test never saw, and that the source repository's hashes
+did not change. It does not prove that the test is honest: a hostile test can count its own runs, fail only when
+it sees the revert, and edit anything in the clone. The source-repository hashes (and the tool's own fresh-metadata
+tree check) are the only evidence that does not depend on the test's honesty. Read `commands` before relying on it.
+
+Security. This runs code from the commit under review. This tool is a seatbelt, not a sandbox: run untrusted heads
+only as a throwaway user, container or VM. What it does:
   * never uses a shell: every subprocess gets an explicit argument list; --test is split once with shlex into an
     argv. A repository path, a SHA or a patch path is data: `--end-of-options` and absolute paths stop a leading
     "-" from being read as an option.
   * gives every subprocess a short environment: PATH (relative entries dropped, so the clone cannot plant a
     program), LANG, and HOME, XDG_*, PIP_CACHE_DIR, npm_config_cache, TMPDIR and the Python bytecode cache
     pointed into the disposable directory (beside the clone, not inside it, so the tree check stays honest). No
-    token or other inherited variable is passed. Git reads no user or system configuration in the clone.
-  * runs git with core.hooksPath=/dev/null, core.fsmonitor=false and no template directory, so no hook or
-    filter driver of the source or the head runs (the clone gets none of the source's .git/config, hooks or
-    drivers; filters named by the head's .gitattributes simply do not exist there).
-  * puts a timeout, an output cap and a process-group kill on every subprocess (--timeout, --max-output).
+    inherited environment variable is passed. That is all it does about secrets: files the user can read, the
+    user's real identity and home directory (pwd still names them), and unix sockets stay reachable.
+  * runs the test AND every git step of the tool inside the same namespaces: `unshare --user --map-current-user
+    --net --pid --fork --kill-child --mount-proc` (the user maps to itself, not root). Probed by running it; if
+    the host refuses it falls back to the network namespace alone, then to nothing (--isolation auto|net|none;
+    --require-no-network makes "nothing" inconclusive). The JSON says which: network_isolation is
+    "net-namespace" or "none", process_isolation is "pid-namespace" or "none". The claim is network namespace only:
+    outgoing TCP and UDP to the host's addresses fail inside; filesystem, unix sockets bound in the filesystem (the
+    agent and D-Bus sockets in the user's runtime directory, say) and every readable secret file are not
+    isolated. A private /tmp was tried (tmpfs inside the mount namespace); the kernel refuses it for a user mapped
+    to itself.
+  * with a PID namespace, when the test (the namespace's first process) exits the kernel kills everything that
+    was started in it, including daemons that left the process group. Without one, only the process group is
+    killed and a process that called setsid survives; that is why the field name changes.
+  * never reads git metadata the test could have written. The clone's own .git is used only for the clone and the
+    first checkout, before the test ran. After every test run the tool makes a fresh bare repository beside the
+    clone (own config, objects borrowed from the source through objects/info/alternates, a new index) and points
+    GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE at it for apply, checkout, clean, status and diff. A filter, hook,
+    fsmonitor, pager, ssh command, askpass, credential helper, external diff, include or attributes file planted in
+    the clone's .git/config or .git/info/attributes is never read. Every tool git call also gets core.hooksPath,
+    core.fsmonitor, core.pager, core.sshCommand, core.askPass, credential.helper and diff.external overridden,
+    protocol.allow=never after the clone, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM set to /dev/null and
+    GIT_CONFIG_NOSYSTEM set. A .gitignore the test writes can still hide untracked files from `git status`;
+    that is the test being dishonest, and the source hashes do not depend on it.
+  * reads the source repository with its own configuration, minus hooks, fsmonitor and every filter driver it
+    defines (neutralized one by one), and never runs anything the head's .gitattributes could name.
+  * puts a timeout, an output cap and a process-group kill on every subprocess (--timeout, --max-output), and
+    kills the whole run when it is interrupted.
   * refuses a revert patch (given or generated) that has an absolute path, a ".." component, a ".git"
     component, a quoted name, or a path that goes through a symlink in the clone; refuses a symlinked or
     oversize patch file.
   * never works in the maintainer's checkout: refuses a scratch directory that equals, contains or lies inside
     the repository root. The default scratch is a new directory under ~/.local/share/doia-mutation/, never /tmp.
-  * best effort no network: the test commands run under `unshare --net --map-current-user` when the host allows
-    it ("network_isolation": "unshare" in the JSON), else without ("none"; --require-no-network then makes that
-    inconclusive). Git steps are not wrapped.
 
-What cannot be enforced (this is not a sandbox). The test is arbitrary code running as the invoking user. It can
-write anywhere that user can write, including the source repository by absolute path, and read anything that user
-can read. The tool detects a changed source repository and reports it (`source_repo_unchanged: false`, exit 3); it
-cannot prevent or undo it. Without `unshare` there is no network isolation. A process that leaves its process
-group escapes the timeout kill. The test can alter the clone's own .git, so the clone's evidence is only as good
-as the test is honest; the source repository is what the hashes protect. The isolated environment is not CI: a
-test that needs a variable or a cache the allowlist removes can be reported inconclusive. A revert that breaks the
-import of the module under test makes the test fail like a real bite does: read `commands` output before trusting
-`bites`. Standard library only."""
+What cannot be enforced. The test is arbitrary code running as the invoking user. It can write anywhere that user
+can write, including the source repository by absolute path, and read anything that user can read. The tool
+detects a changed source repository and reports it (exit 3); it cannot prevent or undo it. Without `unshare`
+there is no network or process isolation. The isolated environment is not CI: a test that needs a variable or a
+cache the allowlist removes can be reported inconclusive. A revert that breaks the import of the module under test
+makes the test fail like a real bite does. Standard library only."""
 
 import argparse
 import hashlib
@@ -173,6 +205,14 @@ def run(argv, *, cwd, env, timeout, cap, stdin=None, keep=False):
         status = "timeout"
         kill()
         proc.wait()
+    except BaseException:
+        # An interrupt (the tool's signal handler raises) or any other abort: the whole group dies with the check.
+        kill()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
     kill()  # stragglers left in the process group
     for t in readers:
         t.join(5)
@@ -216,6 +256,7 @@ def sanitized_env(home, work=None):
             PYTHONDONTWRITEBYTECODE="1",
             PYTHONPYCACHEPREFIX=str(w / "pycache"),
             GIT_CONFIG_GLOBAL=DEVNULL_PATH,
+            GIT_CONFIG_SYSTEM=DEVNULL_PATH,
             GIT_CONFIG_NOSYSTEM="1",
             GIT_TERMINAL_PROMPT="0",
         )
@@ -223,30 +264,85 @@ def sanitized_env(home, work=None):
 
 
 class Git:
-    """Git with hooks, fsmonitor and (for the clone) all user configuration switched off."""
+    """Git with hooks, fsmonitor, pager, ssh, askpass, credential helpers and external diff switched off.
 
-    def __init__(self, exe, env, record=None):
-        self.exe, self.env, self.record = exe, env, record
+    `wrap` is the namespace prefix (see isolation_wrapper) put in front of every command; `strict` adds
+    protocol.allow=never (used for every step after the test has run). `env_extra` per call adds GIT_DIR and friends."""
+
+    OVERRIDES = (
+        f"core.hooksPath={DEVNULL_PATH}",
+        "core.fsmonitor=false",
+        "core.pager=cat",
+        "core.sshCommand=",
+        "core.askPass=",
+        "credential.helper=",
+        "diff.external=",
+    )
+
+    def __init__(self, exe, env, record=None, wrap=(), strict=False):
+        self.exe, self.env, self.record, self.wrap, self.strict = exe, env, record, list(wrap), strict
         self.last_err = ""
 
     def argv(self, *args):
-        return [self.exe, "-c", f"core.hooksPath={DEVNULL_PATH}", "-c", "core.fsmonitor=false", *args]
+        overrides = self.OVERRIDES + (("protocol.allow=never",) if self.strict else ())
+        opts = [x for o in overrides for x in ("-c", o)]
+        return [*self.wrap, self.exe, *opts, *args]
 
-    def run(self, cwd, *args, phase=None, stdin=None, ok=(0,)):
-        res = run(self.argv(*args), cwd=cwd, env=self.env, timeout=GIT_TIMEOUT, cap=GIT_CAP, stdin=stdin)
+    def run(self, cwd, *args, phase=None, stdin=None, ok=(0,), env_extra=None):
+        env = {**self.env, **(env_extra or {})}
+        res = run(self.argv(*args), cwd=cwd, env=env, timeout=GIT_TIMEOUT, cap=GIT_CAP, stdin=stdin)
         if self.record is not None and phase:
             self.record(phase, self.argv(*args), res)
         if res.status != "exited" or res.code not in ok:
             raise Inconclusive(f"git {args[0]} failed ({res.status}, exit {res.code}): {res.tail[-300:]}")
         return res
 
-    def out(self, cwd, *args):
+    def out(self, cwd, *args, env_extra=None):
         """(exit code, stdout bytes) of a read-only git command, bounded by GIT_TIMEOUT and GIT_CAP."""
-        res = run(self.argv(*args), cwd=cwd, env=self.env, timeout=GIT_TIMEOUT, cap=GIT_CAP, keep=True)
+        env = {**self.env, **(env_extra or {})}
+        res = run(self.argv(*args), cwd=cwd, env=env, timeout=GIT_TIMEOUT, cap=GIT_CAP, keep=True)
         if res.status != "exited":
             raise Inconclusive(f"git {args[-1]} did not finish cleanly ({res.status}): {res.tail[-200:]}")
         self.last_err = res.err[-300:]
         return res.code, res.data
+
+
+class Trusted:
+    """Git metadata the test never saw. After the test has run, nothing is read from the clone's own .git (the
+    test can write its config, attributes, hooks and index). Before every tool step a fresh bare repository is made
+    beside the clone; it borrows the source's objects through objects/info/alternates (read only use), its index is
+    a new file, and GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE point at them. The worktree is the only thing the test
+    controls, and git reads nothing executable from a worktree."""
+
+    def __init__(self, git, work, clone, objects, sha):
+        self.git, self.work, self.clone, self.objects, self.sha = git, work, clone, objects, sha
+        self.n = 0
+
+    def prepare(self):
+        self.n += 1
+        gd = os.path.join(self.work, f"trusted-{self.n}.git")
+        self.git.run(self.work, "init", "--bare", "-q", "--", gd, phase="trusted-init")
+        os.makedirs(os.path.join(gd, "objects", "info"), mode=0o700, exist_ok=True)
+        with open(os.path.join(gd, "objects", "info", "alternates"), "w", encoding="utf-8") as f:
+            f.write(self.objects + "\n")
+        envx = {
+            "GIT_DIR": gd,
+            "GIT_WORK_TREE": self.clone,
+            "GIT_INDEX_FILE": os.path.join(self.work, f"trusted-{self.n}.index"),
+        }
+        self.git.run(
+            self.clone, "-c", "core.bare=false", "read-tree", self.sha, phase="trusted-read-tree", env_extra=envx
+        )
+        self.git.run(self.clone, "update-ref", "--no-deref", "HEAD", self.sha, phase="trusted-head", env_extra=envx)
+        return envx
+
+    def run(self, *args, phase=None, stdin=None, envx=None):
+        return self.git.run(
+            self.clone, "-c", "core.bare=false", *args, phase=phase, stdin=stdin, env_extra=envx or self.prepare()
+        )
+
+    def out(self, *args, envx=None):
+        return self.git.out(self.clone, "-c", "core.bare=false", *args, env_extra=envx or self.prepare())
 
 
 def sha256(data):
@@ -330,9 +426,11 @@ def snapshot(git, root):
     snap["refs_count"] = len(refs.splitlines())
     snap["stash_sha256"] = sha256(read("stash", "list", "--format=%H %gs"))
     raw = read(*filter_overrides(git, root), "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    snap["status_sha256"] = sha256(raw)
-    snap["dirty_content_sha256"] = sha256(
-        b"\n".join(p + b"\0" + hash_file(os.path.join(os.fsencode(root), p)).encode() for p in status_paths(raw))
+    # One hash over the status text and the content of every path it names: a change of either shows.
+    snap["status_and_content_sha256"] = sha256(
+        raw
+        + b"\0\0"
+        + b"\n".join(p + b"\0" + hash_file(os.path.join(os.fsencode(root), p)).encode() for p in status_paths(raw))
     )
     for name in ("config", "index"):
         gp = read("rev-parse", "--git-path", name).decode("utf-8", "surrogateescape").strip()
@@ -388,11 +486,12 @@ def patch_paths(patch):
 def check_patch_paths(paths, clone):
     """Refuse an absolute path, "..", ".git" and any path whose parent in the clone is a symlink."""
     for p in paths:
-        if not p or p.startswith("/") or "\0" in p:
-            raise Inconclusive(f"revert patch path refused (absolute or empty): {p!r}")
+        if "\0" in p:
+            raise Inconclusive(f"revert patch path refused (NUL): {p!r}")
         parts = p.split("/")
+        # An absolute path or an empty path starts with an empty component, so it is refused here too.
         if any(c in ("", ".", "..") or c.lower() == ".git" for c in parts):
-            raise Inconclusive(f"revert patch path refused (dot component or .git): {p!r}")
+            raise Inconclusive(f"revert patch path refused (absolute, empty, dot component or .git): {p!r}")
         cur = Path(clone)
         for c in parts:
             cur = cur / c
@@ -435,7 +534,7 @@ def build_revert(git, root, spec, head):
             st = os.lstat(path)
         except OSError as e:
             raise Inconclusive("--revert is neither a commit nor a patch file") from e
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode):  # lstat: a symlink is never a regular file
             raise Inconclusive("revert patch file must be a regular file, not a symlink")
         if st.st_size > MAX_PATCH:
             raise Inconclusive("revert patch file over 1 MiB")
@@ -470,8 +569,6 @@ def build_revert(git, root, spec, head):
         "--binary",
         "--full-index",
         "--no-renames",
-        "--no-ext-diff",
-        "--no-textconv",
         parent,
         commit,
         "--",
@@ -484,29 +581,48 @@ def build_revert(git, root, spec, head):
     return patch, patch_paths(patch), info
 
 
-def network_wrapper(probe_env):
-    """argv prefix that removes the network from a test, or [] when the host cannot."""
+ISOLATION_MODES = ("auto", "net", "none")
+
+
+def isolation_wrapper(mode, probe_env):
+    """(argv prefix, what it isolates). Namespaces for an unprivileged user, probed by really running them.
+
+    "auto" tries a user + network + PID namespace (`unshare --user --map-current-user --net --pid --fork
+    --kill-child --mount-proc`: when the leader exits the kernel kills every process in the namespace, so nothing
+    the test started can outlive the run), then a network namespace alone, then nothing. The user is mapped to
+    itself, not to root, so permission-dependent tests behave as they would outside. A private /tmp was tried
+    (a tmpfs mount inside the mount namespace) and is refused by the kernel for a mapped current user, so it is not
+    offered. Files, unix sockets and the user's identity are NOT isolated."""
     exe = shutil.which("unshare", path=clean_path())
-    if not exe:
-        return []
-    argv = [exe, "--net", "--map-current-user", "--", "true"]
-    res = run(argv, cwd=None, env=probe_env, timeout=20, cap=4096)
-    if res.status == "exited" and res.code == 0:
-        return argv[:-2] + ["--"]
-    return []
+    probe_cmd = shutil.which("true", path=clean_path())
+    plan = {"auto": (("net", "pid"), ("net",)), "net": (("net",),), "none": ()}[mode]
+    if exe and probe_cmd:
+        for parts in plan:
+            argv = [exe, "--user", "--map-current-user"]
+            if "net" in parts:
+                argv.append("--net")
+            if "pid" in parts:
+                argv += ["--pid", "--fork", "--kill-child", "--mount-proc"]
+            argv.append("--")
+            res = run([*argv, probe_cmd], cwd=None, env=probe_env, timeout=20, cap=4096)
+            if res.status == "exited" and res.code == 0:
+                return argv, {
+                    "network": "net-namespace" if "net" in parts else "none",
+                    "process": "pid-namespace" if "pid" in parts else "none",
+                }
+    return [], {"network": "none", "process": "none"}
 
 
-def clean_evidence(git, clone, sha):
-    code, status = git.out(clone, "status", "--porcelain=v1", "--untracked-files=all")
-    dcode, _ = git.out(clone, "diff", "--exit-code", "--quiet", "--no-ext-diff", "--no-textconv", sha, "--")
-    code2, head = git.out(clone, "rev-parse", "HEAD")
-    ok = code == 0 and not status and dcode == 0 and head.decode().strip() == sha
+def clean_evidence(trusted):
+    """Is the clone's worktree exactly the head? Measured with git metadata the test never saw (see Trusted)."""
+    envx = trusted.prepare()
+    code, status = trusted.out("status", "--porcelain=v1", "--untracked-files=all", envx=envx)
+    dcode, _ = trusted.out("diff", "--exit-code", "--quiet", trusted.sha, "--", envx=envx)
     return {
         "status_porcelain": status.decode("utf-8", "replace")[:2000],
         "status_exit": code,
         "diff_exit": dcode,
-        "head_is_sha": code2 == 0 and head.decode().strip() == sha,
-        "clean": ok,
+        "clean": code == 0 and not status and dcode == 0,
     }
 
 
@@ -556,7 +672,7 @@ class Checker:
             kind = "red"
         else:
             kind = "error"
-        self.record(phase, argv, res, {"result": kind, "network_wrapper": bool(wrap)})
+        self.record(phase, argv, res, {"result": kind, "namespace_wrapper": bool(wrap)})
         return kind
 
 
@@ -570,6 +686,35 @@ def resolve_scratch(args, root):
         raise Inconclusive("the default scratch directory must not be under /tmp")
     os.makedirs(real, mode=0o700, exist_ok=True)
     return real
+
+
+MARKER = ".doia-mutation-check"
+PREFIX = "doia-mc-"
+
+
+def prune_old(scratch, days):
+    """Remove disposable copies this tool made (a PREFIX directory holding MARKER, owned by this user, not a
+    symlink) whose marker is older than `days`. Nothing else in the scratch directory is looked at or touched."""
+    pruned = []
+    if days <= 0:
+        return pruned
+    cutoff = time.time() - days * 86400
+    for entry in sorted(os.listdir(scratch)):
+        path = os.path.join(scratch, entry)
+        if not entry.startswith(PREFIX):
+            continue
+        try:
+            mark = os.lstat(os.path.join(path, MARKER))
+        except OSError:
+            continue
+        if mark.st_mtime >= cutoff:
+            continue
+        try:  # remove_tree refuses a symlink and anything that is not a direct child of the scratch directory
+            remove_tree(path, scratch)
+            pruned.append(entry)
+        except Exception:  # an old copy that cannot be removed is left; the check goes on
+            continue
+    return pruned
 
 
 def check(args, report, state):
@@ -599,36 +744,44 @@ def check(args, report, state):
     patch, files, info = build_revert(src_git, root, args.revert, head)
     report["reverted"] = {"files": files, **info}
     scratch = resolve_scratch(args, root)
+    report["pruned"] = prune_old(scratch, args.clean_old)
+    code, objs = src_git.out(root, "rev-parse", "--git-path", "objects")
+    objects = os.path.join(root, objs.decode("utf-8", "surrogateescape").strip())
+    if code != 0 or not os.path.isdir(objects):
+        raise Inconclusive("could not find the source object directory")
+    state["src_git"], state["root"] = src_git, root
     before = snapshot(src_git, root)
     state["before"] = before
 
-    work = tempfile.mkdtemp(prefix="doia-mc-", dir=scratch)  # mkdtemp creates it 0700
+    work = tempfile.mkdtemp(prefix=PREFIX, dir=scratch)  # mkdtemp creates it 0700
     state["work"], state["scratch"] = work, scratch
     report["work_dir"] = work
-    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache", "template"):
+    with open(os.path.join(work, MARKER), "w", encoding="utf-8") as f:
+        f.write("made by mutation_check.py\n")
+    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache"):
         os.mkdir(os.path.join(work, d), 0o700)
     clone = os.path.join(work, "repo")
     chk = Checker(args, report)
     env = sanitized_env(os.path.join(work, "home"), work)
-    git = Git(git_exe, env, chk.record)
-    wrap = network_wrapper(env)
-    report["network_isolation"] = "unshare" if wrap else "none"
-    if args.require_no_network and not wrap:
+    wrap, iso = isolation_wrapper(args.isolation, env)
+    state["process_isolation"] = iso["process"]
+    report["network_isolation"], report["process_isolation"] = iso["network"], iso["process"]
+    report["isolation"] = {
+        **iso,
+        "filesystem": "none: files and unix sockets the user can read or write stay reachable",
+        "identity": "none: the real user, home directory and any secret file the user can read",
+        "environment": "allowlist only (no inherited variable is passed)",
+    }
+    if args.require_no_network and iso["network"] == "none":
         raise Inconclusive("--require-no-network but this host cannot isolate the network (no usable unshare)")
     report["environment"] = sorted(env)
 
-    git.run(
-        work,
-        "clone",
-        "--local",
-        "--no-hardlinks",
-        "--no-checkout",
-        f"--template={os.path.join(work, 'template')}",
-        "--",
-        root,
-        clone,
-        phase="clone",
-    )
+    # Every git step of the tool runs inside the same namespaces as the test.
+    git = Git(git_exe, env, chk.record, wrap, strict=False)
+    tgit = Git(git_exe, env, chk.record, wrap, strict=True)
+    trusted = Trusted(tgit, work, clone, objects, head)
+
+    git.run(work, "clone", "--local", "--no-hardlinks", "--no-checkout", "--", root, clone, phase="clone")
     git.run(clone, "checkout", "--detach", "--force", "--end-of-options", head, phase="checkout-head")
     check_patch_paths(files, clone)
 
@@ -637,17 +790,16 @@ def check(args, report, state):
     if kind != "green":
         raise Inconclusive(f"the test is not green at head (result: {kind}); nothing else was run")
 
-    git.run(clone, "apply", "-R", "--whitespace=nowarn", "-", phase="revert", stdin=patch)
-    _, dirty = git.out(clone, "status", "--porcelain=v1", "--untracked-files=all")
+    envx = trusted.prepare()
+    trusted.run("apply", "-R", "--whitespace=nowarn", "-", phase="revert", stdin=patch, envx=envx)
+    _, dirty = trusted.out("status", "--porcelain=v1", "--untracked-files=all", envx=envx)
     if not dirty:
         raise Inconclusive("the revert changed nothing in the clone")
     kind = chk.test_run("test-after-revert", test_argv, clone, env, wrap)
-    report["red_after_revert"] = {"green": False, "red": True}.get(kind) if kind in ("green", "red") else None
-    if kind == "error":
-        report["red_after_revert"] = None
+    report["red_after_revert"] = True if kind == "red" else (False if kind == "green" else None)
 
-    restore(git, clone, head)
-    after_restore = clean_evidence(git, clone, head)
+    restore(trusted)
+    after_restore = clean_evidence(trusted)
     report["tree_clean"] = {"after_restore": after_restore}
     if kind == "green":
         report["green_after_restore"] = None
@@ -656,7 +808,7 @@ def check(args, report, state):
     elif kind == "red":
         k3 = chk.test_run("test-after-restore", test_argv, clone, env, wrap)
         report["green_after_restore"] = k3 == "green"
-        report["tree_clean"]["final"] = clean_evidence(git, clone, head)
+        report["tree_clean"]["final"] = clean_evidence(trusted)
         state["conclusion"] = "bites" if k3 == "green" else "error"
         state["why"] = f"the test was not green after the restore (result: {k3})"
     else:
@@ -668,9 +820,10 @@ def check(args, report, state):
     state["after"] = snapshot(src_git, root)
 
 
-def restore(git, clone, sha):
-    git.run(clone, "checkout", "--force", "--detach", "--end-of-options", sha, phase="restore-checkout")
-    git.run(clone, "clean", "-ffdxq", phase="restore-clean")
+def restore(trusted):
+    envx = trusted.prepare()
+    trusted.run("checkout", "--force", "--detach", "--end-of-options", trusted.sha, phase="restore-checkout", envx=envx)
+    trusted.run("clean", "-ffdxq", phase="restore-clean", envx=envx)
 
 
 def build_parser():
@@ -678,11 +831,11 @@ def build_parser():
         def error(self, message):
             raise Inconclusive(f"usage: {message}")
 
-    p = Parser(prog="mutation_check.py", description=__doc__.split("\n\n")[0], allow_abbrev=False)
-    p.add_argument("--repo", required=True, help="source git repository (read only)")
-    p.add_argument("--head", required=True, help="commit to test (resolved to a full SHA)")
-    p.add_argument("--revert", required=True, help="commit whose non-test hunks are reverted, or a patch file")
-    p.add_argument("--test", required=True, help="the test command, split once with shlex into an argv (no shell)")
+    p = Parser(add_help=False, prog="mutation_check.py", description=__doc__.split("\n\n")[0], allow_abbrev=False)
+    p.add_argument("--repo", help="source git repository (read only)")
+    p.add_argument("--head", help="commit to test (resolved to a full SHA)")
+    p.add_argument("--revert", help="commit whose non-test hunks are reverted, or a patch file")
+    p.add_argument("--test", help="the test command, split once with shlex into an argv (no shell)")
     p.add_argument("--base", help="optional base commit, recorded in the output")
     p.add_argument("--scratch", help="parent directory of the disposable copy (default ~/.local/share/doia-mutation)")
     p.add_argument("--keep", action="store_true", help="keep the disposable copy even on bites")
@@ -690,11 +843,28 @@ def build_parser():
     p.add_argument("--max-output", type=int, default=1048576, help="output bytes per test run before it is killed")
     p.add_argument("--red-exit", default="1", help="comma list of exit codes that count as a failing test (default 1)")
     p.add_argument("--require-no-network", action="store_true", help="inconclusive when the network cannot be removed")
+    p.add_argument(
+        "--isolation", choices=ISOLATION_MODES, default="auto", help="namespaces for the test and the git steps"
+    )
+    p.add_argument(
+        "--clean-old", type=int, default=7, metavar="DAYS", help="remove this tool's copies older than DAYS (0: off)"
+    )
+    p.add_argument("--settle", type=float, default=1.0, help="seconds to wait before the last source check (default 1)")
+    p.add_argument("-h", "--help", action="store_true", help="print this help to stderr and exit 3")
     return p
 
 
 def parse(argv):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.help:
+        parser.print_help(sys.stderr)
+        raise Inconclusive("help was printed to stderr; no check was run (exit 3, never 0)")
+    for name in ("repo", "head", "revert", "test"):
+        if getattr(args, name) is None:
+            raise Inconclusive(f"usage: --{name} is required")
+    if args.clean_old < 0 or args.settle < 0:
+        raise Inconclusive("--clean-old and --settle must not be negative")
     try:
         args.red_exit_codes = {int(c) for c in args.red_exit.split(",") if c.strip()}
     except ValueError as e:
@@ -706,8 +876,8 @@ def parse(argv):
     return args
 
 
-class Interrupted(Exception):
-    pass
+class Interrupted(BaseException):
+    """Raised by the signal handler; BaseException so no `except Exception` in the tool can swallow it."""
 
 
 def main(argv=None):
@@ -720,7 +890,6 @@ def main(argv=None):
         "red_after_revert": None,
         "green_after_restore": None,
         "tree_clean": {"clean": False},
-        "source_repo_unchanged": None,
         "verdict": "inconclusive",
         "reason": "",
     }
@@ -741,17 +910,34 @@ def main(argv=None):
         report["reason"] = str(e)
     except Exception as e:  # fail closed: an unexpected error is never a pass
         report["reason"] = f"unexpected {type(e).__name__}: {e}"
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # a second signal must not break the cleanup
+        signal.signal(s, signal.SIG_IGN)
 
+    # The source repository is hashed once more after the test's process tree is gone and after a short settle
+    # time, so a process that outlived a run and wrote late is caught if it wrote within that window.
     before, after = state.get("before"), state.get("after")
+    after_settle = None
+    if before is not None and after is not None:
+        try:
+            time.sleep(args.settle)
+            after_settle = snapshot(state["src_git"], state["root"])
+        except Exception as e:
+            report["reason"] = report["reason"] or f"final source check failed: {type(e).__name__}"
+    unchanged = after_settle is not None and before == after == after_settle
     if before is not None:
-        report["source_repo_state"] = {"before": before, "after": after}
-        report["source_repo_unchanged"] = after is not None and before == after
+        report["source_repo_state"] = {"before": before, "after": after, "after_settle": after_settle}
+        if state.get("process_isolation") == "pid-namespace":
+            report["source_repo_unchanged"] = unchanged
+        else:
+            # No PID namespace: a process that escaped the process-group kill can still write later, so the claim
+            # is only that nothing had changed when this check looked.
+            report["source_unchanged_at_check"] = unchanged
     verdict = "inconclusive"
     conclusion = state.get("conclusion")
     if conclusion in ("bites", "vacuous") and not report["reason"]:
         if not report["tree_clean"].get("clean"):
             report["reason"] = "the clone's tree is not clean after the restore"
-        elif not report["source_repo_unchanged"]:
+        elif not unchanged:
             report["reason"] = "the source repository changed while the test ran (it can write outside the copy)"
         else:
             verdict = conclusion
