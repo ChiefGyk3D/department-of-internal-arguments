@@ -1353,6 +1353,11 @@ class GitBacked(unittest.TestCase):
             self.assertFalse(res["g1"]["ok"], name)
             self.assertIn("path", res["g1"]["notes"])
 
+    def test_pathspecs_are_literal_so_a_glob_in_a_path_matches_nothing(self):
+        base, head = self.shas["base"], self.shas["defect"]
+        self.assertTrue(benchmark._run_diff(self.repo, base, head, "src/a.py"))
+        self.assertEqual(benchmark._run_diff(self.repo, base, head, "src/*.py"), b"")
+
     def test_show_refuses_hostile_paths(self):
         for bad in ("../x", "/etc/passwd", ":(glob)*", "-x", "a/../b", "", "a\0b"):
             with self.assertRaises(ValueError, msg=bad):
@@ -1870,6 +1875,19 @@ class Bounds(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 benchmark.load_results(path, corpus())
             self.assertIn("results file is over", str(cm.exception))
+
+
+class MultibyteBounds(unittest.TestCase):
+    def test_the_line_cap_counts_bytes_not_characters(self):
+        line = json.dumps(record(notes="\u00e9" * 100), ensure_ascii=False)
+        self.assertLess(len(line), len(line.encode("utf-8")))
+        cap = (len(line) + len(line.encode("utf-8"))) // 2  # above the character count, below the byte count
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(benchmark, "MAX_RECORD_BYTES", cap):
+            path = Path(d) / "r.jsonl"
+            path.write_text(line + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as cm:
+                benchmark.load_results(path, corpus())
+            self.assertIn("over", str(cm.exception))
 
 
 class Patterns(unittest.TestCase):
