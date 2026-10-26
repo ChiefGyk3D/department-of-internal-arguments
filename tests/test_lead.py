@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import re
 import sys
 import tempfile
@@ -262,6 +263,29 @@ class LeadInstall(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("CLAUDE.md", out)
 
+    def test_a_filesystem_error_on_the_named_file_is_a_row_not_a_refusal(self):
+        self.file.write_text("x\n")  # exists, so the read is reached
+        for exc, status in (
+            (PermissionError("denied"), "unsafe"),
+            (IsADirectoryError("dir"), "unsafe"),
+            (OSError(5, "I/O error"), "unsafe"),
+            (FileNotFoundError("gone"), "missing"),  # vanished between the existence check and the read
+        ):
+            with self.subTest(type(exc).__name__), mock.patch.object(installer, "_read_capped", side_effect=exc):
+                code, out, err = self.listed()
+                self.assertEqual(code, 3, (out, err))
+                self.assertRegex(out, status + r"\s+-\s+public\s+CLAUDE\.md")
+                self.assertNotIn("denied", out + err)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_really_unreadable_file_is_unsafe_and_exits_3(self):
+        self.file.write_text("x\n")
+        self.file.chmod(0)
+        self.addCleanup(self.file.chmod, 0o600)
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3, out)
+        self.assertRegex(out, r"unsafe\s+-\s+public\s+CLAUDE\.md")
+
     def test_block_hash_matches_its_body(self):
         block = installer.lead_block()
         m = installer.LEAD_BEGIN_RE.fullmatch(block.split("\n", 1)[0])
@@ -306,6 +330,46 @@ class LeadRace(unittest.TestCase):
         code, _out, err = self.run_with_edit_at("checked", lambda: None)
         self.assertEqual(code, 0, err)
         self.assertTrue(self.file.read_text().startswith("mine\n"))
+
+    def test_a_permission_only_change_before_the_rename_is_refused(self):
+        self.file.write_text("mine\n")
+        self.file.chmod(0o644)
+        before = self.file.read_bytes()
+
+        code, _out, err = self.run_with_edit_at("checked", lambda: self.file.chmod(0o600))
+        self.assertEqual(code, 1)
+        self.assertIn("destination changed during install", err)
+        self.assertEqual(self.file.read_bytes(), before)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([p.name for p in self.target.iterdir()], ["CLAUDE.md"])
+
+    def test_the_recheck_runs_immediately_before_the_rename(self):
+        self.file.write_text("mine\n")
+        events = []
+        real_recheck, real_rename = installer._recheck, os.rename
+
+        def recheck(*a, **k):
+            events.append("recheck")
+            return real_recheck(*a, **k)
+
+        def rename(*a, **k):
+            events.append("rename")
+            return real_rename(*a, **k)
+
+        def seam(where, dest):
+            events.append(where)
+
+        with (
+            mock.patch.object(installer, "_race_seam", side_effect=seam),
+            mock.patch.object(installer, "_recheck", side_effect=recheck),
+            mock.patch.object(installer.os, "rename", side_effect=rename),
+        ):
+            code, _out, err = run_main(
+                "--target", str(self.target), "--adapter", "none", "--lead", "CLAUDE.md", "--apply"
+            )
+        self.assertEqual(code, 0, err)
+        # Nothing, seam or otherwise, runs between the recheck and the rename; the 'checked' seam comes before both.
+        self.assertEqual(events, ["checked", "recheck", "rename", "written"])
 
 
 if __name__ == "__main__":

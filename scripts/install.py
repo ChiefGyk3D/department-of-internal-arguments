@@ -647,7 +647,7 @@ def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
 
 def _lead_row(target, lead, root):
     """The row for the file named by --lead: current | stale | differs | edited, or missing (no file, or no block in
-    it) | unsafe (a symlink, not a regular file, over 1 MiB, not UTF-8). Anything but current exits 3."""
+    it) | unsafe (a symlink, not a regular file, over 1 MiB, not UTF-8, unreadable). Anything but current exits 3."""
     dest = _lead_path(target, lead)
     rel = str(dest.relative_to(target))
 
@@ -658,11 +658,16 @@ def _lead_row(target, lead, root):
         ensure_safe(dest)
     except ValueError:
         return row("unsafe")
-    if not (dest.exists() or dest.is_symlink()):
+    try:  # any filesystem error is a row, never a bare refusal: a named file must not vanish from the report
+        if not (dest.exists() or dest.is_symlink()):
+            return row("missing")
+        if dest.is_symlink() or not dest.is_file():
+            return row("unsafe")
+        raw = _read_capped(dest)
+    except FileNotFoundError:  # it went away after the existence check
         return row("missing")
-    if dest.is_symlink() or not dest.is_file():
+    except OSError:  # unreadable, an I/O error, a loop: nothing about the file can be vouched for
         return row("unsafe")
-    raw = _read_capped(dest)
     if len(raw) > MAX_MANAGED_BYTES:
         return row("unsafe")
     try:
