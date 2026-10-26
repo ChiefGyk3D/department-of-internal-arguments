@@ -48,7 +48,11 @@ REPORT_FIELDS = (
     "PACKS LOADED:",
     "TREE:",
     "NOT VERIFIED:",
+    "LOCAL-LLM:",
+    "VERIFIED-AGAINST:",
+    "DISCREPANCIES:",
 )
+LOCAL_LLM_TOKENS = ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:")
 TEMPLATES = ("adr", "brief", "copilot-instructions", "handoff", "lead")
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
@@ -253,6 +257,9 @@ def validate(root=ROOT):
         copilot = (root / "templates/copilot-instructions.md").read_text(encoding="utf-8")
         for tok in tokens:
             require(tok in copilot, f"templates/copilot-instructions.md lacks never-weaken token {tok!r}")
+        # Copilot reports in a PR description, so the template must ask for the same local-model line.
+        for tok in LOCAL_LLM_TOKENS:
+            require(tok in copilot, f"templates/copilot-instructions.md lacks local-model report token {tok!r}")
         require({f.stem for f in (root / "templates").glob("*.md")} == set(TEMPLATES), "unexpected or missing template")
 
         packs = load_packs(root)

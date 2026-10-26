@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+Local-model output is a draft, and the report says whether and how it was checked (issue #21). The measured findings are about gemma4:12b (12B) on 2026-10-26 only; nothing here claims anything about local models in general.
+
+- `local-llm-routing` pack: new section "Local output is a draft: verify it against the source". Local output is never applied or quoted unverified; four check shapes (echo-and-compare identifiers through an Ollama `format` schema, quotes found verbatim in the source, identifiers in the prose present in the source, instructions in `system` and text in `user`). The evidence is stated with model, size and date: gemma4:12b, 2026-10-26, 2 of 5 triage runs returned unrelated text, attribution inferred because the runs did not log the model, cause untested. The 4096 default context on GPUs under 24 GiB and the rule to always send `num_ctx` are stated. New verification commands: read the answering model from the response, compare `prompt_eval_count` with the input size.
+- `fragments/report-header.md`: a required `LOCAL-LLM: used - <model, size>; VERIFIED-AGAINST: <source>; DISCREPANCIES: <n> | n/a - reason` line. All four roles carry it through the fragment; `scripts/validate.py` requires `LOCAL-LLM:`, `VERIFIED-AGAINST:` and `DISCREPANCIES:` in every role report and in `templates/copilot-instructions.md`, which gains a "Local-model output is a draft" section.
+- Pilot log: optional `local_model` and `local_discrepancies` fields (both or neither); `scripts/summarize_log.py` validates them and prints a "Local-model runs" row; the synthetic example log gains a local-model fixture.
+- `evals/behavioral-evals.md`: rows 24 and 25 for the new line.
+- A SAFO hook or audit check for the line is a separate SAFO issue.
+
 ## [0.3.1] - 2026-10-11
 
 - `local-llm-routing` pack: upstreamed generic measured knowledge from a maintainer's private copy. `keep_alive` does not stop a context-change eviction; the 12B-plus-second-model fit measurement (8192 yes, 16384 no, Ollama 0.33.2); the `using device` journal grep and the 100% GPU check for multi-GPU placement; stale-probe and brief-versus-call guard notes; the Codex-over-Ollama command shape (still UNVERIFIED). A comparison of the `linux-platform` and `rf-emcomm` private copies found nothing to add.

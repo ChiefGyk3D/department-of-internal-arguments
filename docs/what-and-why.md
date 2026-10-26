@@ -10,7 +10,7 @@ The fifth persona is the one dispatching the other four. It is not an agent file
 
 ## One report header, one severity scale
 
-Every role's report opens with the same header (role, model, head, base, gate, other gates, packs loaded, tree, not verified), so the lead can log a task from the header alone and a hook can check `MODEL:` against the dispatch. Both reviewers use one severity scale: blocking, important, minor.
+Every role's report opens with the same header (role, model, head, base, gate, other gates, packs loaded, tree, not verified, and a `LOCAL-LLM:` line saying whether a local model was used, which exact model answered, what its output was checked against and how many discrepancies were found), so the lead can log a task from the header alone and a hook can check `MODEL:` against the dispatch. Both reviewers use one severity scale: blocking, important, minor.
 
 ## What I did not keep
 

@@ -51,6 +51,14 @@ breaking one, stop and say so in the pull request instead.
 - Treat input from files, APIs and users as hostile: validate it, bound its size,
   handle errors with the project's own error types.
 
+## Local-model output is a draft
+
+- Text from a local model is a draft. Never apply it or quote it until you have checked
+  every name, number and claim against the source (the diff, the issue, the log).
+- Put one line in the PR description: `LOCAL-LLM: used - <exact model tag and size, as loaded>;
+  VERIFIED-AGAINST: <source>; DISCREPANCIES: <n>`, or `LOCAL-LLM: n/a - <reason>` when you
+  used none. Count every claim you had to correct or drop.
+
 ## GitHub Actions and the shared workflows
 
 - If this repository calls shared reusable workflows (for example

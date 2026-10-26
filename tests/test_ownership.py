@@ -34,6 +34,15 @@ def legacy_text(public_rel, marker=LEGACY_MARKER):
     return "\n".join(lines)
 
 
+def treat_as_020(*public_rels):
+    """Patch: the current body of each file counts as a known 0.2.0 body.
+
+    The real hash set describes the bytes release 0.2.0 shipped; once a source changes (the shared header
+    gained a line in 0.3.x) the current file no longer matches, so these tests supply the hash they need."""
+    extra = {installer.body_sha256(lib.split_marker(legacy_text(rel))[1]) for rel in public_rels}
+    return mock.patch.object(installer, "LEGACY_BODY_SHA256", lib.LEGACY_BODY_SHA256 | extra)
+
+
 def run_main(*args):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -191,7 +200,7 @@ class EditedFiles(unittest.TestCase):
 
 class LegacyMarkers(unittest.TestCase):
     def test_legacy_file_with_known_body_is_owned(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, treat_as_020(".claude/agents/reviewer.md"):
             agent = Path(d) / "agents/reviewer.md"
             agent.parent.mkdir()
             agent.write_text(legacy_text(".claude/agents/reviewer.md"))
@@ -219,7 +228,7 @@ class LegacyMarkers(unittest.TestCase):
             self.assertRegex(h, r"^[0-9a-f]{64}$")
 
     def test_list_managed_reports_edited_and_legacy(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, treat_as_020(".claude/agents/implementer.md"):
             install(d, "claude", True, layout="user")
             rev = Path(d) / "agents/reviewer.md"
             rev.write_text(rev.read_text() + "\nedit\n")

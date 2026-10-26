@@ -5,3 +5,4 @@ OTHER GATES: <name>: pass | fail | not-run | n-a - reason (one per line)
 PACKS LOADED: names, or none
 TREE: clean (evidence) | NOT CLEAN (what) | n-a - reason
 NOT VERIFIED: what you did not run or could not check (one per line, or none)
+LOCAL-LLM: used - <exact model tag and size, as loaded>; VERIFIED-AGAINST: <the source each claim was checked against>; DISCREPANCIES: <n> | n/a - reason

@@ -83,7 +83,19 @@ class CurrentTree(unittest.TestCase):
     def test_every_role_report_has_shared_header_and_model_line(self):
         for role in load_roles(ROOT):
             body = role["body"]
-            for field in ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:"):
+            for field in (
+                "ROLE:",
+                "MODEL:",
+                "HEAD:",
+                "BASE:",
+                "GATE:",
+                "PACKS LOADED:",
+                "TREE:",
+                "NOT VERIFIED:",
+                "LOCAL-LLM:",
+                "VERIFIED-AGAINST:",
+                "DISCREPANCIES:",
+            ):
                 self.assertIn(field, body, role["name"])
             self.assertNotIn("{{fragment:", body, role["name"])
             if "reviewer" in role["name"]:
@@ -235,6 +247,26 @@ class RoleRules(unittest.TestCase):
     def test_role_without_shared_header_rejected(self):
         r = self.mutate_role("reviewer", "{{fragment:report-header}}", "HEAD: <sha>")
         self.assertTrue(any("shared header" in e for e in validate(r)))
+
+    def test_report_header_without_local_llm_line_rejected(self):
+        for token in ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:"):
+            with tempfile.TemporaryDirectory() as d:
+                r = copy_fixture(d)
+                f = r / "fragments/report-header.md"
+                text = f.read_text()
+                self.assertIn(token, text)
+                f.write_text(text.replace(token, "REMOVED:"))
+                self.assertTrue(any(f"report header lacks {token}" in e for e in validate(r)), token)
+
+    def test_copilot_template_must_carry_local_llm_line(self):
+        for token in ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:"):
+            with tempfile.TemporaryDirectory() as d:
+                r = copy_fixture(d)
+                f = r / "templates/copilot-instructions.md"
+                text = f.read_text()
+                self.assertIn(token, text)
+                f.write_text(text.replace(token, "REMOVED:"))
+                self.assertTrue(any(f"lacks local-model report token {token!r}" in e for e in validate(r)), token)
 
     def test_editing_role_that_may_push_rejected(self):
         r = self.mutate_role(
@@ -460,17 +492,167 @@ class Guards(unittest.TestCase):
             self.assertTrue(any("symlink in package" in e for e in validate(r)))
 
 
+class LocalLlmRule(unittest.TestCase):
+    """The pack and the eval rows state what was measured, about which model, on which date."""
+
+    def pack(self):
+        return (ROOT / "packs/local-llm-routing/PACK.md").read_text()
+
+    def test_pack_names_the_measured_model_size_and_date(self):
+        text = self.pack()
+        self.assertIn("gemma4:12b, 2026-10-26, 2 of 5 triage runs returned unrelated text", text)
+        self.assertIn("12B", text)
+        self.assertIn("may not hold for another model", text)
+
+    def test_pack_states_context_default_and_verify_step(self):
+        text = self.pack()
+        self.assertIn("4096", text)
+        self.assertIn("num_ctx", text)
+        self.assertIn("## Local output is a draft: verify it against the source", text)
+        self.assertIn("never applied or quoted unverified", text)
+        self.assertIn("LOCAL-LLM:", text)
+
+    STATUS = "INFERRED, untested on gemma4:12b"
+    INFERRED_KEYS = (
+        "lose most of its text while the instructions survive",
+        "1. **Echo and compare identifiers.**",
+        "2. **Quote, then answer.**",
+        "4. **Keep roles apart.**",
+        "means text was dropped",
+    )
+
+    def unmarked(self, text):
+        """Keys whose own line lacks the status (a key that is missing or repeated counts as unmarked)."""
+        bad = []
+        for key in self.INFERRED_KEYS:
+            lines = [ln for ln in text.splitlines() if key in ln]
+            if len(lines) != 1 or self.STATUS not in lines[0]:
+                bad.append(key)
+        return bad
+
+    def test_pack_does_not_promote_inferred_causes_to_rules(self):
+        text = self.pack()
+        self.assertIn("INFERRED", text)
+        self.assertIn("untested", text)
+        self.assertEqual(self.unmarked(text), [])
+
+    def test_status_check_bites_when_marker_is_missing(self):
+        text = self.pack()
+        self.assertEqual(len(self.unmarked(text.replace(self.STATUS, "fact"))), len(self.INFERRED_KEYS))
+        one = text.replace("means text was dropped (" + self.STATUS + ")", "means text was dropped")
+        self.assertNotEqual(one, text)
+        self.assertEqual(self.unmarked(one), ["means text was dropped"])
+
+    SCOPE = "model not recorded; measured 2026-10-07; not a finding about local models in general"
+
+    def test_pack_makes_no_class_level_claims_without_scope(self):
+        text = self.pack()
+        self.assertGreaterEqual(text.count(self.SCOPE), 4)
+        stripped = text.replace(self.SCOPE, "").replace("statement about local models in general", "")
+        stripped = stripped.replace("not a finding about local models in general", "")
+        for pattern in (
+            r"small local",
+            r"small model",
+            r"\d+B-class",
+            r"\d+B class",
+            r"class models?",
+            r"local models (do|are|can|were|have)",
+            r"in general",
+        ):
+            self.assertIsNone(re.search(pattern, stripped, re.IGNORECASE), pattern)
+        self.assertNotIn("small local", text.split("---", 2)[1].lower())
+
+    def test_scope_guard_bites(self):
+        bad = "what small local models do well and badly, a 4B-class model. " + self.SCOPE
+        hits = [p for p in (r"small local", r"\d+B-class") if re.search(p, bad.replace(self.SCOPE, ""))]
+        self.assertEqual(len(hits), 2)
+
+    def test_behavioral_eval_rows_cover_the_local_llm_line(self):
+        rows = [ln for ln in (ROOT / "evals/behavioral-evals.md").read_text().splitlines() if "LOCAL-LLM:" in ln]
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertTrue(any("DISCREPANCIES: 1" in ln for ln in rows))
+        self.assertTrue(any("n/a" in ln for ln in rows))
+
+
+class AmericanSpelling(unittest.TestCase):
+    """The prose is American English. A short list of the British spellings that have slipped in before."""
+
+    BRITISH = re.compile(
+        r"\b(summaris\w*|sanitis\w*|quantis\w*|organis\w*|recognis\w*|normalis\w*|licence\w*|neighbour\w*|"
+        r"behaviour\w*|colour\w*|defence\w*|favour\w*|centre\w*|catalogue\w*|artefact\w*|judgement\w*|"
+        r"whilst|amongst|honour\w*)\b",
+        re.IGNORECASE,
+    )
+    DIRS = ("docs", "packs", "policies", "fragments", "templates", "roles", "evals")
+
+    def files(self):
+        found = [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+        for d in self.DIRS:
+            found.extend(sorted((ROOT / d).rglob("*.md")))
+        return found
+
+    def test_no_british_spellings_in_prose(self):
+        files = self.files()
+        self.assertGreater(len(files), 20)
+        hits = [
+            f"{f.relative_to(ROOT)}:{n}: {m.group(0)}"
+            for f in files
+            for n, line in enumerate(f.read_text().splitlines(), 1)
+            for m in self.BRITISH.finditer(line)
+        ]
+        self.assertEqual(hits, [])
+
+    def test_guard_bites(self):
+        for word in ("sanitised", "Quantisation", "Licence", "neighbour", "summariser", "defence", "catalogues"):
+            self.assertIsNotNone(self.BRITISH.search(f"a {word} here"), word)
+        for word in ("sanitized", "license", "neighbor", "summarizer", "defense", "catalogs"):
+            self.assertIsNone(self.BRITISH.search(f"a {word} here"), word)
+
+
 class Summariser(unittest.TestCase):
     def test_example_log_summarises(self):
         rows = load(ROOT / "evals/example-log.jsonl")
         table = summarise(rows)
-        self.assertIn("| Tasks logged | 4 |", table)
+        self.assertIn("| Tasks logged | 5 |", table)
+        self.assertIn("| Local-model runs | 1 task; discrepancies 2; gemma4:12b 1 |", table)
         self.assertIn("| First-time approval of reviewed implementation tasks | 2 of 3 |", table)
         self.assertIn("| Fix rounds on implementation tasks | 2 |", table)
         self.assertIn("| Findings | blocking 1, important 3, minor 1 |", table)
-        self.assertIn("| Rule slips (violations) | 1 in 4 tasks |", table)
-        self.assertIn("| Gate exit non-zero | 0 of 3 logged gates |", table)
+        self.assertIn("| Rule slips (violations) | 1 in 5 tasks |", table)
+        self.assertIn("| Gate exit non-zero | 0 of 4 logged gates |", table)
         self.assertNotIn("inherit", table)
+
+    def test_local_fields_must_come_as_a_valid_pair(self):
+        good = json.loads((ROOT / "evals/example-log.jsonl").read_text().splitlines()[0])
+        ok = {**good, "local_model": "gemma4:12b", "local_discrepancies": 0}
+        bad_rows = [
+            {**good, "local_model": "gemma4:12b"},
+            {**good, "local_discrepancies": 0},
+            {**ok, "local_model": ""},
+            {**ok, "local_model": " "},
+            {**ok, "local_model": "ollama"},
+            {**ok, "local_model": "gemma4"},
+            {**ok, "local_model": "local models"},
+            {**ok, "local_model": "gemma4:12b\n"},
+            {**ok, "local_model": " gemma4:12b"},
+            {**ok, "local_model": "gemma4:12b\u200b"},
+            {**ok, "local_model": "gemma4:12"},
+            {**ok, "local_model": "inherit"},
+            {**ok, "local_model": "x" * 65},
+            {**ok, "local_model": 12},
+            {**ok, "local_discrepancies": -1},
+            {**ok, "local_discrepancies": True},
+            {**ok, "local_discrepancies": "1"},
+            {**ok, "local_discrepancies": None},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "log.jsonl"
+            p.write_text(json.dumps(ok) + "\n")
+            self.assertEqual(load(p)[0]["local_model"], "gemma4:12b")
+            for row in bad_rows:
+                p.write_text(json.dumps(row) + "\n")
+                with self.assertRaises(ValueError, msg=row):
+                    load(p)
 
     def test_malformed_line_fails_the_run(self):
         good = json.loads((ROOT / "evals/example-log.jsonl").read_text().splitlines()[0])

@@ -37,7 +37,7 @@ You dispatch the role agents (implementer, reviewer, adversarial-reviewer, trans
 
 ## Logging
 
-Append one line per task to the pilot log (`evals/log-schema.md`) from the report headers: role, model, packs, first review outcome, fix rounds, findings by severity, violations, gate exit. The summariser (`scripts/summarize_log.py`) turns the log into the table in the pilot notes. A task that is not logged did not happen for measurement purposes.
+Append one line per task to the pilot log (`evals/log-schema.md`) from the report headers: role, model, packs, first review outcome, fix rounds, findings by severity, violations, gate exit. The summarizer (`scripts/summarize_log.py`) turns the log into the table in the pilot notes. A task that is not logged did not happen for measurement purposes.
 
 ## What you never do
 

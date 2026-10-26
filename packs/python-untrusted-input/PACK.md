@@ -8,7 +8,7 @@ updated: "2026-10-08"
 
 Status: pilot pack, written 2026-10-08 from findings of 2026-10-07. UNVERIFIED items were not reproduced in that session.
 
-Untrusted means any bytes you did not write: config files, API responses, downloaded catalogues, directory entries. Most defects below were found by a reviewer who ran a hostile input; none were found by the author's tests.
+Untrusted means any bytes you did not write: config files, API responses, downloaded catalogs, directory entries. Most defects below were found by a reviewer who ran a hostile input; none were found by the author's tests.
 
 ## Checklist: loading YAML and JSON
 
