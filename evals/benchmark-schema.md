@@ -4,7 +4,7 @@ The benchmark (issue #3) asks which model does which role well enough to route w
 
 ## The corpus: `evals/benchmark/corpus.json`
 
-Seven tasks, 19 labelled findings, all drawn from this repository's own history, where the later findings are public. Every finding was shown to reproduce (below); five candidate seeds were dropped, each recorded with its reason in the `dropped` list, not adjusted to fit.
+Seven tasks, 19 labeled findings, all drawn from this repository's own history, where the later findings are public. Every finding was shown to reproduce (below); five candidate seeds were dropped, each recorded with its reason in the `dropped` list, not adjusted to fit.
 
 ### What the model is given
 
@@ -68,23 +68,23 @@ Because `--check` exits 0 when it cannot run, and the gate never runs `--reprodu
 
 ## The rubric
 
-A finding counts only if it is the labelled class and is reproduced by the model's own evidence. **The match is a keyword heuristic. It cannot tell a report written to hit the patterns from a report that understood the code.** The controls are these, and none is a proof:
+A finding counts only if it is the labeled class and is reproduced by the model's own evidence. **The match is a keyword heuristic. It cannot tell a report written to hit the patterns from a report that understood the code.** The controls are these, and none is a proof:
 
 **These controls stop accidental or label-only echoing. They do NOT stop a report that copies the public corpus.** `corpus.json` is public, and its labels, quotes and evidence patterns are in it. A report built from the quotes and pattern words of a finding scores a full match with no code reviewed (a test shows 16 of 16 on the diff tasks, and names it a known limit), and the brief task can be matched with a few phrases. The protection against that is operational, not in the scorer: **a scored run never shows the model `corpus.json`**, and every result record must say so with `corpus_hidden: true`; a record without it is refused for scoring. A copied report is a match, not a false finding, so the false-findings column cannot catch it.
 
 The controls that remain:
 
-1. The class label and the path must be the labelled ones.
+1. The class label and the path must be the labeled ones.
 2. On a diff task the evidence must contain a verbatim code line from the head checkout (`quotes`). This stops a report that only names the topic. It does not prove the code was read, because the quotes are public.
 3. The evidence must match at least two different patterns (`evidence_min`), written with word boundaries, on different, non-overlapping pieces of text (two patterns satisfied by the same words count once).
-4. A human reads the false-findings column: a true finding that is not in the labelled set counts as false, so the number is "not in the labelled set", not "wrong". This catches wrong and unlisted reports. It cannot catch a gamed one.
+4. A human reads the false-findings column: a true finding that is not in the labeled set counts as false, so the number is "not in the labeled set", not "wrong". This catches wrong and unlisted reports. It cannot catch a gamed one.
 
 A test builds a report from the label alone (class and path copied, evidence the first word of the first pattern, and then the first word of every pattern) and asserts it scores zero recall on every task. The brief task has no code to quote, so it is the weakest: a brief that lists the right phrases can match. Treat brief-writer numbers as a screen to be confirmed by reading the briefs.
 
 Matching is deterministic and does not depend on the order of the report. Each reported finding is a candidate for every expected finding it satisfies; the assignment is a maximum bipartite matching (augmenting paths, reports in a canonical order, expected findings in corpus order). So two overlapping labels and two reports cannot score differently because of which came first.
 
 1. A reported finding is `{class, path, evidence}`. Each expected finding is matched once.
-2. A report that is a candidate but loses its expected finding to another report is a duplicate. It is counted and is not false.
+2. A report that is a candidate but loses its expected finding to another report is a duplicate. It is not false, and it is not matched: it counts as reported, so it lowers precision. Fifty copies of one valid finding score one match, 49 duplicates, no false findings and a precision of 2%.
 3. A report with a class outside the list, or a missing or empty path or evidence, is false and unevidenced.
 4. Every other report with no candidate is false.
 
@@ -93,7 +93,7 @@ Numbers, each with its unit:
 | Measure | Unit | How |
 | --- | --- | --- |
 | Recall | % of expected findings | matched / expected; also in-diff and pre-existing separately |
-| Precision | % of reported findings | matched / (matched + false); `n/a` when nothing was reported |
+| Precision | % of reported findings | matched / reported, where reported is every finding in the record (duplicates and false findings included); `n/a` when nothing was reported |
 | False findings | count | rules 3 and 4 |
 | Fix rounds avoided | rounds of total | a history round counts when every finding of that round was matched |
 | Wall clock | seconds, mean | from the record |
@@ -112,7 +112,7 @@ This is the result format of the behavioral-evals matrix (issue #24: `client`, `
 | `client`, `client_version` | Exact client name and version; both required |
 | `model` | An exact id, stated once here (below) |
 | `quantization`, `context` | Local models only (an Ollama tag), and then both required; `context` at most 100,000,000 |
-| `date`, `commit` | A real calendar date `YYYY-MM-DD`, no later than tomorrow (UTC), and the commit of this repository the run used: 40 hex characters, or an abbreviation that resolves in a full clone |
+| `date`, `commit` | A real calendar date `YYYY-MM-DD`, no later than tomorrow (UTC), and the commit of this repository the run used: the full 40-character lowercase hex id (an abbreviation can resolve to another object in a fork, so it is refused). `--score` checks the commit exists in `--repo` and prints `commits: verified`; `--skip-commit-check` skips that and the output is headed `commits: NOT VERIFIED`. Without a repository only the shape is checked |
 | `tools_enabled` | List of tool names the model had |
 | `outcome` | `completed`, `refused`, `filter-cutoff`, `error`, `timeout` |
 | `findings` | List of exactly `{class, path, evidence}`, at most 50, evidence at most 2000 characters |
@@ -129,6 +129,17 @@ No text field may hold a control, format (zero-width or bidirectional), line-sep
 **Exact model id.** An Ollama tag needs a size or a version and may not be `latest`, a moving tag (`gemma4:12b`, `nomic-embed-text:v1.5`). A hyphenated API id needs a version number and a word after the vendor name (`claude-sonnet-5-5`, `gpt-5.1-codex`, `o3-mini`). Rejected: a family name (`sonnet`, `opus`), a bare vendor and major (`claude-3`, `gpt-5`), and any alias (an id with `latest`, `inherit` or `default` in it, `gemma:latest`).
 
 The scorer fails the whole file on a malformed line, a missing model id, version or cost, a duplicate JSON key or a duplicate record key, so a typo cannot quietly shrink the sample.
+
+## Hostile inputs and resource bounds
+
+A pull request can change `corpus.json`, the probes and the inputs, and a results file comes from outside, so none of them is trusted. The checks are in `scripts/benchmark.py`, each with a test that fails if it is removed.
+
+- **Paths.** Every corpus path (finding paths, a repro `path`, a probe name, `tests_file`, a brief `input_file`) must be a relative path with no empty, `.` or `..` component, no NUL, backslash or control character, and no leading `/`, `-` or `:` (the last would be a git pathspec). A probe and `tests_file` must be a plain file name ending in `.py`. `confine(root, rel)` then resolves a path against its root, refuses a symlink in any component, and requires the real path to stay inside the real root. It is applied to the probe script, the mutation target and the brief input at run time, and the syntax check runs when the corpus is loaded. `git` runs with literal pathspecs. A check followed by a use is not atomic; the trees are private temporary directories.
+- **Patterns.** A corpus pattern is refused at load if it is over 400 characters, has a repeat bound above 1000, has a repeat inside a repeat, has an alternation inside a repeat, or uses a group reference. Every match against a corpus pattern also runs under a hard 2 s limit (`SIGALRM` in the main thread on POSIX; elsewhere only the load-time check applies), so a pattern that gets past validation cannot hang the scorer. Evidence is at most 2000 characters and diff lines are cut at 5000.
+- **Processes.** Every child (git, a probe, the unit tests of a mutated copy) starts in its own session. On a timeout, an error or an interrupt the whole process group is killed and reaped; a grandchild that outlives its child is killed as soon as the child exits. Captured output is capped (1 MiB for probes and tests, 64 MiB for git); a child that exceeds the cap is killed, and output over the cap from git is an error, never a silently truncated digest. Timeouts: git 120 s, a probe 120 s, unit tests 600 s.
+- **Sizes.** The corpus is read with a 2 MiB cap, a result line with 512 KiB, a results file with 64 MiB, and nesting that would exhaust the parser is an ordinary error. `git archive` is streamed, not held in memory: at most 256 MiB of stream, 20,000 files, 64 MiB per file and 512 MiB expanded, with links, devices and any member that leaves the destination refused.
+
+`--reproduce` prints the git version it ran with. None of this makes `--reproduce` a sandbox (see above): it limits what a hostile corpus can do to the tool, not what pinned history can do when executed.
 
 ## Private seeds
 

@@ -10,7 +10,7 @@ changes only in a pull request that cites the numbers). Standard library only. `
 evals/benchmark/probes, and the unit tests of mutated copies, against checkouts of this repository's own history, in a
 temporary directory.
 
-The match between a reported finding and a labelled one is a keyword heuristic (see the schema): it cannot detect a
+The match between a reported finding and a labeled one is a keyword heuristic (see the schema): it cannot detect a
 report written to hit the patterns. The controls are a verbatim quote from the code at the head commit, at least two
 distinct evidence patterns, the class and the path, and a human reading the false-findings column."""
 
@@ -23,11 +23,15 @@ import json
 import math
 import os
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -68,12 +72,32 @@ MAX_SECONDS = 10**7
 MAX_CONTEXT = 10**8
 MAX_RUN = 10**6
 DEFAULT_EVIDENCE_MIN = 2
+# Resource bounds. Every input of this tool can be hostile (a pull request may change the corpus; a results file comes
+# from outside), so each is read with a cap, each child process has a time and an output cap, and archives have caps.
+MAX_CORPUS_BYTES = 2 * 1024 * 1024
+MAX_RECORD_BYTES = 512 * 1024
+MAX_RESULTS_BYTES = 64 * 1024 * 1024
+MAX_CHILD_OUTPUT = 1024 * 1024
+MAX_GIT_OUTPUT = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_FILES = 20000
+MAX_EXPANDED_BYTES = 512 * 1024 * 1024
+MAX_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_DIFF_LINE = 5000
+GIT_TIMEOUT = 120
+PROBE_TIMEOUT = 120
+TEST_TIMEOUT = 600
+REGEX_BUDGET_S = 2.0
+MAX_PATTERN_LEN = 400
+MAX_REPEAT_BOUND = 1000
+MAX_PATH_LEN = 300
 NOT_EXACT = frozenset({"latest", "inherit", "default", "auto", "current", "newest"})
 API_ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9.]+)+", re.ASCII)
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}", re.ASCII)
 HEX40_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
 HEX64_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
-COMMIT_RE = re.compile(r"[0-9a-f]{7,40}", re.ASCII)
+COMMIT_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
+NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,100}\.py", re.ASCII)
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 PRIVATE_PATH_RE = re.compile("/ho" + "me/|/Us" + "ers/|" + r"\\Us" + r"ers\\|~/")
 OBSERVED, NOT_OBSERVED = "OBSERVED", "NOT-OBSERVED"
@@ -145,8 +169,218 @@ def _pairs(pairs):
     return out
 
 
+def _read_capped(path, cap, what):
+    with Path(path).open("rb") as fh:
+        data = fh.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError(f"{what} is over {cap} bytes")
+    return data.decode("utf-8")
+
+
+def _loads(text, what):
+    """json.loads with duplicate keys refused and a hostile nesting depth turned into an ordinary error."""
+    try:
+        return json.loads(text, object_pairs_hook=_pairs)
+    except RecursionError:
+        raise ValueError(f"{what} is nested too deeply") from None
+
+
 def load_corpus(path=CORPUS):
-    return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_pairs)
+    return _loads(_read_capped(path, MAX_CORPUS_BYTES, "corpus"), "corpus")
+
+
+# ---------------------------------------------------------------- hostile-input defenses: paths, patterns, processes
+
+
+def rel_path_error(rel):
+    """Why `rel` is not a safe relative path (text), or None. Syntax only: no filesystem access."""
+    if not isinstance(rel, str) or not rel:
+        return "must be a non-empty relative path"
+    if len(rel) > MAX_PATH_LEN or "\0" in rel or "\\" in rel or not _clean(rel):
+        return "holds a NUL, backslash, control character or is too long"
+    if rel[0] in "/-:":
+        return "must be relative and may not start with /, - or :"
+    if any(part in ("", ".", "..") for part in rel.split("/")):
+        return "may not hold an empty, . or .. component"
+    return None
+
+
+def confine(root, rel):
+    """The path root/rel, proven to stay inside root: relative only, no empty, . or .. component, no NUL, no symlink
+    in any component, and the real path inside the real root. Raises ValueError otherwise. The path need not exist."""
+    err = rel_path_error(rel)
+    if err:
+        raise ValueError(f"path {str(rel)[:60]!r} {err}")
+    real_root = Path(os.path.realpath(root))
+    cur = real_root
+    for part in rel.split("/"):
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"path {rel!r} goes through a symlink")
+    if not Path(os.path.realpath(cur)).is_relative_to(real_root):
+        raise ValueError(f"path {rel!r} leaves {root}")
+    return cur
+
+
+class RegexBudget(ValueError):
+    """A pattern took longer than its budget to match (catastrophic backtracking)."""
+
+
+@contextlib.contextmanager
+def _regex_budget(seconds):
+    """A hard time limit for the matching inside the block. Python's matcher checks for signals, so SIGALRM can stop a
+    runaway pattern; this works in the main thread on POSIX and is skipped elsewhere (the static check at corpus load is
+    the other defense)."""
+    if not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def boom(signum, frame):
+        raise RegexBudget(f"a regular expression took more than {seconds} s to match")
+
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def _search(pattern, text, flags=0, budget=None):
+    with _regex_budget(REGEX_BUDGET_S if budget is None else budget):
+        return re.search(pattern, text, flags) is not None
+
+
+def _spans(pattern, text, limit=8, budget=None):
+    out = []
+    with _regex_budget(REGEX_BUDGET_S if budget is None else budget):
+        for m in re.finditer(pattern, text):
+            if m.end() > m.start():
+                out.append((m.start(), m.end(), m.group(0)))
+                if len(out) >= limit:
+                    break
+    return out
+
+
+def pattern_errors(pattern):
+    """Why a corpus pattern is refused (list of text). Conservative: no repeat nested in a repeat, no alternation or
+    group reference inside a repeat that can run more than once, no repeat bound above MAX_REPEAT_BOUND, a bounded
+    length. A pattern that passes cannot backtrack exponentially; `_regex_budget` is the second defense."""
+    if len(pattern) > MAX_PATTERN_LEN:
+        return [f"longer than {MAX_PATTERN_LEN} characters"]
+    try:
+        from re import _constants as k
+        from re import _parser as parser
+
+        tree = parser.parse(pattern)
+    except re.error as exc:
+        return [f"bad regular expression ({exc})"]
+    except ImportError:
+        return ["cannot analyze patterns on this Python"]
+    errs = []
+    repeats = {k.MAX_REPEAT, k.MIN_REPEAT, getattr(k, "POSSESSIVE_REPEAT", k.MAX_REPEAT)}
+
+    def walk(items, inside):
+        for op, av in items:
+            if op in repeats:
+                lo, hi, sub = av
+                wide = hi > 1
+                if hi != k.MAXREPEAT and hi > MAX_REPEAT_BOUND:
+                    errs.append(f"repeat bound above {MAX_REPEAT_BOUND}")
+                if wide and inside:
+                    errs.append("a repeat inside a repeat")
+                walk(sub, inside or wide)
+            elif op == k.BRANCH:
+                if inside:
+                    errs.append("an alternation inside a repeat")
+                for branch in av[1]:
+                    walk(branch, inside)
+            elif op == k.SUBPATTERN:
+                walk(av[3], inside)
+            elif op in (k.ASSERT, k.ASSERT_NOT):
+                walk(av[1], inside)
+            elif op == k.GROUPREF:
+                errs.append("a group reference")
+            elif op == getattr(k, "ATOMIC_GROUP", None):
+                walk(av, inside)
+
+    walk(tree, False)
+    return sorted(set(errs))
+
+
+def _kill_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _run(cmd, *, timeout, env=None, cwd=None, max_output=None):
+    """Run a child in its own session and return (CompletedProcess, truncated). stdout and stderr are capped at
+    max_output bytes each (a marker is appended and the child's process group is killed when output was cut). On a
+    timeout, an error or an interrupt the whole process group is killed, not only the child, and reaped. A stray
+    grandchild that outlives the child is killed as soon as the child has exited."""
+    max_output = MAX_CHILD_OUTPUT if max_output is None else max_output
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    bufs = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+    truncated = False
+    swept = False
+    sel = selectors.DefaultSelector()
+    deadline = time.monotonic() + timeout
+    try:
+        for f in bufs:
+            os.set_blocking(f.fileno(), False)
+            sel.register(f, selectors.EVENT_READ)
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            for key, _ in sel.select(min(left, 0.2)):
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                buf = bufs[key.fileobj]
+                room = max_output - len(buf)
+                buf += chunk[: max(room, 0)]
+                if len(chunk) > room:
+                    truncated = True
+            if truncated:
+                break
+            if not swept and proc.poll() is not None:
+                _kill_group(proc)  # the child is gone: whatever still runs in its group is a stray
+                swept = True
+        if truncated:
+            _kill_group(proc)
+        proc.wait(timeout=max(deadline - time.monotonic(), 0.1))
+    except BaseException:
+        if proc.returncode is None:
+            _kill_group(proc)
+        proc.wait()
+        raise
+    finally:
+        if proc.returncode is None:  # never signal a group whose leader was already reaped (its id may be reused)
+            _kill_group(proc)
+        sel.close()
+        proc.stdout.close()
+        proc.stderr.close()
+    out, err = bytes(bufs[proc.stdout]), bytes(bufs[proc.stderr])
+    if truncated:
+        marker = f"\n[output truncated at {max_output} bytes]\n".encode()
+        out, err = out + marker, err + marker
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err), truncated
 
 
 # ---------------------------------------------------------------- corpus structure
@@ -173,10 +407,8 @@ def _regex_errors(label, patterns):
         return [f"{label}: must be a non-empty list of regular expressions"]
     errs = []
     for p in patterns:
-        try:
-            re.compile(p)
-        except re.error as exc:
-            errs.append(f"{label}: bad regular expression {p!r} ({exc})")
+        for why in pattern_errors(p):
+            errs.append(f"{label}: refused pattern {p[:60]!r}: {why}")
     return errs
 
 
@@ -262,12 +494,17 @@ def _task_errors(t, by_key, check_files, probes_dir, bench_dir):
     else:
         if not (isinstance(t.get("input_sha256"), str) and HEX64_RE.fullmatch(t["input_sha256"])):
             errs.append(f"{tid}: input_sha256 must be 64 hex characters")
-        if check_files and isinstance(t.get("input_file"), str):
-            path = Path(bench_dir) / t["input_file"]
-            if not path.is_file():
-                errs.append(f"{tid}: input file missing: {t['input_file']}")
-            elif hashlib.sha256(path.read_bytes()).hexdigest() != t.get("input_sha256"):
-                errs.append(f"{tid}: input file changed since it was recorded: {t['input_file']}")
+        if isinstance(t.get("input_file"), str) and rel_path_error(t["input_file"]):
+            errs.append(f"{tid}: input_file {t['input_file'][:60]!r} {rel_path_error(t['input_file'])}")
+        elif check_files and isinstance(t.get("input_file"), str):
+            try:
+                path = confine(bench_dir, t["input_file"])
+                if not path.is_file():
+                    errs.append(f"{tid}: input file missing: {t['input_file']}")
+                elif hashlib.sha256(path.read_bytes()).hexdigest() != t.get("input_sha256"):
+                    errs.append(f"{tid}: input file changed since it was recorded: {t['input_file']}")
+            except ValueError as exc:
+                errs.append(f"{tid}: {exc}")
     if not isinstance(t.get("title"), str) or not t.get("title"):
         errs.append(f"{tid}: title must be text")
     findings = t.get("findings")
@@ -305,6 +542,10 @@ def _finding_errors(tid, kind, f, ids, by_key, check_files, probes_dir):
             errs.append(f"{label}: {key} must be short text")
     if not (isinstance(f["paths"], list) and f["paths"] and all(isinstance(p, str) and p for p in f["paths"])):
         errs.append(f"{label}: paths must be a non-empty list of paths")
+    elif kind != "brief":
+        for path in f["paths"]:
+            if rel_path_error(path):
+                errs.append(f"{label}: path {path[:60]!r} {rel_path_error(path)}")
     errs += _regex_errors(f"{label}: evidence_any", f["evidence_any"])
     if "evidence_min" in f:
         n = f["evidence_min"]
@@ -370,20 +611,32 @@ def _repro_errors(label, kind, f, by_key, check_files, probes_dir):
             return errs + [f"{label}: probe repro needs kind, probe and args"]
         if not (isinstance(r["args"], list) and all(isinstance(a, str) for a in r["args"])):
             return errs + [f"{label}: probe args must be a list of strings"]
-        if check_files and not (Path(probes_dir) / r["probe"]).is_file():
-            errs.append(f"{label}: probe file missing: {r['probe']}")
+        if not NAME_RE.fullmatch(r["probe"]):
+            return errs + [f"{label}: probe must be a plain file name ending in .py"]
+        if check_files:
+            try:
+                if not confine(probes_dir, r["probe"]).is_file():
+                    errs.append(f"{label}: probe file missing: {r['probe']}")
+            except ValueError as exc:
+                errs.append(f"{label}: {exc}")
         return errs
     if k == "pattern":
         if set(r) != {"kind", "path", "regex", "present"} or not isinstance(r["present"], bool):
             return errs + [f"{label}: pattern repro needs kind, path, regex and present (true or false)"]
         if not isinstance(r["regex"], str):
             return errs + [f"{label}: pattern regex must be text"]
+        if rel_path_error(r["path"]):
+            errs.append(f"{label}: repro path {str(r['path'])[:60]!r} {rel_path_error(r['path'])}")
         return errs + _regex_errors(f"{label}: repro regex", [r["regex"]])
     if k == "mutation":
         keys = {"kind", "path", "old", "new", "tests_file", "k"}
         ok = set(r) == keys and all(isinstance(r[x], str) for x in ("path", "old", "new", "tests_file"))
         if not (ok and r["old"] and r["old"] != r["new"] and (r["k"] is None or isinstance(r["k"], str))):
             return errs + [f"{label}: mutation repro needs kind, path, old, new, tests_file and k"]
+        if rel_path_error(r["path"]):
+            errs.append(f"{label}: repro path {r['path'][:60]!r} {rel_path_error(r['path'])}")
+        if not NAME_RE.fullmatch(r["tests_file"]):
+            errs.append(f"{label}: tests_file must be a plain file name ending in .py")
         return errs
     return errs + [f"{label}: repro kind must be probe, pattern or mutation"]
 
@@ -396,12 +649,7 @@ def _enough_hits(patterns, text, need):
     patterns that are satisfied by the same words (\\.\\. and \\.\\./x on "../x") count once."""
     spans = []
     for p in patterns:
-        found = []
-        for m in re.finditer(p, text):
-            if m.end() > m.start():
-                found.append((m.start(), m.end(), m.group(0)))
-                if len(found) >= 8:
-                    break
+        found = _spans(p, text)
         if found:
             spans.append(found)
     if len(spans) < need:
@@ -545,20 +793,15 @@ REQUIRED = (
 OPTIONAL = ("quantization", "context", "cost_usd", "notes")
 
 
-def _resolves(repo, abbreviated):
-    if repo is None or not _has_clone(repo):
-        return False
-    p = _git(repo, "rev-parse", "--verify", "--quiet", f"{abbreviated}^{{commit}}", check=False)
-    return p.returncode == 0
-
-
 def parse_result(line, n, c, repo=None):
     """One result record: the #24 result fields (task for case, client, client_version, model, quantization, context,
     tools_enabled, commit, date, outcome, cost) plus the benchmark fields. A malformed record is an error, never a
     skipped row, so a typo cannot quietly shrink the sample. An abbreviated commit must resolve in `repo`."""
+    if len(line) > MAX_RECORD_BYTES:
+        raise ValueError(f"line {n}: over {MAX_RECORD_BYTES} bytes")
     try:
-        rec = json.loads(line, object_pairs_hook=_pairs)
-    except (json.JSONDecodeError, ValueError) as exc:
+        rec = _loads(line, "record")
+    except ValueError as exc:  # includes json.JSONDecodeError
         raise ValueError(f"line {n}: not JSON ({exc})") from None
     if not isinstance(rec, dict):
         raise ValueError(f"line {n}: not an object")
@@ -648,10 +891,13 @@ def _check_date(value, bad):
 
 
 def _check_commit(value, repo, bad):
+    """A record names its commit by the full 40-character id: an abbreviation can resolve to another object in a fork.
+    With a repository given, the commit must exist in it; without one the id is only checked for shape, and the output
+    of `--score` says so (it is headed 'commits: NOT VERIFIED')."""
     if not (isinstance(value, str) and COMMIT_RE.fullmatch(value)):
-        bad("commit must be a hex commit id of this repository")
-    if len(value) != 40 and not _resolves(repo, value):
-        bad("an abbreviated commit must resolve in a full clone of this repository; give the 40-character id")
+        bad("commit must be the full 40-character lowercase hex id of a commit of this repository")
+    if repo is not None and not (_is_git_repo(repo) and _has_commit(repo, value)):
+        bad("commit is not in the given repository (fetch it, or pass --skip-commit-check to skip the check)")
 
 
 def _check_findings(findings, bad):
@@ -671,8 +917,15 @@ def _check_findings(findings, bad):
 
 def load_results(path, c, repo=None):
     rows, keys = [], set()
-    with Path(path).open(encoding="utf-8") as fh:
-        for n, line in enumerate(fh, 1):
+    total = 0
+    with Path(path).open("rb") as fh:
+        for n, raw in enumerate(iter(lambda: fh.readline(MAX_RECORD_BYTES + 1), b""), 1):
+            if len(raw) > MAX_RECORD_BYTES:
+                raise ValueError(f"line {n}: over {MAX_RECORD_BYTES} bytes")
+            total += len(raw)
+            if total > MAX_RESULTS_BYTES:
+                raise ValueError(f"results file is over {MAX_RESULTS_BYTES} bytes")
+            line = raw.decode("utf-8")
             if not line.strip():
                 continue
             rec = parse_result(line, n, c, repo)
@@ -703,14 +956,14 @@ def summarize(rows, c):
     ]
     for (role, model, client, version), ms in sorted(groups.items()):
         pool = sum(role in t["roles"] for t in c["tasks"])
-        exp, hit, fls = (sum(m[k] for m in ms) for k in ("expected", "matched", "false"))
+        exp, hit, fls, rep = (sum(m[k] for m in ms) for k in ("expected", "matched", "false", "reported"))
         sc = {s: (sum(m["by_scope"][s][0] for m in ms), sum(m["by_scope"][s][1] for m in ms)) for s in SCOPES}
         got, tot = sum(m["rounds_avoided"] for m in ms), sum(m["rounds_total"] for m in ms)
         wall = sum(m["wall_clock_s"] for m in ms) / len(ms)
         lines.append(
             f"| {role} | {model} | {client} {version} | {len({m['task'] for m in ms})} of {pool} | {_pct(hit, exp)} | "
             f"{_pct(sc['in_diff'][1], sc['in_diff'][0])} | {_pct(sc['pre_existing'][1], sc['pre_existing'][0])} | "
-            f"{_pct(hit, hit + fls)} | {fls} | {got} of {tot} | {wall:.1f} | "
+            f"{_pct(hit, rep)} | {fls} | {got} of {tot} | {wall:.1f} | "
             f"{sum(m['tokens_input'] for m in ms)} | {sum(m['tokens_output'] for m in ms)} | "
             f"{sum(m['refusals'] for m in ms)} |"
         )
@@ -759,6 +1012,7 @@ def _git_env():
         GIT_CONFIG_NOSYSTEM="1",
         GIT_ATTR_NOSYSTEM="1",
         GIT_TERMINAL_PROMPT="0",
+        GIT_LITERAL_PATHSPECS="1",
     )
     env.pop("XDG_CONFIG_HOME", None)
     return env
@@ -766,7 +1020,11 @@ def _git_env():
 
 def _git(repo, *args, check=True):
     pins = [x for kv in DIFF_CONFIG for x in ("-c", kv)]
-    p = subprocess.run(["git", *pins, "-C", str(repo), *args], capture_output=True, env=_git_env(), timeout=120)
+    p, cut = _run(
+        ["git", *pins, "-C", str(repo), *args], timeout=GIT_TIMEOUT, env=_git_env(), max_output=MAX_GIT_OUTPUT
+    )
+    if cut:
+        raise RuntimeError(f"git {args[0]} produced more than {MAX_GIT_OUTPUT} bytes")
     if check and p.returncode:
         raise RuntimeError(p.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed")
     return p
@@ -781,7 +1039,7 @@ def _object_view(repo):
     common = _git(repo, "rev-parse", "--git-common-dir").stdout.decode().strip()
     objects = (Path(repo) / common).resolve() / "objects"
     with tempfile.TemporaryDirectory() as tmp:
-        p = subprocess.run(["git", "init", "--bare", "-q", tmp], capture_output=True, env=_git_env(), timeout=120)
+        p, _ = _run(["git", "init", "--bare", "-q", tmp], timeout=GIT_TIMEOUT, env=_git_env())
         if p.returncode:
             raise RuntimeError(p.stderr.decode("utf-8", "replace").strip() or "git init failed")
         (Path(tmp) / "objects" / "info").mkdir(parents=True, exist_ok=True)
@@ -817,6 +1075,15 @@ def _has_clone(repo):
 
 def _has_commit(repo, sha):
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+
+def _is_git_repo(repo):
+    return Path(repo).is_dir() and _git(repo, "rev-parse", "--git-dir", check=False).returncode == 0
+
+
+def git_version():
+    p, _ = _run(["git", "--version"], timeout=GIT_TIMEOUT, env=_git_env())
+    return p.stdout.decode("utf-8", "replace").strip() or "git version unknown"
 
 
 def _commits(c):
@@ -879,37 +1146,109 @@ def _scope_check(repo, t, f):
     text = diff_bytes(repo, t["base"], t["head"], *paths).decode("utf-8", "replace") if paths else ""
     if f["scope"] == "in_diff":
         lines = _touched_lines(text)
-        if not any(re.search(p, ln) for p in f["touched"] for ln in lines):
-            errs.append(f"{label}: labelled in_diff but no touched line of the diff matches {f['touched']}")
+        if not any(_search(p, ln[:MAX_DIFF_LINE]) for p in f["touched"] for ln in lines):
+            errs.append(f"{label}: labeled in_diff but no touched line of the diff matches {f['touched']}")
     else:  # pre_existing: no quote of it may be a line this diff adds, whatever the base shows
         added = _added_text(text)
         for q in f["quotes"]:
             if _norm(q) in added:
-                errs.append(f"{label}: labelled pre_existing but its quote is added by the diff: {q[:60]!r}")
+                errs.append(f"{label}: labeled pre_existing but its quote is added by the diff: {q[:60]!r}")
     return errs
+
+
+def _check_member(m):
+    """True for a regular file or directory; False for anything else (links, devices: not extracted). Raises for a
+    member name that would leave the destination."""
+    parts = Path(m.name).parts
+    if Path(m.name).is_absolute() or ".." in parts:
+        raise RuntimeError(f"archive member escapes the destination: {m.name}")
+    return m.isfile() or m.isdir()
 
 
 def _safe_members(tf):
     for m in tf.getmembers():
-        parts = Path(m.name).parts
-        if Path(m.name).is_absolute() or ".." in parts:
-            raise RuntimeError(f"archive member escapes the destination: {m.name}")
-        if m.isfile() or m.isdir():
+        if _check_member(m):
             yield m
 
 
-def _extract(repo, sha, dest):
-    with _object_view(repo) as view:
-        data = _git(view, "archive", sha).stdout
-    with tarfile.open(fileobj=io.BytesIO(data)) as tf:
-        members = list(_safe_members(tf))
+class _Capped(io.RawIOBase):
+    """A readable stream that fails once more than `cap` bytes have been read from `raw`."""
+
+    def __init__(self, raw, cap):
+        self.raw, self.cap, self.seen = raw, cap, 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buf):
+        data = self.raw.read(len(buf))
+        self.seen += len(data)
+        if self.seen > self.cap:
+            raise RuntimeError(f"archive is over {self.cap} bytes")
+        buf[: len(data)] = data
+        return len(data)
+
+
+def _extract_stream(tf, dest):
+    files = total = 0
+    for m in tf:
+        if not _check_member(m):
+            continue
+        if m.isfile():
+            files += 1
+            total += m.size
+            if files > MAX_ARCHIVE_FILES:
+                raise RuntimeError(f"archive holds more than {MAX_ARCHIVE_FILES} files")
+            if m.size > MAX_MEMBER_BYTES:
+                raise RuntimeError(f"archive member {m.name!r} is over {MAX_MEMBER_BYTES} bytes")
+            if total > MAX_EXPANDED_BYTES:
+                raise RuntimeError(f"archive expands to more than {MAX_EXPANDED_BYTES} bytes")
         if hasattr(tarfile, "data_filter"):  # Python 3.11.4 and later (and 3.12+): the standard hardened filter
-            tf.extractall(dest, members=members, filter="data")
-        else:  # earlier 3.11 patch releases: our own member check above is the only guard
-            tf.extractall(dest, members=members)  # noqa: S202 (members are vetted by _safe_members)
+            tf.extract(m, dest, set_attrs=False, filter="data")
+        else:  # earlier 3.11 patch releases: _check_member is the only guard
+            tf.extract(m, dest, set_attrs=False)  # noqa: S202 (member vetted by _check_member)
+
+
+def _extract(repo, sha, dest):
+    """Stream `git archive sha` into dest with caps on the stream, the file count and the expanded size; the git
+    process group is killed on any failure or after GIT_TIMEOUT."""
+    pins = [x for kv in DIFF_CONFIG for x in ("-c", kv)]
+    with _object_view(repo) as view, tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(
+            ["git", *pins, "-C", str(view), "archive", sha],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=errf,
+            env=_git_env(),
+            start_new_session=True,
+        )
+        watchdog = threading.Timer(GIT_TIMEOUT, _kill_group, [proc])
+        watchdog.start()
+        try:
+            try:
+                with tarfile.open(fileobj=_Capped(proc.stdout, MAX_ARCHIVE_BYTES), mode="r|") as tf:
+                    _extract_stream(tf, dest)
+            except tarfile.TarError as exc:
+                raise RuntimeError(f"git archive did not produce a readable archive ({exc})") from None
+            code = proc.wait()
+        except BaseException:
+            _kill_group(proc)
+            proc.wait()
+            raise
+        finally:
+            watchdog.cancel()
+            if proc.returncode is None:
+                _kill_group(proc)
+            proc.stdout.close()
+        if code:
+            errf.seek(0)
+            raise RuntimeError(errf.read(2000).decode("utf-8", "replace").strip() or "git archive failed")
 
 
 def _show(repo, sha, path):
+    err = rel_path_error(path)
+    if err:
+        raise ValueError(f"path {str(path)[:60]!r} {err}")
     p = _git(repo, "show", f"{sha}:{path}", check=False)
     return p.stdout.decode("utf-8", "replace") if p.returncode == 0 else None
 
@@ -924,7 +1263,7 @@ def _tree(repo, sha, work):
 
 def _pattern_observed(repo, sha, repro):
     text = _show(repo, sha, repro["path"])
-    found = text is not None and re.search(repro["regex"], text, re.MULTILINE) is not None
+    found = text is not None and _search(repro["regex"], text, re.MULTILINE)
     return found == repro["present"]
 
 
@@ -940,11 +1279,17 @@ def _run_env(scratch):
 def _probe_observed(repo, sha, repro, probes_dir, work):
     tree = _tree(repo, sha, work)
     scratch = Path(tempfile.mkdtemp(dir=work))
-    cmd = [sys.executable, "-I", str(Path(probes_dir) / repro["probe"]), str(tree), str(scratch), *repro["args"]]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=_run_env(scratch), timeout=120, cwd=scratch)
-    last = (p.stdout.strip().splitlines() or [""])[-1]
+    if not NAME_RE.fullmatch(str(repro["probe"])):
+        raise ValueError(f"probe name {str(repro['probe'])[:60]!r} is not a plain file name ending in .py")
+    script = confine(probes_dir, repro["probe"])
+    cmd = [sys.executable, "-I", str(script), str(tree), str(scratch), *repro["args"]]
+    p, cut = _run(cmd, timeout=PROBE_TIMEOUT, env=_run_env(scratch), cwd=scratch)
+    stdout, stderr = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+    last = (stdout.strip().splitlines() or [""])[-1]
+    if cut:
+        raise RuntimeError(f"probe printed more than {MAX_CHILD_OUTPUT} bytes")
     if p.returncode != 0:
-        raise RuntimeError(f"probe exit {p.returncode}: {(p.stderr.strip().splitlines() or ['no output'])[-1]}")
+        raise RuntimeError(f"probe exit {p.returncode}: {(stderr.strip().splitlines() or ['no output'])[-1]}")
     if last.startswith(NOT_OBSERVED):
         return False, last
     if last.startswith(OBSERVED):
@@ -953,11 +1298,13 @@ def _probe_observed(repo, sha, repro, probes_dir, work):
 
 
 def _unittests_pass(tree, repro, scratch):
+    if not NAME_RE.fullmatch(str(repro["tests_file"])):
+        raise ValueError(f"tests_file {str(repro['tests_file'])[:60]!r} is not a plain file name ending in .py")
     cmd = [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-p", repro["tests_file"]]
     if repro["k"]:
         cmd += ["-k", repro["k"]]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=_run_env(scratch), timeout=600, cwd=tree)
-    return p.returncode == 0
+    p, cut = _run(cmd, timeout=TEST_TIMEOUT, env=_run_env(scratch), cwd=tree)
+    return p.returncode == 0 and not cut
 
 
 def _mutation_observed(repo, sha, repro, work):
@@ -968,7 +1315,7 @@ def _mutation_observed(repo, sha, repro, work):
     shutil.copytree(_tree(repo, sha, work), tree)
     if not _unittests_pass(tree, repro, scratch):
         raise RuntimeError(f"the tests are not green on the unmutated tree at {sha[:12]}")
-    target = tree / repro["path"]
+    target = confine(tree, repro["path"])
     text = target.read_text(encoding="utf-8") if target.is_file() else ""
     if text.count(repro["old"]) != 1:
         return False, "the code to mutate is not there (exactly once)"
@@ -996,7 +1343,7 @@ def reproduce(repo, c, probes_dir=PROBES, bench_dir=BENCH):
                 notes = []
                 try:
                     ok = _reproduce_one(repo, t, f, by_key, probes_dir, bench_dir, work, notes)
-                except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
                     ok = False
                     notes.append(f"error: {exc}")
                 if "proxy" in f:
@@ -1009,9 +1356,9 @@ def _reproduce_one(repo, t, f, by_key, probes_dir, bench_dir, work, notes):
     if t["kind"] == "brief":
         ref_task, ref = by_key[f["repro"]["finding"]]
         ok = _reproduce_one(repo, ref_task, ref, by_key, probes_dir, bench_dir, work, notes)
-        text = (Path(bench_dir) / t["input_file"]).read_text(encoding="utf-8")
+        text = confine(bench_dir, t["input_file"]).read_text(encoding="utf-8")
         for p in f["absent_from_input"]:
-            if re.search(p, text):
+            if _search(p, text):
                 ok = False
                 notes.append(f"the brief input already covers it ({p!r})")
         return ok
@@ -1041,6 +1388,11 @@ def main(argv=None):
     ap.add_argument("--corpus", type=Path, default=CORPUS)
     ap.add_argument("--repo", type=Path, default=ROOT)
     ap.add_argument("--probes", type=Path, default=PROBES)
+    ap.add_argument(
+        "--skip-commit-check",
+        action="store_true",
+        help="do not check that the commits named by result records exist in --repo (the output says so)",
+    )
     a = ap.parse_args(argv)
     if not (a.check or a.reproduce or a.score):
         ap.error("give --check, --reproduce or --score RESULTS")
@@ -1050,7 +1402,11 @@ def main(argv=None):
         if errs:
             raise ValueError("corpus: " + "; ".join(errs))
         if a.score:
-            print(summarize(load_results(a.score, c, a.repo), c))
+            repo = None if a.skip_commit_check else a.repo
+            rows = load_results(a.score, c, repo)
+            print("commits: NOT VERIFIED (--skip-commit-check)" if repo is None else f"commits: verified in {a.repo}")
+            print()
+            print(summarize(rows, c))
         if a.check or a.reproduce:
             status, cerrs = check_commits(a.repo, c)
             if status == "fail":
@@ -1061,6 +1417,7 @@ def main(argv=None):
                 if a.reproduce:
                     return 2
         if a.reproduce:
+            print(f"git: {git_version()}")
             res = reproduce(a.repo, c, probes_dir=a.probes)
             for r in res:
                 print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['task']}/{r['finding']}: {r['notes']}")

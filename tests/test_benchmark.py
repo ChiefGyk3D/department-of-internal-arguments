@@ -10,10 +10,12 @@ import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -121,6 +123,19 @@ def record(**over):
     }
     r.update(over)
     return r
+
+
+GRANDCHILD = (
+    "import subprocess, sys, time\n"
+    'late = \'import time, sys; time.sleep(2.5); open(sys.argv[1], "w").write("x")\'\n'
+    "subprocess.Popen([sys.executable, '-c', late, %r])\n"
+    "time.sleep(%s)\n"
+)
+
+
+def grandchild_code(marker, stay):
+    """A child that starts a grandchild which writes `marker` after 2.5 s, then sleeps `stay` seconds (0: exits)."""
+    return GRANDCHILD % (str(marker), stay)
 
 
 def parse(rec, c=None, repo=None):
@@ -254,6 +269,13 @@ class Matching(unittest.TestCase):
         seen = {tuple(sorted(self.m(list(order), t)["matched"])) for order in itertools.permutations(reports)}
         self.assertEqual(len(seen), 1, seen)
         self.assertEqual(len(next(iter(seen))), 3)
+
+    def test_fifty_copies_of_one_valid_finding_match_once_and_are_not_precise(self):
+        r = self.m([self.GOOD] * 50)
+        self.assertEqual((r["matched"], r["duplicates"], r["false"]), (["f1"], 49, 0))
+        row = benchmark.summarize([parse(record(findings=[self.GOOD] * 50), corpus(self.t))], corpus(self.t))
+        cells = [x.strip() for x in row.splitlines()[-1].strip("|").split("|")]
+        self.assertEqual((cells[4], cells[7]), ("50.0", "2.0"))  # recall 1 of 2, precision 1 of 50 reported
 
     def test_the_quote_may_break_across_lines_in_the_report(self):
         r = self.m([{**self.GOOD, "evidence": "the unchecked\n  value is bad"}])
@@ -483,6 +505,11 @@ class ResultRecords(unittest.TestCase):
                 self.rejects(record(**{key: "ok" + ch + "ok"}), key)
             self.rejects(record(findings=[{"class": "dead-code", "path": "a", "evidence": "x" + ch + "y"}]), "control")
 
+    def test_commit_must_be_the_full_40_character_id(self):
+        for bad in ("abcdef1", "a" * 39, "a" * 41, "A" * 40, "g" * 40, "xyz", 5, None):
+            self.rejects(record(commit=bad), "40-character")
+        self.assertEqual(parse(record(commit="0123456789abcdef0123456789abcdef01234567"))["run"], 1)
+
     def test_cost_has_an_upper_bound(self):
         self.assertEqual(parse(record(cost_usd=10_000_000))["cost_usd"], 10_000_000)
         self.rejects(record(cost_usd=10_000_001), "cost_usd")
@@ -491,13 +518,6 @@ class ResultRecords(unittest.TestCase):
         for bad in ("2026-02-30", "2026-13-01", "2026-00-10", "2026-1-01", "20261101", "2026-11-31"):
             self.rejects(record(date=bad), "date")
         self.assertEqual(parse(record(date="2024-02-29"))["date"], "2024-02-29")
-
-    def test_commit_is_40_hex_or_an_abbreviation_that_resolves(self):
-        self.rejects(record(commit="abcdef1"), "abbreviated")  # no clone given
-        self.rejects(record(commit="xyz"), "commit")
-        self.rejects(record(commit="A" * 40), "commit")
-        self.rejects(record(commit="a" * 41), "commit")
-        self.assertEqual(parse(record(commit="0123456789abcdef0123456789abcdef01234567"))["run"], 1)
 
     def test_control_and_invisible_characters_are_rejected_in_text_fields(self):
         for ch in ("\x1b[31m", "\n", "\x00", "​", "‮", "\x7f", " "):
@@ -687,10 +707,24 @@ class Scoring(unittest.TestCase):
             bad.write_text(json.dumps({**rec, "model": "sonnet"}) + "\n", encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                self.assertEqual(benchmark.main(["--score", str(good)]), 0)
-                self.assertEqual(benchmark.main(["--score", str(bad)]), 1)
+                self.assertEqual(benchmark.main(["--score", str(good), "--skip-commit-check"]), 0)
+                self.assertEqual(benchmark.main(["--score", str(bad), "--skip-commit-check"]), 1)
             self.assertIn("| Role | Model |", out.getvalue())
+            self.assertIn("commits: NOT VERIFIED", out.getvalue())
             self.assertIn("FAIL", err.getvalue())
+            # with the commit check on (the default), a commit that is not in the repository is refused
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(benchmark.main(["--score", str(good)]), 1)
+            self.assertIn("not in the given repository", err.getvalue())
+            # and a real commit is verified and said to be
+            head = git(ROOT, "rev-parse", "HEAD").strip()
+            real = Path(d) / "real.jsonl"
+            real.write_text(json.dumps({**rec, "commit": head}) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(benchmark.main(["--score", str(real)]), 0)
+            self.assertIn("commits: verified", out.getvalue())
         self.assertEqual(hashlib.sha256(routing.read_bytes()).hexdigest(), before)
 
 
@@ -731,6 +765,35 @@ class CorpusStructure(unittest.TestCase):
             "private path": lambda c: f0(c).update({"summary": "see /ho" + "me/someone/x"}),
             "dropped without reason": lambda c: c["dropped"].append({"id": "d1"}),
             "unknown scope": lambda c: f0(c).update({"scope": "somewhere"}),
+            "catastrophic evidence pattern": lambda c: f0(c).update({"evidence_any": ["(a+)+$", "x"]}),
+            "catastrophic touched pattern": lambda c: f0(c).update({"touched": ["(a|aa)+$"]}),
+            "absolute finding path": lambda c: f0(c).update({"paths": ["/etc/passwd"]}),
+            "parent finding path": lambda c: f0(c).update({"paths": ["../x"]}),
+            "pathspec-magic finding path": lambda c: f0(c).update({"paths": [":(glob)*"]}),
+            "absolute probe": lambda c: f0(c).update({"repro": {"kind": "probe", "probe": "/x/p.py", "args": []}}),
+            "parent probe": lambda c: f0(c).update({"repro": {"kind": "probe", "probe": "../p.py", "args": []}}),
+            "nested probe": lambda c: f0(c).update({"repro": {"kind": "probe", "probe": "a/p.py", "args": []}}),
+            "absolute mutation path": lambda c: f0(c).update(
+                {"repro": {"kind": "mutation", "path": "/x", "old": "a", "new": "b", "tests_file": "t.py", "k": None}}
+            ),
+            "parent mutation path": lambda c: f0(c).update(
+                {
+                    "repro": {
+                        "kind": "mutation",
+                        "path": "a/../../x",
+                        "old": "a",
+                        "new": "b",
+                        "tests_file": "t.py",
+                        "k": None,
+                    }
+                }
+            ),
+            "hostile tests_file": lambda c: f0(c).update(
+                {"repro": {"kind": "mutation", "path": "a", "old": "a", "new": "b", "tests_file": "../t.py", "k": None}}
+            ),
+            "hostile pattern path": lambda c: f0(c).update(
+                {"repro": {"kind": "pattern", "path": "../x", "regex": "x", "present": True}}
+            ),
             "in_diff without touched": lambda c: f0(c).pop("touched"),
             "in_diff with a bad touched regex": lambda c: f0(c).update({"touched": ["("]}),
             "pre_existing with touched": lambda c: f0(c).update({"scope": "pre_existing"}),
@@ -758,6 +821,13 @@ class CorpusStructure(unittest.TestCase):
         del f["proxy"]
         f["repro"] = {"kind": "mutation", "path": "a", "old": "x", "new": "y", "tests_file": "t.py", "k": None}
         self.assertEqual(self.errors(c), [])
+
+    def test_a_hostile_brief_input_file_is_refused(self):
+        c = self.brief_corpus()
+        for bad in ("/etc/hostname", "../x.md", "a/../../x.md", "a\\b.md", ""):
+            broken = copy.deepcopy(c)
+            broken["tasks"][1]["input_file"] = bad
+            self.assertTrue(self.errors(broken), bad)
 
     def test_a_pre_existing_finding_needs_quotes_but_no_touched_line(self):
         c = corpus(task(findings=[pre_existing("f1")]))
@@ -813,7 +883,7 @@ class RealCorpus(unittest.TestCase):
         roles = {r for t in self.c["tasks"] for r in t["roles"]}
         self.assertTrue({"reviewer", "adversarial-reviewer", "brief-writer"} <= roles)
 
-    def test_both_scopes_are_present_and_labelled(self):
+    def test_both_scopes_are_present_and_labeled(self):
         scopes = {f["scope"] for t in self.c["tasks"] for f in t["findings"]}
         self.assertEqual(scopes, {"in_diff", "pre_existing", "brief"})
         counts = {s: sum(f["scope"] == s for t in self.c["tasks"] for f in t["findings"]) for s in scopes}
@@ -852,7 +922,11 @@ class RealCorpus(unittest.TestCase):
 
 
 class GitBacked(unittest.TestCase):
-    """The resolve and reproduce machinery, against a synthetic repository."""
+    """The resolve and reproduce machinery, against a synthetic repository.
+
+    No test here depends on the local git configuration: GIT_ENV points the global and system configuration at the
+    null device for the helper that builds the repository, and every call under test goes through benchmark._git,
+    which pins the configuration itself."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1177,23 +1251,6 @@ class GitBacked(unittest.TestCase):
         self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertFalse([k for k in env if k.startswith("GIT_")])
 
-    def test_every_subprocess_has_a_timeout(self):
-        calls = []
-        real = subprocess.run
-
-        def spy(*args, **kw):
-            calls.append((args[0][0] if args else "?", kw.get("timeout")))
-            return real(*args, **kw)
-
-        probe = {"kind": "probe", "probe": "p.py", "args": []}
-        c = self.corpus_for(self.pattern_finding(repro=probe))
-        with mock.patch.object(subprocess, "run", spy):
-            benchmark.check_commits(self.repo, c)
-            self.run_reproduce(c)
-        self.assertTrue(calls)
-        self.assertEqual([x for x in calls if x[1] is None], [])
-        self.assertTrue(any(prog != "git" for prog, _ in calls))  # the probe itself was run
-
     def test_cli_not_run_message_and_the_reproduce_exit_code_without_a_clone(self):
         c = self.corpus_for(self.pattern_finding())
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as empty:
@@ -1207,6 +1264,189 @@ class GitBacked(unittest.TestCase):
                 self.assertIn("no commit was checked", out.getvalue())
                 self.assertEqual(benchmark.main([*base, "--reproduce"]), 2)
 
+    # ---- hostile inputs: paths, processes, bounds
+
+    def corpus_with_probe(self, name):
+        probe = {"kind": "probe", "probe": name, "args": []}
+        return self.corpus_for(finding(repro=probe, at_base="n/a"))
+
+    def test_a_probe_named_by_an_absolute_or_parent_path_is_never_run(self):
+        mark = Path(self._tmp.name) / "PAYLOAD-RAN"
+        payload = Path(self._tmp.name) / "payload.py"
+        payload.write_text(f"open({str(mark)!r}, 'w').write('x')\nprint('OBSERVED')\n", encoding="utf-8")
+        for name in (str(payload), "../payload.py", "a/../../payload.py", "sub/payload.py"):
+            res = self.run_reproduce(self.corpus_with_probe(name))
+            self.assertFalse(res[0]["ok"], name)
+            self.assertFalse(mark.exists(), name)
+
+    def test_a_probe_that_is_a_symlink_is_never_run(self):
+        mark = Path(self._tmp.name) / "LINKED-PAYLOAD-RAN"
+        payload = Path(self._tmp.name) / "payload.py"
+        payload.write_text(f"open({str(mark)!r}, 'w').write('x')\nprint('OBSERVED')\n", encoding="utf-8")
+        (self.probes / "linked.py").symlink_to(payload)
+        res = self.run_reproduce(self.corpus_with_probe("linked.py"))
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("symlink", res[0]["notes"])
+        self.assertFalse(mark.exists())
+
+    def test_a_hostile_touched_pattern_is_cut_off_in_the_scope_check(self):
+        long_a = "a" * 24 + "!"
+        (self.repo / "src" / "a.py").write_text(long_a + "\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "hostile line")
+        sha = git(self.repo, "rev-parse", "HEAD").strip()
+        digest = benchmark.diff_digest(self.repo, self.shas["base"], sha)
+        f = finding(
+            quotes=[long_a],
+            touched=["(a+)+$"],
+            repro={"kind": "pattern", "path": "src/a.py", "regex": "a", "present": True},
+        )
+        c = corpus(task(base=self.shas["base"], head=sha, diff_sha256=digest, findings=[f]))
+        with mock.patch.object(benchmark, "REGEX_BUDGET_S", 0.3):
+            with self.assertRaises(benchmark.RegexBudget):
+                benchmark.check_commits(self.repo, c)
+
+    def test_a_hanging_git_archive_is_killed_with_its_children(self):
+        mark = Path(self._tmp.name) / "ARCHIVE-GRANDCHILD-WROTE"
+        real_git = shutil.which("git")
+        fake = Path(self._tmp.name) / "fakearchive"
+        fake.mkdir()
+        script = fake / "git"
+        script.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f"  *archive*) (sleep 2.5; touch {mark}) & sleep 8 ;;\n"
+            f'  *) exec {real_git} "$@" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{fake}:{os.environ['PATH']}"}),
+            mock.patch.object(benchmark, "GIT_TIMEOUT", 1),
+        ):
+            with tempfile.TemporaryDirectory() as d, self.assertRaises(RuntimeError):
+                benchmark._extract(self.repo, self.shas["defect"], d)
+        time.sleep(3.5)
+        self.assertFalse(mark.exists())
+
+    def test_a_brief_input_file_outside_the_bench_directory_is_never_read(self):
+        bench = Path(self._tmp.name) / "bench"
+        bench.mkdir()
+        secret = Path(self._tmp.name) / "secret.txt"
+        secret.write_text("unrelated words\n", encoding="utf-8")
+        for name in (str(secret), "../secret.txt"):
+            c = self.corpus_for(finding())
+            b = task(
+                "b1",
+                roles=("brief-writer",),
+                kind="brief",
+                findings=[brief_finding(absent_from_input=["topic"])],
+                input_file=name,
+                input_sha256="d" * 64,
+            )
+            for k in ("diff_sha256", "base", "head"):
+                b.pop(k)
+            c["tasks"].append(b)
+            res = {r["finding"]: r for r in self.run_reproduce(c, bench_dir=bench)}
+            # read unconfined, "topic" is absent from the secret file and the finding would reproduce
+            self.assertFalse(res["g1"]["ok"], name)
+            self.assertIn("path", res["g1"]["notes"])
+
+    def test_show_refuses_hostile_paths(self):
+        for bad in ("../x", "/etc/passwd", ":(glob)*", "-x", "a/../b", "", "a\0b"):
+            with self.assertRaises(ValueError, msg=bad):
+                benchmark._show(self.repo, self.shas["defect"], bad)
+
+    def test_a_grandchild_of_a_timed_out_probe_is_killed_too(self):
+        mark = Path(self._tmp.name) / "GRANDCHILD-WROTE"
+        (self.probes / "slow.py").write_text(grandchild_code(mark, 8), encoding="utf-8")
+        with mock.patch.object(benchmark, "PROBE_TIMEOUT", 1):
+            res = self.run_reproduce(self.corpus_with_probe("slow.py"))
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("timed out", res[0]["notes"])
+        time.sleep(3.5)
+        self.assertFalse(mark.exists())
+
+    def test_a_probe_that_floods_its_output_fails_instead_of_filling_memory(self):
+        (self.probes / "flood.py").write_text("print('x' * 100000)\nprint('OBSERVED')\n", encoding="utf-8")
+        with mock.patch.object(benchmark, "MAX_CHILD_OUTPUT", 1000):
+            res = self.run_reproduce(self.corpus_with_probe("flood.py"))
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("printed more than", res[0]["notes"])
+
+    def test_a_git_that_hangs_is_killed_with_its_children(self):
+        mark = Path(self._tmp.name) / "GIT-GRANDCHILD-WROTE"
+        fake = Path(self._tmp.name) / "fakebin"
+        fake.mkdir()
+        script = fake / "git"
+        script.write_text(f"#!/bin/sh\n(sleep 2.5; touch {mark}) &\nsleep 8\n", encoding="utf-8")
+        script.chmod(0o755)
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{fake}:{os.environ['PATH']}"}),
+            mock.patch.object(benchmark, "GIT_TIMEOUT", 1),
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                benchmark._git(self.repo, "rev-parse", "HEAD")
+        time.sleep(3.5)
+        self.assertFalse(mark.exists())
+
+    def test_git_output_over_the_cap_is_an_error_not_a_truncated_digest(self):
+        with mock.patch.object(benchmark, "MAX_GIT_OUTPUT", 100):
+            with self.assertRaises(RuntimeError) as cm:
+                benchmark.diff_bytes(self.repo, self.shas["base"], self.shas["defect"])
+        self.assertIn("more than", str(cm.exception))
+
+    def test_archive_caps(self):
+        sha = self.shas["defect"]
+        with tempfile.TemporaryDirectory() as ok:
+            benchmark._extract(self.repo, sha, ok)  # the normal case still works
+            self.assertTrue((Path(ok) / "src" / "a.py").is_file())
+        for name, value, fragment in (
+            ("MAX_ARCHIVE_BYTES", 1000, "archive is over"),
+            ("MAX_ARCHIVE_FILES", 2, "more than 2 files"),
+            ("MAX_MEMBER_BYTES", 10, "is over 10 bytes"),
+            ("MAX_EXPANDED_BYTES", 50, "expands to more than"),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                with mock.patch.object(benchmark, name, value):
+                    with self.assertRaises(RuntimeError) as cm:
+                        benchmark._extract(self.repo, sha, d)
+                self.assertIn(fragment, str(cm.exception))
+
+    def test_a_pattern_that_backtracks_forever_is_cut_off_where_the_corpus_is_applied(self):
+        hostile = {"kind": "pattern", "path": "src/a.py", "regex": "(a+)+$", "present": True}
+        long_a = "a" * 24 + "!"
+        (self.repo / "src" / "a.py").write_text(long_a + "\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "hostile text")
+        sha = git(self.repo, "rev-parse", "HEAD").strip()
+        c = self.corpus_for(finding(repro=hostile, at_base="n/a"))
+        c["tasks"][0]["head"] = sha
+        with mock.patch.object(benchmark, "REGEX_BUDGET_S", 0.3):
+            started = time.monotonic()
+            res = self.run_reproduce(c)
+            self.assertFalse(res[0]["ok"])
+            self.assertIn("took more than", res[0]["notes"])
+            # the brief input and a touched search are guarded the same way
+            with tempfile.TemporaryDirectory() as bench:
+                (Path(bench) / "in.md").write_text(long_a, encoding="utf-8")
+                b = task(
+                    "b1",
+                    roles=("brief-writer",),
+                    kind="brief",
+                    findings=[brief_finding(absent_from_input=["(a+)+$"])],
+                    input_file="in.md",
+                    input_sha256="d" * 64,
+                )
+                for k in ("diff_sha256", "base", "head"):
+                    b.pop(k)
+                c2 = self.corpus_for(finding())
+                c2["tasks"].append(b)
+                res = {r["finding"]: r for r in self.run_reproduce(c2, bench_dir=Path(bench))}
+                self.assertIn("took more than", res["g1"]["notes"])
+        self.assertLess(time.monotonic() - started, 20)
+
     def test_a_shallow_clone_is_not_a_clone_for_the_check(self):
         shallow = Path(self._tmp.name) / "shallow"
         subprocess.run(
@@ -1218,20 +1458,19 @@ class GitBacked(unittest.TestCase):
         c = self.corpus_for(self.pattern_finding())
         self.assertEqual(benchmark.check_commits(shallow, c), ("not-run", []))
 
-    def test_an_abbreviated_commit_in_a_record_must_resolve_in_a_full_clone(self):
-        short = self.shas["defect"][:10]
-        self.assertEqual(parse(record(commit=short), repo=self.repo)["commit"], short)
+    def test_a_commit_in_a_record_must_exist_in_the_given_repository(self):
+        real = self.shas["defect"]
+        self.assertEqual(parse(record(commit=real), repo=self.repo)["commit"], real)
+        with self.assertRaises(ValueError) as cm:
+            parse(record(commit="f" * 40), repo=self.repo)
+        self.assertIn("not in the given repository", str(cm.exception))
         with self.assertRaises(ValueError):
-            parse(record(commit="0" * 10), repo=self.repo)
-        shallow = Path(self._tmp.name) / "shallow2"
-        subprocess.run(
-            ["git", "clone", "-q", "--depth", "1", "file://" + str(self.repo), str(shallow)],
-            check=True,
-            capture_output=True,
-            env={**os.environ, **GIT_ENV},
-        )
-        with self.assertRaises(ValueError):
-            parse(record(commit=short), repo=shallow)
+            parse(record(commit=real[:10]), repo=self.repo)  # an abbreviation is never accepted
+        with tempfile.TemporaryDirectory() as notrepo:
+            with self.assertRaises(ValueError):
+                parse(record(commit=real), repo=notrepo)
+        # without a repository only the shape is checked
+        self.assertEqual(parse(record(commit="f" * 40))["commit"], "f" * 40)
 
     def test_check_commits_needs_no_network(self):
         c = self.corpus_for(self.pattern_finding())
@@ -1317,6 +1556,7 @@ class GitBacked(unittest.TestCase):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 self.assertEqual(benchmark.main([*base, "--check"]), 0)
                 self.assertEqual(benchmark.main([*base, "--reproduce"]), 0)
+                self.assertIn("git: git version", out.getvalue())
                 c["tasks"][0]["head"] = "f" * 40
                 path.write_text(json.dumps(c), encoding="utf-8")
                 self.assertEqual(benchmark.main([*base, "--check"]), 1)
@@ -1393,18 +1633,38 @@ class MutationRepro(unittest.TestCase):
         res = benchmark.reproduce(self.repo, self.corpus_for(self.repro()))
         self.assertTrue(res[0]["ok"], res)
 
-    def test_the_unit_test_subprocess_has_a_timeout(self):
-        calls = []
-        real = subprocess.run
+    def test_a_mutation_path_outside_the_tree_is_never_read_or_written(self):
+        outside = Path(self._tmp.name) / "outside.txt"
+        outside.write_text("VALUE = 1\n", encoding="utf-8")
+        for path in (str(outside), "../outside.txt", "src/../../x"):
+            res = benchmark.reproduce(self.repo, self.corpus_for(self.repro(path=path), fixed=False))
+            self.assertFalse(res[0]["ok"], path)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "VALUE = 1\n", path)
 
-        def spy(*args, **kw):
-            calls.append(kw.get("timeout"))
-            return real(*args, **kw)
+    def test_a_hostile_tests_file_is_refused_before_anything_runs(self):
+        res = benchmark.reproduce(self.repo, self.corpus_for(self.repro(tests_file="../test_a.py"), fixed=False))
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("plain file name", res[0]["notes"])
 
-        with mock.patch.object(subprocess, "run", spy):
-            benchmark.reproduce(self.repo, self.corpus_for(self.repro()))
-        self.assertTrue(calls)
-        self.assertNotIn(None, calls)
+    def test_a_grandchild_of_timed_out_unit_tests_is_killed_too(self):
+        mark = Path(self._tmp.name) / "TEST-GRANDCHILD-WROTE"
+        code = grandchild_code(mark, 8)
+        (self.repo / "tests" / "test_a.py").write_text(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n"
+            + "".join("        " + ln + "\n" for ln in code.splitlines()),
+            encoding="utf-8",
+        )
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "slow tests")
+        slow = git(self.repo, "rev-parse", "HEAD").strip()
+        c = self.corpus_for(self.repro(), fixed=False)
+        c["tasks"][0]["head"] = slow
+        c["tasks"][0]["diff_sha256"] = benchmark.diff_digest(self.repo, self.shas["base"], slow)
+        with mock.patch.object(benchmark, "TEST_TIMEOUT", 1):
+            res = benchmark.reproduce(self.repo, c)
+        self.assertFalse(res[0]["ok"])
+        time.sleep(3.5)
+        self.assertFalse(mark.exists())
 
     def test_a_mutation_that_the_tests_catch_at_the_head_is_not_a_reproduction(self):
         c = self.corpus_for(self.repro(), fixed=False)
@@ -1459,6 +1719,209 @@ class Extraction(unittest.TestCase):
             tf.addfile(link)
         with tarfile.open(fileobj=io.BytesIO(buf.getvalue())) as tf:
             self.assertEqual(list(benchmark._safe_members(tf)), [])
+
+
+class Confinement(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "root"
+        (self.root / "sub").mkdir(parents=True)
+        (self.root / "sub" / "f.txt").write_text("x", encoding="utf-8")
+        self.outside = Path(self._tmp.name) / "outside"
+        self.outside.mkdir()
+        (self.outside / "secret.txt").write_text("secret", encoding="utf-8")
+
+    def test_plain_relative_paths_are_confined_to_the_root(self):
+        real = Path(os.path.realpath(self.root))
+        self.assertEqual(benchmark.confine(self.root, "sub/f.txt"), real / "sub" / "f.txt")
+        self.assertEqual(benchmark.confine(self.root, "missing/new.txt"), real / "missing" / "new.txt")
+
+    def test_hostile_paths_are_refused(self):
+        for bad in (
+            "/etc/passwd",
+            str(self.outside / "secret.txt"),
+            "../outside/secret.txt",
+            "sub/../../outside/secret.txt",
+            "sub//f.txt",
+            "./sub/f.txt",
+            "sub/./f.txt",
+            "sub/f.txt/",
+            "",
+            "a\0b",
+            "a\\b",
+            "-rf",
+            ":(top)x",
+            "a" * 400,
+            "a\x1bb",
+            5,
+            None,
+        ):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                benchmark.confine(self.root, bad)
+
+    def test_a_symlink_in_any_component_is_refused_even_when_it_points_inside(self):
+        (self.root / "link").symlink_to(self.outside)
+        (self.root / "inner").symlink_to(self.root / "sub")
+        (self.root / "sub" / "filelink").symlink_to(self.outside / "secret.txt")
+        for bad in ("link/secret.txt", "link", "inner/f.txt", "sub/filelink"):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                benchmark.confine(self.root, bad)
+            self.assertIn("symlink", str(cm.exception))
+
+    def test_a_root_that_is_itself_reached_through_a_symlink_is_fine(self):
+        alias = Path(self._tmp.name) / "alias"
+        alias.symlink_to(self.root)
+        self.assertEqual(benchmark.confine(alias, "sub/f.txt").name, "f.txt")
+
+
+class Processes(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.mark = Path(self._tmp.name) / "MARK"
+
+    def run_python(self, code, **kw):
+        return benchmark._run([sys.executable, "-c", code], env=dict(os.environ), **kw)
+
+    def test_a_timeout_kills_the_whole_process_group(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_python(grandchild_code(self.mark, 8), timeout=1)
+        time.sleep(3.5)
+        self.assertFalse(self.mark.exists())
+
+    def test_a_grandchild_left_behind_by_a_child_that_exited_is_killed(self):
+        (done, cut) = self.run_python(grandchild_code(self.mark, 0), timeout=20)
+        self.assertEqual((done.returncode, cut), (0, False))
+        time.sleep(3.5)
+        self.assertFalse(self.mark.exists())
+
+    def test_an_interrupt_kills_the_group_too(self):
+        real = benchmark.selectors.DefaultSelector
+
+        class Boom(real):
+            def select(self, timeout=None):
+                time.sleep(0.5)  # let the child start its grandchild
+                raise KeyboardInterrupt
+
+        with mock.patch.object(benchmark.selectors, "DefaultSelector", Boom):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_python(grandchild_code(self.mark, 8), timeout=20)
+        time.sleep(3.5)
+        self.assertFalse(self.mark.exists())
+
+    def test_output_is_capped_and_the_flooding_child_is_killed(self):
+        code = "import sys, time\nsys.stdout.write('x' * 5000000)\nsys.stdout.flush()\ntime.sleep(30)\n"
+        started = time.monotonic()
+        done, cut = self.run_python(code, timeout=25, max_output=1000)
+        self.assertTrue(cut)
+        self.assertLess(time.monotonic() - started, 15)  # not the 30 s the child wanted
+        self.assertLess(len(done.stdout), 1200)
+        self.assertIn(b"[output truncated at 1000 bytes]", done.stdout)
+        done, cut = self.run_python("import sys\nsys.stderr.write('e' * 100000)\n", timeout=20, max_output=500)
+        self.assertTrue(cut)
+        self.assertLess(len(done.stderr), 700)
+
+    def test_a_normal_child_returns_its_output_and_exit_status(self):
+        done, cut = self.run_python("import sys\nprint('out')\nsys.stderr.write('err')\nsys.exit(3)", timeout=20)
+        self.assertEqual((done.returncode, done.stdout.strip(), done.stderr, cut), (3, b"out", b"err", False))
+
+
+class Bounds(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def test_a_corpus_over_the_byte_cap_is_refused_before_parsing(self):
+        path = self.dir / "corpus.json"
+        path.write_text('{"version": 1}' + " " * 90, encoding="utf-8")  # 104 bytes
+        with mock.patch.object(benchmark, "MAX_CORPUS_BYTES", 103):
+            with self.assertRaises(ValueError) as cm:
+                benchmark.load_corpus(path)
+        self.assertIn("is over 103 bytes", str(cm.exception))
+        with mock.patch.object(benchmark, "MAX_CORPUS_BYTES", 104):
+            self.assertEqual(benchmark.load_corpus(path), {"version": 1})
+
+    def test_hostile_nesting_is_an_ordinary_error(self):
+        path = self.dir / "corpus.json"
+        path.write_text("[" * 200000, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            benchmark.load_corpus(path)
+        with self.assertRaises(ValueError) as cm:
+            benchmark.parse_result("[" * 200000, 1, corpus())
+        self.assertIn("not JSON", str(cm.exception))
+
+    def test_a_result_line_and_a_results_file_have_byte_caps(self):
+        line = json.dumps(record())
+        path = self.dir / "r.jsonl"
+        path.write_text(line + "\n", encoding="utf-8")
+        with mock.patch.object(benchmark, "MAX_RECORD_BYTES", len(line) - 1):
+            with self.assertRaises(ValueError) as cm:
+                benchmark.load_results(path, corpus())
+            self.assertIn("over", str(cm.exception))
+            with self.assertRaises(ValueError):
+                benchmark.parse_result(line, 1, corpus())
+        with mock.patch.object(benchmark, "MAX_RECORD_BYTES", len(line) + 1):
+            self.assertEqual(len(benchmark.load_results(path, corpus())), 1)
+        lines = [json.dumps(record(run=i)) for i in range(1, 4)]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with mock.patch.object(benchmark, "MAX_RESULTS_BYTES", len(lines[0]) * 2):
+            with self.assertRaises(ValueError) as cm:
+                benchmark.load_results(path, corpus())
+            self.assertIn("results file is over", str(cm.exception))
+
+
+class Patterns(unittest.TestCase):
+    def test_exponential_patterns_are_refused_at_load(self):
+        for bad in (
+            "(a+)+$",
+            "(a*)*b",
+            "(.*)*",
+            "(a|aa)+$",
+            "(a|a)*b",
+            "(?:a{1,100}){1,100}",
+            "(a)\\1",
+            "a{0,5000}",
+            "x" * 401,
+        ):
+            self.assertTrue(benchmark.pattern_errors(bad), bad)
+
+    def test_the_patterns_the_corpus_uses_are_accepted(self):
+        for ok in (
+            r"\bfilesystem root\b",
+            r"(?i)list-managed.{0,200}(\brow\b|every state)",
+            r"\btarget\b[^.\n]{0,60}(/|\broot\b)",
+            r"\bwrap(ped|s)?\b",
+            r"\bnomic(-embed-text)?\b",
+            r"^\"\"\"Summaris",
+            r"a+",
+            r"(ab)?c*",
+        ):
+            self.assertEqual(benchmark.pattern_errors(ok), [], ok)
+
+    def test_the_matcher_has_a_hard_time_budget(self):
+        started = time.monotonic()
+        with self.assertRaises(benchmark.RegexBudget):
+            benchmark._search("(a+)+$", "a" * 24 + "!", budget=0.3)
+        with self.assertRaises(benchmark.RegexBudget):
+            benchmark._spans("(a+)+$", "a" * 24 + "!", budget=0.3)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(benchmark._search("a+", "caab", budget=0.3))
+
+    def test_matching_a_hostile_pattern_that_got_past_validation_is_cut_off(self):
+        t = task(findings=[finding("f1", evidence=("(a+)+$", "(b+)+$"), quotes=["unchecked value"])])
+        report = {"class": "input-validation", "path": "src/a.py", "evidence": "a" * 24 + "! unchecked value"}
+        with mock.patch.object(benchmark, "REGEX_BUDGET_S", 0.3):
+            with self.assertRaises(benchmark.RegexBudget):
+                benchmark.match_findings(t, [report])
+
+    def test_the_budget_timer_is_always_cleared(self):
+        import signal
+
+        with benchmark._regex_budget(5):
+            pass
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL)[0], 0.0)
 
 
 if __name__ == "__main__":
