@@ -1,6 +1,6 @@
 # Working in this repository
 
-- `roles/`, `packs/`, `policies/` and `fragments/` are the sources. `.claude/agents/`, `.claude/skills/` and `.github/agents/` are generated from them. Never edit a generated file; edit the source and run `python3 scripts/generate.py`.
+- `roles/`, `packs/`, `policies/` and `fragments/` are the sources. `.claude/agents/`, `.claude/skills/`, `.github/agents/`, `.codex/agents/` and `.agents/skills/` are generated from them. Never edit a generated file; edit the source and run `python3 scripts/generate.py`.
 - A rule that several roles share lives in `fragments/` and is spliced in with a `{{fragment:NAME}}` line. Edit the fragment, not the copies.
 - The gate for this repository, exactly as CI runs it:
 

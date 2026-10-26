@@ -129,7 +129,7 @@ class Docs(unittest.TestCase):
         self.assertIn("LOCAL-LLM:", rows[0])
         install_doc = (ROOT / "docs/install.md").read_text(encoding="utf-8")
         self.assertIn("UNVERIFIED", install_doc)
-        self.assertIn("https://developers.openai.com/codex/guides/agents-md", install_doc)
+        self.assertIn("https://learn.chatgpt.com/docs/agent-configuration/agents-md", install_doc)
         self.assertIn("retrieved 2026-10-26", install_doc)
 
     def test_changelog_has_an_unreleased_codex_entry(self):
@@ -208,7 +208,8 @@ class Installer(unittest.TestCase):
                 install(d, "codex", True, update=True)
             self.assertEqual(f.read_text(), forged)
 
-    def test_symlinked_destination_refused(self):
+    def test_symlink_at_a_destination_is_a_collision_and_its_target_is_untouched(self):
+        # Proves the collision logic only (it refuses before ensure_safe is reached); ensure_safe is proven below.
         with tempfile.TemporaryDirectory() as d:
             outside = Path(d) / "outside.toml"
             outside.write_text("keep\n")
@@ -219,6 +220,20 @@ class Installer(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     install(t, "codex", True, update=update)
             self.assertEqual(outside.read_text(), "keep\n")
+
+    def test_dangling_symlink_as_a_directory_component_is_refused_by_ensure_safe(self):
+        # The destination itself does not exist, so no collision rule applies: only ensure_safe can say "symlink".
+        for sub in (".codex", ".agents", ".codex/agents"):
+            with tempfile.TemporaryDirectory() as d:
+                t = Path(d) / "t"
+                t.mkdir()
+                link = t / sub
+                link.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(Path(d) / "does-not-exist", link)
+                for apply in (False, True):
+                    with self.assertRaisesRegex(ValueError, "symlink destination refused", msg=sub):
+                        install(t, "codex", apply)
+                self.assertFalse((Path(d) / "does-not-exist").exists())
 
     def test_symlinked_parent_directory_refused(self):
         with tempfile.TemporaryDirectory() as d:
