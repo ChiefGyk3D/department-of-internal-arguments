@@ -78,7 +78,6 @@ HASH_RE = re.compile(r"[0-9a-f]{64}")
 # digit-first prefixes, 4- and 6-character grids): a false alarm costs a rewrite, a miss publishes something private.
 PLACEHOLDERS = frozenset({"N0CALL", "N0TST", "FN31pr"})
 NON_HOST_SUFFIXES = frozenset({"json", "jsonl", "txt", "toml", "log", "yml", "yaml", "diff", "patch"})  # no such TLD
-REPO_SUFFIXES = frozenset({"md", "sh", "py"})  # also country TLDs, so a name counts as a file only if the repo has it
 IPV4_RE = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
 HOME_RE = re.compile("/ho" + "me/|/Us" + "ers/")
 CALLSIGN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](?![A-Za-z0-9])", re.IGNORECASE)
@@ -101,16 +100,24 @@ def _repo_names():
     return frozenset(names)
 
 
+NON_HOST_CHARS_RE = re.compile(r"[^A-Za-z0-9.-]+")
+
+
+def _host_in_word(word):
+    """A word may be a file of this repository; otherwise every run of host-label characters in it is tested, so a
+    host cannot hide behind an underscore or any other character that is not part of a host name."""
+    if word.strip(".-") in _repo_names():
+        return False
+    return any(_host_shaped(piece) for piece in NON_HOST_CHARS_RE.split(word))
+
+
 def _host_shaped(word):
-    """Linear check: dotted labels, a letters-only last label, and not a file of this repository."""
+    """Linear check: dotted labels of host characters, a letters-only last label that is not a file suffix."""
     word = word.strip(".-")
     labels = word.split(".")
     if len(labels) < 2 or not TLD_RE.fullmatch(labels[-1]) or not all(HOST_LABEL_RE.fullmatch(x) for x in labels):
         return False
-    suffix = labels[-1].lower()
-    if suffix in NON_HOST_SUFFIXES:
-        return False
-    return not (suffix in REPO_SUFFIXES and word in _repo_names())
+    return labels[-1].lower() not in NON_HOST_SUFFIXES
 
 
 def identifier_problems(text, hostnames=True):
@@ -120,7 +127,7 @@ def identifier_problems(text, hostnames=True):
         found.append("address-shaped string")
     if HOME_RE.search(text):
         found.append("home-path-shaped string")
-    if hostnames and any(_host_shaped(w) for w in WORD_RE.findall(text)):
+    if hostnames and any(_host_in_word(w) for w in WORD_RE.findall(text)):
         found.append("hostname-shaped string")
     if any(m.group(0) not in PLACEHOLDERS and not SIZE_RE.fullmatch(m.group(0)) for m in CALLSIGN_RE.finditer(text)):
         found.append("callsign-shaped string")
@@ -337,7 +344,8 @@ CLAUDE_MODEL_RE = re.compile(
     r"|[0-9]-(?:[0-9]-)?(?:opus|sonnet|haiku)-[0-9]{8})"
 )
 GPT_MODEL_RE = re.compile(
-    r"(?:gpt-[0-9]+(?:\.[0-9]+)?[a-z]?|o[0-9]+)(?:-(?!(?:latest|default|inherit|auto)(?:-|$))[a-z0-9]+(?:\.[0-9]+)?)*"
+    r"(?:gpt-[0-9]+(?:\.[0-9]+)?[a-z]?|o[0-9]+)"
+    r"(?:-(?:mini|nano|codex|turbo|preview|pro|max|chat|[0-9]{4}-[0-9]{2}-[0-9]{2}))*"
 )
 MODEL_SHAPES = {
     "claude-code": (CLAUDE_MODEL_RE,),
@@ -351,8 +359,10 @@ def exact_model(client, model):
     if not isinstance(model, str) or not MODEL_CHARS_RE.fullmatch(model):
         return False
     if client == "local":
-        return valid_model(model) and model.rsplit(":", 1)[1] != "latest"
-    return any(shape.fullmatch(model) for shape in MODEL_SHAPES.get(client, ()))
+        shape_ok = valid_model(model) and model.rsplit(":", 1)[1] != "latest"
+        return shape_ok and not identifier_problems(model.replace("/", " "), hostnames=False)  # hf.co/org/m is a path
+    shape_ok = any(shape.fullmatch(model) for shape in MODEL_SHAPES.get(client, ()))
+    return shape_ok and not identifier_problems(model)
 
 
 def parse_record(line, n, cases):

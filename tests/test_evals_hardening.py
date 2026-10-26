@@ -2,11 +2,13 @@
 
 import datetime
 import json
+import re
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -158,6 +160,93 @@ class IdentifierShapes(unittest.TestCase):
     def test_no_real_club_callsign_is_used_in_tests_or_docs(self):
         for rel in ("tests/test_evals_matrix.py", "tests/test_evals_hardening.py", "evals/results-schema.md"):
             self.assertNotIn("W1" + "AW", (ROOT / rel).read_text(encoding="utf-8"), rel)
+
+
+class HostsHidingInTokens(unittest.TestCase):
+    def test_a_host_inside_a_token_with_other_characters_is_found(self):
+        for text in (
+            "build_server1.corp.example.com",
+            "name_corp.example.com",
+            "x_.evil.com",
+            "a-b_c.corp.example.org",
+            "see (host1.corp.example.com)",
+            "key=box.corp.example.com",
+        ):
+            with self.subTest(text=text):
+                self.assertIn("hostname-shaped string", em.identifier_problems(text))
+
+    def test_repository_file_names_still_pass(self):
+        for text in (
+            "scripts/evals_matrix.py",
+            "docs/home.md",
+            "see README.md",
+            "evals/cases.json",
+            "run_log.txt",
+            "transcript.json",
+            "run.jsonl",
+            "x.toml",
+            "a.yaml",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(em.identifier_problems(text), [])
+        self.assertIn("hostname-shaped string", em.identifier_problems("not_a_repo_file.md"))
+
+    def test_underscore_and_dot_runs_are_linear(self):
+        started = time.monotonic()
+        em.identifier_problems("a_" * 40000 + ".")
+        em.identifier_problems("a._" * 40000)
+        em.identifier_problems("a." * 40000 + "_")
+        self.assertLess(time.monotonic() - started, 3.0)
+
+
+class ModelLabelsCarryNoIdentifiers(unittest.TestCase):
+    def refused(self, client, model):
+        row = local_record(model=model) if client == "local" else record(client=client, model=model)
+        with self.assertRaises(ValueError):
+            parse(row)
+
+    def test_open_ended_suffixes_are_refused(self):
+        for model in (
+            "gpt-5-mini.corp.example.com",
+            "gpt-5-FN31pr",
+            "gpt-5-/ho" + "me/x",
+            "gpt-5-whatever",
+            "gpt-5.4-ab1cde",
+            "o4-anything",
+        ):
+            with self.subTest(model=model):
+                self.refused("codex", model)
+        for model in ("claude-sonnet-4-5-w1aw", "claude-sonnet-4-5-extra", "opus-4-1-20250805", "sonnet-5-5"):
+            with self.subTest(model=model):
+                self.refused("claude-code", model)
+
+    def test_closed_set_suffixes_pass(self):
+        for model in ("gpt-5-mini", "gpt-5.4-codex", "gpt-5-2025-08-07", "gpt-4o-mini", "o4-mini", "gpt-5-turbo"):
+            with self.subTest(model=model):
+                parse(record(client="codex", model=model))
+
+    def test_the_identifier_sweep_runs_on_local_labels(self):
+        self.refused("local", "ab1cde:7b")
+        self.refused("local", "9a1xyz:7b")
+        parse(local_record(model="hf.co/org/m:7b"))
+        parse(local_record(model="llama3.2:3b-instruct-q4_K_M"))
+
+    def test_the_sweep_is_a_second_line_even_if_a_shape_were_open(self):
+        open_shape = {"codex": (re.compile(r"gpt-5-.*"),)}
+        with mock.patch.dict(em.MODEL_SHAPES, open_shape):
+            parse(record(client="codex", model="gpt-5-mini"))
+            for model in ("gpt-5-mini.corp.example.com", "gpt-5-ab1cde", "gpt-5-FN31PR"):
+                with self.subTest(model=model):
+                    self.refused("codex", model)
+
+    def test_the_ids_this_repository_documents_pass(self):
+        for model in ("claude-sonnet-5-5", "claude-haiku-5-5"):
+            parse(record(model=model))
+
+    def test_the_six_character_grid_shape_is_itself_matched(self):
+        self.assertTrue(em.GRID_RE.fullmatch("EM15fd"))
+        self.assertTrue(em.GRID_RE.fullmatch("em15FD"))
+        self.assertTrue(em.GRID_RE.fullmatch("FN31"))
 
 
 class UnsupportedMeansNoHeadlessInterface(unittest.TestCase):
