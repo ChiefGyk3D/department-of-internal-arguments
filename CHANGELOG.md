@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+`scripts/mutation_check.py` (issue #43, unit 1 of #25): a helper that proves a test bites without touching the reviewer's checkout.
+
+- `python3 scripts/mutation_check.py --repo PATH --head SHA --revert SHA_OR_PATCH --test "CMD" [--scratch DIR]` clones the head with `git clone --local --no-hardlinks` into a new 0700 directory (default under `~/.local/share/doia-mutation/`, never `/tmp`), runs the test at head (must pass), reverts the named commit's non-test hunks or a given patch (must fail), restores with `git checkout --force --detach` and `git clean`, runs the test again (must pass), and checks `git status --porcelain` and `git diff SHA` are empty after the restore and after the last run. One JSON object on stdout; exit 0 `bites`, 2 `vacuous`, 3 `inconclusive` (anything not clearly a bite, including usage errors). The copy is deleted on `bites` and kept on any other result (`--keep` forces it).
+- The source repository's status, content of dirty files, HEAD, refs, stash, config and index are hashed before and after (`source_repo_unchanged`); a change makes the verdict `inconclusive`.
+- The head is treated as untrusted: no shell, argument lists only, a sanitized environment (no inherited secrets; caches and `HOME` inside the disposable directory), no user or system git configuration, hooks, fsmonitor and the source's filter drivers switched off, a timeout and an output cap on every subprocess with a process-group kill, symlinked, absolute, `..` and `.git` revert paths refused, and a scratch directory that equals, contains or lies inside the repository refused. Best-effort network removal for the test commands through `unshare --net` (`network_isolation` in the JSON).
+- Not a sandbox, and the docstring says so: a test is arbitrary code running as the invoking user and can write to the source repository by absolute path (detected and reported, not prevented); without `unshare` there is no network isolation; a process that leaves its process group escapes the timeout kill.
+- `tests/test_mutation_check.py`: verdicts, exit codes and each confinement promise, each with a case that proves the guard bites.
+
 ## [0.4.0] - 2026-10-26
 
 The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.
