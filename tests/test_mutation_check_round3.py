@@ -27,20 +27,22 @@ from test_mutation_check import SCRIPT, TEST_SRC, Base, host_has_pid_namespace  
 
 # Run 1 attacks the private trusted repository: it lists the fixed parent and damages what it finds.
 ATTACK_HEAD = (
-    TEST_SRC
-    + r"""m = os.path.join(os.path.dirname(os.getcwd()), 'marker')
-if not os.path.exists(m):
-    open(m, 'w').close()
-    priv = '@PRIV@'
-    import ctypes
-    ctypes.CDLL(None).umount2(priv.encode(), 2)  # try to uncover it
-    for d in os.listdir(priv):
-        p = os.path.join(priv, d)
-        if not os.path.isdir(p):
-            continue
-        base = os.path.join(p, 'base.git')
-"""
+    "import os, sys\n"
+    "sys.path.insert(0, os.getcwd())\n"
+    "m = os.path.join(os.path.dirname(os.getcwd()), 'marker')\n"
+    "n = int(open(m).read() or 0) + 1 if os.path.exists(m) else 1\n"
+    "open(m, 'w').write(str(n))\n"
+    "if n == @RUN@:\n"
+    "    priv = '@PRIV@'\n"
+    "    import ctypes\n"
+    "    ctypes.CDLL(None).umount2(priv.encode(), 2)  # try to uncover it\n"
+    "    for d in os.listdir(priv):\n"
+    "        p = os.path.join(priv, d)\n"
+    "        if not os.path.isdir(p):\n"
+    "            continue\n"
+    "        base = os.path.join(p, 'base.git')\n"
 )
+ATTACK_TAIL = "from calc import f\nassert f() == 2, f()\n"
 ATTACK_BODIES = {
     "chmod": "        if os.path.isdir(base):\n            os.chmod(base, 0)\n",
     "rewrite": (
@@ -164,10 +166,22 @@ class Degraded(Base):
 
 
 class PrivateRepository(Base):
-    def attack(self, name, extra=()):
-        src = ATTACK_HEAD + ATTACK_BODIES[name]
-        repo, _, c2 = self.make_repo(name=f"src-{name}-{len(extra)}", check_src=src)
+    def attack(self, name, extra=(), run=1):
+        """The test damages the private repository during run number `run` (1 head, 2 reverted, 3 restored)."""
+        src = ATTACK_HEAD.replace("@RUN@", str(run)) + ATTACK_BODIES[name] + ATTACK_TAIL
+        repo, _, c2 = self.make_repo(name=f"src-{name}-{len(extra)}-{run}", check_src=src)
         return self.run_tool(repo, c2, c2, extra=list(extra))
+
+    def test_damage_in_any_run_is_detected_after_that_run(self):
+        for run in (1, 2, 3):
+            code, r = self.attack("plant", extra=["--hide-private", "off"], run=run)
+            self.assertEqual((code, r["verdict"]), (3, "inconclusive"), (run, r["reason"]))
+            self.assertIn("private", r["reason"], run)
+            # the damage is noticed right after the run it happened in: later steps never use the damaged repository
+            self.assertEqual(self.phases(r), ["test-at-head", "test-after-revert", "test-after-restore"][:run], run)
+            phases = [c["phase"] for c in r["commands"]]
+            self.assertEqual("revert" in phases, run >= 2, run)
+            self.assertEqual("restore-checkout" in phases, run >= 3, run)
 
     @unittest.skipUnless(probe_hide(), "this host cannot bind-mount inside a user namespace")
     def test_the_private_parent_is_invisible_to_the_test(self):
@@ -192,7 +206,8 @@ class PrivateRepository(Base):
     def test_links_and_special_files_are_refused_and_never_opened(self):
         base = self.tmp / "s.git"
         (base / "objects").mkdir(parents=True)
-        (base / "objects" / "link").symlink_to("/")
+        (self.tmp / "harmless").mkdir()
+        (base / "objects" / "link").symlink_to(self.tmp / "harmless")
         with self.assertRaises(mc.Inconclusive):
             mc.StoreGuard(str(base))
         (base / "objects" / "link").unlink()
