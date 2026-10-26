@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+Behavioral-eval case registry, result schema and matrix renderer (issue #45, unit 1 of #24). No model is called and nothing touches the network; nothing has been run against a model.
+
+- `evals/cases.json`: the 26 exercises as the single source (id, subject, roles, packs, clients, fixture name, input, expected behavior, `mechanical` or `judged` grading with a reason, cost class). `evals/behavioral-evals.md` is now generated from it, gains a Grading column, and `scripts/generate.py --check` fails on drift. Reading is strict: null, absent, mistyped, duplicated or unknown keys and values are errors.
+- `evals/results-schema.md` and `scripts/evals_matrix.py`: one JSON line per result (client, exact model, version, quantization and context for local models, tools, commit, persona hash, outcome, short evidence pointer). `evals_matrix.py RESULTS.jsonl` prints a Markdown matrix: empty cells read `not run`, Copilot `unsupported`, a result recorded against older persona sources `(stale)`. It exits 1, printing nothing, on a malformed line, a missing or null field, a `pass` on a judged case, a family name where an exact model id is required, evidence over 200 characters, or an identifier-shaped string (hostname, address, home path, callsign, grid square, long token). `--check`, `--write` and `--persona-hash` modes.
+- `scripts/validate.py` checks the registry, the synthetic `evals/example-results.jsonl` and the identifier sweep. `tests/test_evals_matrix.py` covers each rejection, with negative cases.
+
 ## [0.4.0] - 2026-10-26
 
 The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.
