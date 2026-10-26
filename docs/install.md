@@ -11,6 +11,34 @@ python3 scripts/install.py --target /path/to/project --adapter both --apply
 
 `--adapter` is `claude`, `copilot`, `both` (Claude Code and Copilot) or `codex`, and `--pack NAME` (repeatable) limits which packs are installed. The installer is additive: it does not overwrite a file that does not carry a generator marker, it refuses the whole install if any destination exists, it refuses symlinked destinations, and it refuses to install into this repository. To move a project to a newer release, add `--update`: files whose marker is well-formed and whose body still matches the hash in the marker are replaced in place (see [Overlay and ownership](overlay-and-ownership.md)), and anything else at a destination path is still a collision. The check is only as strong as the marker: files that self-identify as generated may be overwritten by `--update`, and the hash is not a signature, so anyone who can write a file can also write a marker and hash that match it. Copilot gets the agents only; there is no pack loader there, so paste a pack into the brief or use the exporter below.
 
+## The lead persona
+
+`templates/lead.md` is not an agent file, so the role installs above never load it, and a session that never loaded it is not governed by it. Install it as a marked block in the instruction file the controller session reads at start:
+
+```
+python3 scripts/install.py --target /path/to/project --lead CLAUDE.md --update           # preview
+python3 scripts/install.py --target /path/to/project --lead CLAUDE.md --update --apply
+```
+
+`--lead FILE` is a path under the target (no absolute path, no `..`); use `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `.github/copilot-instructions.md` for Copilot. The option rides on the normal install, so give it the same `--adapter` and `--update` you use for the roles. The installed text is `templates/lead.md` without its leading comment, between two marker lines:
+
+```
+<!-- doia-lead:begin release R sha256:HEX -->
+...lead text...
+<!-- doia-lead:end -->
+```
+
+HEX is the sha256 of the text between the markers. A missing file is created. In an existing file the block is appended and nothing else in the file is touched. A re-run with the same text changes nothing. `--update` replaces a block whose hash still matches; a block you edited is refused, and `--force-edited` with `--update` discards your edits to the block only, never the text around it. A block with a missing, duplicated or misordered marker is refused even with `--force-edited`, and so is any file that mentions `doia-lead:` in prose, a non-UTF-8 file, a symlink or a file over 1 MiB. `--list-managed --lead FILE` reports the block as `current`, `stale`, `differs` or `edited` like any other managed file. The hash has the same limit as every marker here: it detects accidental edits, not a forger.
+
+Check that it loaded: start a new session in that project and ask it to state its rule about waiting, or the first thing the lead never does. A session that cannot has not loaded the text, whatever the file says.
+
+Where each host reads it, and what is verified:
+
+- Claude Code: `CLAUDE.md` in the project and `CLAUDE.md` in the user's Claude directory are read into the session's instructions at start. Observed in the session that produced this change (both files were present in its context); the documentation page was not re-read for this change, and how a subagent inherits them was not tested.
+- Codex: `AGENTS.md` discovery is documented in the Codex section above (32 KiB combined by default; the lead block is about 6 KB). UNVERIFIED: nothing was run in Codex.
+- Copilot: `.github/copilot-instructions.md` is the file `templates/copilot-instructions.md` is meant for. UNVERIFIED: not run in Copilot, and a Copilot session may not be able to act as a controller.
+- ChatGPT or a local model: paste the block into the project or system instructions by hand. UNVERIFIED: no installer path, nothing run.
+
 ## Reading the preview: it is the control
 
 The preview prints, for every file it would write, the action, the path, whether the content comes from this checkout (`public`) or a private `--overlay` (`overlay`), and the sha256 of each file's exact bytes. Personas and packs are installed as model instructions (for Codex, skills and custom agents), and nothing but structure checks stands between a pack and the model, so treat a pack like code: read the preview, and for an overlay pack read the pack itself. Overlay packs and overlay additions are unreviewed unless you review them. To pin a reviewed pack, record its digest from the preview and compare it on the next run. Public files are covered by this repository's review and CI; the digest lets you confirm the installer is about to write exactly the bytes you reviewed.

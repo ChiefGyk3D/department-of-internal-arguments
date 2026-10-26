@@ -19,7 +19,18 @@ Every dispatch carries a brief, written from [templates/brief.md](../templates/b
 
 ## The lead
 
-The lead is [templates/lead.md](../templates/lead.md), copied into the controller session's instructions. It dispatches the four roles, reads their reports and decides; it does not write the code the agents are briefed for.
+The lead is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead CLAUDE.md`; see [Install](install.md), including how to check that the session loaded it). It dispatches the four roles, reads their reports and decides; it does not write the code the agents are briefed for.
+
+The orchestrator rules in it, with the reason for each (the template keeps them short because it is injected into a session):
+
+- Waits. A CI run, a deploy or a polling loop in the lead's own thread blocks the human's next message. It goes to a background task or a read-only monitor agent, one watch per thing. A step silent for 5 minutes, or an agent that ended without a report, is reported, not watched.
+- Implementing. Code changes go to an implementer agent; the lead verifies. A lead that edits files itself skips the review loop the rest of the template exists for.
+- Look first. Before telling the human to click, run or configure anything: the project's notes, then the vendor's documentation page (dated; a search summary is a lead, not a source), then the live system through a read-only API. If a command can do the step inside what the human approved, run it. Mark claims verified or inferred and keep the mark when restating them.
+- Access. List every call the whole job needs and ask once for the union, with each scope and why. A read-only grant followed by a second request, or a broader grant offered as a fallback, makes the human decide twice.
+- Done. "Done" means observed through the path the user will use, in this turn: the real command, the public address, the merge target's run. A state read has a time; the human's newer report outranks it. A destructive step gets a fresh read of the target, a script that stops at the first error, and a read-back.
+- Tracking. An issue and a board card exist before work starts, and every brief carries an `issue: owner/repo#N` line. Move the card in the same response as the dispatch, pull request, merge or block.
+- Working directory. A worktree agent starts wherever the session's shell is. Run `cd <the issue's repository>` in the same command as the dispatch, or the agent lands in the wrong repository.
+- Never: use an approval token a guard holds for the human without the human's own quoted message; write an unfixed weakness into a public issue, pull request or comment; re-suggest an option the human rejected.
 
 - Name the role by what the work is: a plan whose code is complete goes to the transcriber; everything else that changes files goes to the implementer; a finished task goes to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also goes to the adversarial reviewer, after the reviewer, never instead of it.
 - Name packs by the domain the diff touches. A pack named in a brief is not proof it was loaded; read `PACKS LOADED`.
