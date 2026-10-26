@@ -49,7 +49,7 @@ These notes come from sessions with a 4B-parameter and a 12B-parameter model who
 
 ## Checklist: calling Ollama
 
-1. **Always send `num_ctx`, and send exactly the value the model is already loaded with.** Ollama's default is 4096 on GPUs under 24 GiB of VRAM, so omitting it can silently cut a long prompt (see the verification section above). A different value reloads the model and can evict a neighbour that shares the GPU (measured twice; in one case loading a second model at a larger default context evicted the first even though its `keep_alive` was -1, so `keep_alive` does not protect a resident model from a context change). Find the loaded value with `ollama ps` or `GET /api/ps` and confirm it in the runner log.
+1. **Always send `num_ctx`, and send exactly the value the model is already loaded with.** Ollama's default is 4096 on GPUs under 24 GiB of VRAM, so omitting it can silently cut a long prompt (see the verification section above). A different value reloads the model and can evict a neighbor that shares the GPU (measured twice; in one case loading a second model at a larger default context evicted the first even though its `keep_alive` was -1, so `keep_alive` does not protect a resident model from a context change). Find the loaded value with `ollama ps` or `GET /api/ps` and confirm it in the runner log.
 2. **`think: false` for cheap tasks.** A thinking model spends hundreds of tokens before a one-sentence answer (436 evaluation tokens for one sentence on a 12B-parameter model; about 15 times fewer with thinking off on a 4B-parameter model; model not recorded; measured 2026-10-07; not a finding about local models in general). Opt in to thinking only when the task needs reasoning.
 3. **Structured output.** Native `format` accepts a JSON schema; still validate the result in code, and ground the schema in the prompt. Schema-valid is not correct.
 4. **Role aliases and Modelfiles.** Whether a `FROM` alias shares a loaded runner with its base model is UNVERIFIED (source reading suggests reuse when weights and runner options match; not reproduced). Until you test it, send the role as the request `system` message to the resident base model.
@@ -61,12 +61,12 @@ These notes come from sessions with a 4B-parameter and a 12B-parameter model who
 Before assigning a task class to a local model, record the following, and re-measure when any field changes. A family name proves nothing about tool support, accuracy or context.
 
 - Exact model artifact (tag and digest, not the family name).
-- Quantisation.
+- Quantization.
 - Context limit: the loaded `num_ctx`, and the model's own maximum.
 - Runtime and version (for example the Ollama release).
-- Licence, checked against the intended use.
+- License, checked against the intended use.
 - Hardware class (accelerator type and VRAM class only; no hostnames).
-- Measured result per task class: pass or fail against a stated check, number of runs, sanitised inputs. "Seemed fine" is not a result.
+- Measured result per task class: pass or fail against a stated check, number of runs, sanitized inputs. "Seemed fine" is not a result.
 - Prompt fit: confirm policies and instructions were not dropped to fit the context.
 
 ## Optional: more than one GPU or instance

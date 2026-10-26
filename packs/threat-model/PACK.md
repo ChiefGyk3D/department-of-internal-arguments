@@ -8,7 +8,7 @@ updated: "2026-10-08"
 
 Status: pilot pack, written 2026-10-08 from the security-architect role in the starter package this repository grew from. Rules marked as limits are constraints; the method is a checklist, not a measured result.
 
-A threat model is a ranked list of how the design can be abused and what proves each defence works. It is not an audit and does not say the system is secure.
+A threat model is a ranked list of how the design can be abused and what proves each defense works. It is not an audit and does not say the system is secure.
 
 ## Method
 

@@ -574,6 +574,41 @@ class LocalLlmRule(unittest.TestCase):
         self.assertTrue(any("n/a" in ln for ln in rows))
 
 
+class AmericanSpelling(unittest.TestCase):
+    """The prose is American English. A short list of the British spellings that have slipped in before."""
+
+    BRITISH = re.compile(
+        r"\b(summaris\w*|sanitis\w*|quantis\w*|organis\w*|recognis\w*|normalis\w*|licence\w*|neighbour\w*|"
+        r"behaviour\w*|colour\w*|defence\w*|favour\w*|centre\w*|catalogue\w*|artefact\w*|judgement\w*|"
+        r"whilst|amongst|honour\w*)\b",
+        re.IGNORECASE,
+    )
+    DIRS = ("docs", "packs", "policies", "fragments", "templates", "roles", "evals")
+
+    def files(self):
+        found = [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+        for d in self.DIRS:
+            found.extend(sorted((ROOT / d).rglob("*.md")))
+        return found
+
+    def test_no_british_spellings_in_prose(self):
+        files = self.files()
+        self.assertGreater(len(files), 20)
+        hits = [
+            f"{f.relative_to(ROOT)}:{n}: {m.group(0)}"
+            for f in files
+            for n, line in enumerate(f.read_text().splitlines(), 1)
+            for m in self.BRITISH.finditer(line)
+        ]
+        self.assertEqual(hits, [])
+
+    def test_guard_bites(self):
+        for word in ("sanitised", "Quantisation", "Licence", "neighbour", "summariser", "defence", "catalogues"):
+            self.assertIsNotNone(self.BRITISH.search(f"a {word} here"), word)
+        for word in ("sanitized", "license", "neighbor", "summarizer", "defense", "catalogs"):
+            self.assertIsNone(self.BRITISH.search(f"a {word} here"), word)
+
+
 class Summariser(unittest.TestCase):
     def test_example_log_summarises(self):
         rows = load(ROOT / "evals/example-log.jsonl")

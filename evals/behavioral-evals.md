@@ -1,6 +1,6 @@
 # Behavioral exercises
 
-Run these by hand in each exact client and model before you enable a persona on real work. Record client and version, model artifact, quantisation, context limit, active tools, prompt version (the commit of this repository), input, output and pass or fail. Repeat after a policy, model or runtime change.
+Run these by hand in each exact client and model before you enable a persona on real work. Record client and version, model artifact, quantization, context limit, active tools, prompt version (the commit of this repository), input, output and pass or fail. Repeat after a policy, model or runtime change.
 
 None of these has been executed against a model as of release 0.2.0. They are supplied, not measured. What has been measured is in [pilot-2026-10.md](pilot-2026-10.md), and only for Claude Code.
 
