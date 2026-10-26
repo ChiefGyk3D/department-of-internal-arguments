@@ -157,9 +157,27 @@ class IdentifierShapes(unittest.TestCase):
     def test_the_second_home_path_form_is_refused(self):
         self.assertTrue(em.identifier_problems("see /Us" + "ers/someone/x"))
 
-    def test_no_real_club_callsign_is_used_in_tests_or_docs(self):
-        for rel in ("tests/test_evals_matrix.py", "tests/test_evals_hardening.py", "evals/results-schema.md"):
-            self.assertNotIn("W1" + "AW", (ROOT / rel).read_text(encoding="utf-8"), rel)
+    @staticmethod
+    def files_with(root, needle):
+        """Relative paths of every text file under root that holds the needle in any letter case."""
+        hits = []
+        for p in sorted(Path(root).rglob("*")):
+            rel = p.relative_to(root)
+            if ".git" in rel.parts or "__pycache__" in rel.parts or not p.is_file() or p.is_symlink():
+                continue
+            if needle in p.read_bytes().decode("utf-8", errors="ignore").lower():
+                hits.append(str(rel))
+        return hits
+
+    def test_no_real_club_callsign_is_anywhere_in_the_tree(self):
+        self.assertEqual(self.files_with(ROOT, "w1" + "aw"), [])
+
+    def test_the_tree_guard_bites(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sub").mkdir()
+            (Path(d) / "sub" / "x.md").write_text("call W1" + "aw here\n", encoding="utf-8")
+            (Path(d) / "y.txt").write_text("nothing\n", encoding="utf-8")
+            self.assertEqual(self.files_with(d, "w1" + "aw"), ["sub/x.md"])
 
 
 class HostsHidingInTokens(unittest.TestCase):
@@ -216,7 +234,7 @@ class ModelLabelsCarryNoIdentifiers(unittest.TestCase):
         ):
             with self.subTest(model=model):
                 self.refused("codex", model)
-        for model in ("claude-sonnet-4-5-w1aw", "claude-sonnet-4-5-extra", "opus-4-1-20250805", "sonnet-5-5"):
+        for model in ("claude-sonnet-4-5-n0call", "claude-sonnet-4-5-extra", "opus-4-1-20250805", "sonnet-5-5"):
             with self.subTest(model=model):
                 self.refused("claude-code", model)
 
@@ -247,6 +265,122 @@ class ModelLabelsCarryNoIdentifiers(unittest.TestCase):
         self.assertTrue(em.GRID_RE.fullmatch("EM15fd"))
         self.assertTrue(em.GRID_RE.fullmatch("em15FD"))
         self.assertTrue(em.GRID_RE.fullmatch("FN31"))
+
+
+class LocalLabelsCannotCarryAHost(unittest.TestCase):
+    def refused(self, model):
+        with self.assertRaises(ValueError):
+            parse(local_record(model=model))
+
+    def test_a_host_in_any_path_segment_is_refused(self):
+        for model in (
+            "registry.corp.example.com/team/m:12b",
+            "10-0-0-1.corp.example.com/m:12b",
+            "hf.co/box.corp.example.com/m:12b",
+            "org/box.corp.example.com:12b",
+            "hf.co.corp.example.com/org/m:12b",
+        ):
+            with self.subTest(model=model):
+                self.refused(model)
+
+    def test_public_registries_are_allowed_only_as_the_first_segment(self):
+        for first in ("hf.co", "huggingface.co", "registry.ollama.ai", "ghcr.io", "docker.io", "quay.io"):
+            with self.subTest(first=first):
+                parse(local_record(model=f"{first}/org/m:12b"))
+        parse(local_record(model="hf.co/org/m:7b"))
+        self.refused("org/hf.co/m:12b")
+
+    def test_the_registry_allowlist_is_exactly_these(self):
+        self.assertEqual(
+            em.PUBLIC_REGISTRIES, ("hf.co", "huggingface.co", "registry.ollama.ai", "ghcr.io", "docker.io", "quay.io")
+        )
+        self.refused("corp.example.com/org/m:7b")
+
+    def test_the_documented_public_registries_are_listed_in_the_schema(self):
+        doc = (ROOT / "evals/results-schema.md").read_text(encoding="utf-8")
+        for name in em.PUBLIC_REGISTRIES:
+            self.assertIn(name, doc)
+
+
+class Ipv6Shapes(unittest.TestCase):
+    def test_every_form_is_refused(self):
+        for text in (
+            "ipv6 2600:1700:abcd:1::1 seen",
+            "2001:db8::1",
+            "::1",
+            "[::1]:8080",
+            "fe80::1%eth0",
+            "::ffff:10.1." + "2.3",
+            "aa:bb:cc:dd:ee:ff",
+            "2001:0db8:0000:0000:0000:ff00:0042:8329",
+            "addr=[2001:db8::2]",
+        ):
+            with self.subTest(text=text):
+                self.assertIn("address-shaped string", em.identifier_problems(text))
+
+    def test_models_times_and_ordinary_colons_pass(self):
+        for text in (
+            "gemma4:12b",
+            "org/m:Q4_K_M",
+            "llama3.2:3b-instruct-q4_K_M",
+            "12:30:45",
+            "1:2:3",
+            "line 12: done",
+            "note: this: that",
+            "see README.md:12",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(em.identifier_problems(text), [], text)
+
+    def test_the_address_helper_directly(self):
+        self.assertTrue(em._ipv6_shaped("::ffff:10.1." + "2.3"))
+        self.assertTrue(em._ipv6_shaped("2001:db8::1"))
+        self.assertFalse(em._ipv6_shaped("12345:abcde:1f"))
+        self.assertFalse(em._ipv6_shaped("1:2:3"))
+
+    def test_the_time_exclusion_is_documented(self):
+        doc = (ROOT / "evals/results-schema.md").read_text(encoding="utf-8")
+        self.assertIn("12:30:45", doc)
+
+    def test_matching_is_linear(self):
+        started = time.monotonic()
+        em.identifier_problems("a" * 200000)
+        em.identifier_problems("a:" * 100000)
+        em.identifier_problems("::" * 100000)
+        self.assertLess(time.monotonic() - started, 3.0)
+
+
+class ShortHashesAndKnownLimits(unittest.TestCase):
+    def test_schema_doc_says_to_cite_the_full_hash_and_lists_false_alarms(self):
+        doc = (ROOT / "evals/results-schema.md").read_text(encoding="utf-8")
+        self.assertIn("40-character hash", doc)
+        for word in ("H2O", "E2E", "K8s", "P2P", "W3C", "C4B"):
+            self.assertIn(word, doc)
+
+    def test_reply_pattern_cases_are_named_and_known_limits_stated(self):
+        by_id = {c["id"]: c["grading_reason"] for c in em.load_registry(ROOT / "evals/cases.json")}
+        for n in (1, 4, 5, 8, 12, 13, 19, 20, 21, 22, 23, 24, 25):
+            self.assertIn("reply-pattern", by_id[n], f"case {n}")
+        self.assertIn("known limit", by_id[12])
+        self.assertIn("first", by_id[12])
+        self.assertIn("known limit", by_id[13])
+        self.assertIn("docker", by_id[13])
+        doc = (ROOT / "evals/results-schema.md").read_text(encoding="utf-8")
+        self.assertIn("reply-pattern", doc)
+
+
+class FrozenClock(unittest.TestCase):
+    def test_one_day_of_slack_and_no_more(self):
+        with mock.patch.object(em, "_today", return_value=datetime.date(2026, 10, 26)):
+            parse(record(date="2026-10-26"))
+            parse(record(date="2026-10-27"))
+            with self.assertRaisesRegex(ValueError, "future"):
+                parse(record(date="2026-10-28"))
+
+    def test_the_client_version_is_swept_for_identifiers(self):
+        with self.assertRaises(ValueError):
+            parse(record(client_version="2.1.4-n0call"))
+        parse(record(client_version="2.1.4"))
 
 
 class UnsupportedMeansNoHeadlessInterface(unittest.TestCase):

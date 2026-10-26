@@ -78,6 +78,11 @@ HASH_RE = re.compile(r"[0-9a-f]{64}")
 # digit-first prefixes, 4- and 6-character grids): a false alarm costs a rewrite, a miss publishes something private.
 PLACEHOLDERS = frozenset({"N0CALL", "N0TST", "FN31pr"})
 NON_HOST_SUFFIXES = frozenset({"json", "jsonl", "txt", "toml", "log", "yml", "yaml", "diff", "patch"})  # no such TLD
+# Registries a local model label may start with (hf.co/org/m:7b is a path, not a host). Keep this list small.
+PUBLIC_REGISTRIES = ("hf.co", "huggingface.co", "registry.ollama.ai", "ghcr.io", "docker.io", "quay.io")
+RUN_RE = re.compile(r"[0-9A-Fa-f.:]+")
+HEX_GROUP_RE = re.compile(r"[0-9A-Fa-f]{0,4}")
+IPV4_TAIL_RE = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}")
 IPV4_RE = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
 HOME_RE = re.compile("/ho" + "me/|/Us" + "ers/")
 CALLSIGN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](?![A-Za-z0-9])", re.IGNORECASE)
@@ -120,10 +125,36 @@ def _host_shaped(word):
     return labels[-1].lower() not in NON_HOST_SUFFIXES
 
 
+def _ipv6_shaped(text):
+    """True for a run of hex groups with `::` or three or more groups (also bracketed, zone-id and IPv4-tail forms).
+    Linear: the text is cut into maximal runs of hex digits, dots and colons first. All-decimal groups of one or two
+    digits without `::` (12:30:45, a time) are not an address."""
+    for run in RUN_RE.findall(text):
+        run = run.rstrip(".")
+        if run.count(":") < 2:
+            continue
+        groups = run.split(":")
+        if "::" not in run:
+            if groups[-1] == "":
+                groups.pop()
+            if len(groups) < 3 or "" in groups:
+                continue
+        valid = all(
+            HEX_GROUP_RE.fullmatch(g) or (i == len(groups) - 1 and IPV4_TAIL_RE.fullmatch(g))
+            for i, g in enumerate(groups)
+        )
+        if not valid:
+            continue
+        if "::" not in run and all(re.fullmatch(r"[0-9]{1,2}", g) for g in groups):
+            continue
+        return True
+    return False
+
+
 def identifier_problems(text, hostnames=True):
     """Names of the private-identifier shapes found in the text (empty when it is clean)."""
     found = []
-    if IPV4_RE.search(text):
+    if IPV4_RE.search(text) or _ipv6_shaped(text):
         found.append("address-shaped string")
     if HOME_RE.search(text):
         found.append("home-path-shaped string")
@@ -360,9 +391,16 @@ def exact_model(client, model):
         return False
     if client == "local":
         shape_ok = valid_model(model) and model.rsplit(":", 1)[1] != "latest"
-        return shape_ok and not identifier_problems(model.replace("/", " "), hostnames=False)  # hf.co/org/m is a path
+        segments = model.split("/")
+        if len(segments) > 1 and segments[0] in PUBLIC_REGISTRIES:  # only a first segment may be a public registry
+            segments = segments[1:]
+        return shape_ok and not any(identifier_problems(seg) for seg in segments)
     shape_ok = any(shape.fullmatch(model) for shape in MODEL_SHAPES.get(client, ()))
     return shape_ok and not identifier_problems(model)
+
+
+def _today():
+    return datetime.datetime.now(datetime.UTC).date()
 
 
 def parse_record(line, n, cases):
@@ -425,7 +463,7 @@ def parse_record(line, n, cases):
         datetime.date.fromisoformat(row["date"])
     except ValueError:
         fail("date is not a real calendar day")
-    latest_allowed = datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=1)
+    latest_allowed = _today() + datetime.timedelta(days=1)
     if datetime.date.fromisoformat(row["date"]) > latest_allowed:
         fail("date is in the future")
     if not _unique_members(row["tools_enabled"], CAPABILITY_ORDER):
