@@ -91,18 +91,24 @@ only as a throwaway user, container or VM. What it does:
   * reads the source repository with its own configuration, minus hooks, fsmonitor and every filter driver it
     defines (neutralized one by one), and never runs anything the head's .gitattributes could name.
   * hides the private repository from the test: the test runs in a mount namespace where the parent of the
-    private directory is covered by a bind mount of an empty directory, and the test's capabilities are dropped
-    (ambient set cleared) before it starts, so it can neither list nor unmount it
-    (`isolation.private_dir_hidden`; `--hide-private off` turns it off, and a host that cannot do it reports
-    false). The tool's own steps run outside that mount. Where it is not hidden, the repository is also guarded:
-    its identity, mode, owner and a digest of every byte are recorded before the test and checked before every
-    trusted step and after every run; any change or failure is inconclusive. The same user can still deny a
-    verdict this way (suppression, never a forged bite) because the check refuses to continue.
+    private directory is covered by a bind mount of an empty directory (made in the private root with a random
+    name, opened without following a link, mounted through /proc/self/fd), and every capability set of the test
+    (ambient, bounding, effective, permitted, inheritable) is dropped and read back as zero from /proc/self/status
+    before it starts, so it can neither list nor unmount it. The shim exits 126 on any failure of this, a status
+    no verdict treats as a failing test. `isolation.private_dir_hidden` says whether it is in place;
+    `--hide-private off` turns it off, a host that cannot do it reports false, and the listing is re-checked from
+    inside the test's namespace before every run. The tool's own steps run outside that mount. The private
+    material (the repository and the private home and tmp) is also guarded whether or not it is hidden: identity,
+    mode, owner and a digest of every entry and byte are recorded before the test and checked before every trusted
+    step and after every run; a symlink or any file that is not a regular file or directory is refused and never
+    opened; any change or failure is inconclusive. The same user can still deny a verdict this way (suppression,
+    never a forged bite) because the check refuses to continue.
   * authenticates what `--clean-old` deletes: a marker is a regular file (opened O_NOFOLLOW, never blocking),
     owned by the caller, mode 0600, holding a per-installation random token (a 0600 file in the private parent)
     and the directory's own name, so a `touch`ed or copied marker deletes nothing. Candidates are opened relative
     to a pinned directory descriptor, must be on the parent's device with no mount point inside, are emptied
-    through their own descriptor and removed only if the name still refers to the same inode.
+    through their own descriptor, bottom-up, every removal relative to its own parent's descriptor (no multi-component
+    path is resolved), and removed only if the name still refers to the same inode.
   * hashes every dirty or untracked source file whole, whatever its size, against a byte budget
     (--max-source-bytes, default 4 GiB; over budget is inconclusive), so an equal-length rewrite with restored
     times is seen.
@@ -160,6 +166,8 @@ COPY_MARGIN = 64 * 1024 * 1024
 # Test hooks (set by the tests only): called between validation and use to inject a race.
 _PRUNE_HOOK = None
 _AFTER_OPEN_HOOK = None
+_PRE_OPEN_HOOK = None
+SHIM_FAILURE = 126  # the PID 1 shim's own failure status: outside 1-125, so never a failing test
 GIT_TIMEOUT = 300
 GIT_CAP = 4 * 1024 * 1024
 DEFAULT_SCRATCH = "~/.local/share/doia-mutation"
@@ -363,19 +371,21 @@ class Git:
 
 
 class StoreGuard:
-    """Detects damage to the private trusted repository. If the test could reach it (same user) it can suppress a
-    verdict, but a changed byte, mode, owner or missing file must make the run inconclusive, never a bite."""
+    """Detects damage to the private trusted material. If the test could reach it (same user) it can suppress a
+    verdict, but a changed byte, mode, owner, added or missing entry must make the run inconclusive, never a bite.
+    Every entry is hashed (type, mode, owner, size and content); a symlink or any file that is not a regular file or
+    a directory is refused outright, and is never opened."""
 
-    def __init__(self, base):
-        self.base = base
+    def __init__(self, base, extra=()):
+        self.base, self.roots = base, [base, *extra]
         self.quick_ref = self._quick()
         self.digest = self._digest()
 
     def _quick(self):
         out = []
-        for sub in ("", "objects"):
+        for root, sub in [(self.base, ""), (self.base, "objects"), *[(r, "") for r in self.roots[1:]]]:
             try:
-                st = os.stat(os.path.join(self.base, sub))
+                st = os.lstat(os.path.join(root, sub))
             except OSError as e:
                 raise Inconclusive(f"the private trusted repository is not readable ({type(e).__name__})") from e
             out.append((st.st_ino, st.st_mode, st.st_uid))
@@ -383,21 +393,24 @@ class StoreGuard:
 
     def _digest(self):
         h = hashlib.sha256()
+
+        def visit(path, label):
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode) or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+                raise Inconclusive(f"the private trusted material holds a link or special file: {label}")
+            h.update(f"{'D' if stat.S_ISDIR(st.st_mode) else 'F'} {label} {st.st_mode:o} {st.st_uid}\n".encode())
+            if stat.S_ISREG(st.st_mode):
+                h.update(f"{st.st_size}\n".encode())
+                with open(path, "rb") as f:
+                    for block in iter(lambda: f.read(1 << 20), b""):
+                        h.update(block)
+                return
+            for name in sorted(os.listdir(path)):
+                visit(os.path.join(path, name), f"{label}/{name}")
+
         try:
-            for dirpath, dirnames, filenames in os.walk(self.base, followlinks=False):
-                dirnames.sort()
-                st = os.lstat(dirpath)
-                h.update(f"D {os.path.relpath(dirpath, self.base)} {st.st_mode:o} {st.st_uid}\n".encode())
-                for name in sorted(filenames):
-                    fp = os.path.join(dirpath, name)
-                    fst = os.lstat(fp)
-                    h.update(
-                        f"F {os.path.relpath(fp, self.base)} {fst.st_mode:o} {fst.st_uid} {fst.st_size}\n".encode()
-                    )
-                    if stat.S_ISREG(fst.st_mode):
-                        with open(fp, "rb") as f:
-                            for block in iter(lambda: f.read(1 << 20), b""):
-                                h.update(block)
+            for root in self.roots:
+                visit(root, os.path.basename(root))
         except OSError as e:
             raise Inconclusive(f"the private trusted repository is not readable ({type(e).__name__})") from e
         return h.hexdigest()
@@ -750,6 +763,14 @@ def build_revert(git, root, spec, head):
     return patch, patch_paths(patch), info
 
 
+HIDECHECK_CODE = (
+    "# HIDECHECK\n"
+    "import os, sys\n"
+    "try:\n"
+    "    sys.exit(0 if os.listdir(sys.argv[1]) == [] else 1)\n"
+    "except OSError:\n"
+    "    sys.exit(1)\n"
+)
 ISOLATION_MODES = ("auto", "net", "none")
 
 
@@ -757,15 +778,39 @@ ISOLATION_MODES = ("auto", "net", "none")
 # namespace ignores fatal signals it sends itself or that the kernel raises with the default action, so a test run
 # directly as PID 1 that segfaults would hang instead of dying. This shim forks the command as PID 2, reaps every
 # orphan, and exits with the command's status (128 + N for a signal), which ends the namespace. When TARGET is not
-# "-" it first bind-mounts EMPTY over TARGET and drops every capability (see isolation_wrapper).
+# "-" it first opens EMPTY without following a link (it must be an empty directory), bind-mounts it over
+# TARGET through /proc/self/fd, then drops every capability (bounding set, then capset to zero, which clears the
+# ambient set with them)
+# and reads /proc/self/status to check they are all zero; any failure exits SHIM_FAILURE (126), never a red code.
 INIT_HELPER = (
     "import ctypes, os, sys\n"
     "empty, target = sys.argv[1], sys.argv[2]\n"
     "if target != '-':\n"
     "    libc = ctypes.CDLL(None, use_errno=True)\n"
-    "    if libc.mount(empty.encode(), target.encode(), None, 4096, None) != 0:\n"
-    "        sys.exit(97)\n"
-    "    libc.prctl(47, 4, 0, 0, 0)\n"  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL: the test gets no capability
+    "    try:\n"
+    "        fd = os.open(empty, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)\n"
+    "        if os.listdir(fd):\n"
+    "            sys.exit(126)\n"
+    "    except OSError:\n"
+    "        sys.exit(126)\n"
+    "    if libc.mount(('/proc/self/fd/%d' % fd).encode(), target.encode(), None, 4096, None) != 0:\n"
+    "        sys.exit(126)\n"
+    "    os.close(fd)\n"
+    "    last = int(open('/proc/sys/kernel/cap_last_cap').read())\n"
+    "    for cap in range(last + 1):\n"
+    "        if libc.prctl(24, cap, 0, 0, 0) != 0:\n"  # PR_CAPBSET_DROP
+    "            sys.exit(126)\n"
+    "    class Hdr(ctypes.Structure):\n"
+    "        _fields_ = [('version', ctypes.c_uint32), ('pid', ctypes.c_int)]\n"
+    "    class Data(ctypes.Structure):\n"
+    "        _fields_ = [('e', ctypes.c_uint32), ('p', ctypes.c_uint32), ('i', ctypes.c_uint32)]\n"
+    "    hdr, data = Hdr(0x20080522, 0), (Data * 2)()\n"
+    "    if libc.capset(ctypes.byref(hdr), ctypes.byref(data)) != 0:\n"
+    "        sys.exit(126)\n"
+    "    for line in open('/proc/self/status'):\n"
+    "        if line.startswith(('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb')):\n"
+    "            if int(line.split()[1], 16) != 0:\n"
+    "                sys.exit(126)\n"
     "pid = os.fork()\n"
     "if pid == 0:\n"
     "    try:\n"
@@ -794,7 +839,7 @@ def isolation_wrapper(mode, probe_env, hide=None):
     is mapped to itself, not to root. For the TEST only, when `hide` is (empty_dir, target) and the full mode works,
     the target (the parent of the private trusted repository) is covered by a bind mount of the empty directory
     inside the test's mount namespace and every capability is dropped before the test starts (`--keep-caps` gives
-    the helper the right to mount; the helper clears the ambient set and sets no_new_privs before the exec), so the
+    the helper the right to mount; the helper drops every capability and verifies it before the exec), so the
     test can neither see nor unmount it. The tool's own steps run in a namespace without that mount. A private /tmp
     (tmpfs) is refused by the kernel for a user mapped to itself and is not offered. Files, unix sockets and the
     user's identity are NOT isolated."""
@@ -963,34 +1008,32 @@ def is_mount_boundary(parent_st, child_st):
     return parent_st.st_dev != child_st.st_dev
 
 
-def refuse_foreign_device(cfd, cand_dev):
-    """Raise when anything under the open directory is on another device (a mount point)."""
+def refuse_foreign_device(cfd, dev):
+    """Raise when the open directory or anything under it is on another device than `dev` (a mount point)."""
     for _dp, _dn, _fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
-        if os.fstat(rfd).st_dev != cand_dev:
-            raise OSError("a mount point inside the candidate")
+        if is_mount_boundary(os.fstat(rfd), os.stat_result((0, 0, dev) + (0,) * 7)):
+            raise OSError("a mount point in or at the candidate")
 
 
-def _delete_pinned(cfd, cand_dev):
-    """Empty the directory open as `cfd` using descriptors only, refusing anything on another device first."""
-    refuse_foreign_device(cfd, cand_dev)
-    dirs = []
-    for dp, dn, fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=True):
+def _delete_pinned(cfd, dev):
+    """Empty the directory open as `cfd`, bottom-up, every removal relative to the descriptor of its own parent
+    directory (no multi-component path is ever resolved), after refusing any other device."""
+    refuse_foreign_device(cfd, dev)
+    for _dp, dn, fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=False):
         os.fchmod(rfd, 0o700)
         for f in fn:
             os.unlink(f, dir_fd=rfd)
-        for d in list(dn):
+        for d in dn:
             if stat.S_ISLNK(os.stat(d, dir_fd=rfd, follow_symlinks=False).st_mode):
                 os.unlink(d, dir_fd=rfd)
-                dn.remove(d)
-        dirs.append(dp)
-    for dp in sorted(dirs, key=len, reverse=True):
-        if dp != ".":
-            os.rmdir(dp, dir_fd=cfd)
+            else:
+                os.rmdir(d, dir_fd=rfd)
 
 
 def prune_old(parent, days, token):
     """Remove disposable copies this tool made and left behind. A candidate is a PREFIX directory directly under
-    `parent` (a pinned descriptor, nothing is followed) on the same device, holding an authenticated marker (see
+    `parent` (a pinned descriptor, nothing is followed; O_DIRECTORY keeps a FIFO from blocking the open) on the
+    same device, holding an authenticated marker (see
     validate_marker) older than `days`. It is emptied through its own descriptor and removed only if the name still
     refers to the same inode; a mount point or a swapped candidate is left alone."""
     pruned = []
@@ -1005,8 +1048,8 @@ def prune_old(parent, days, token):
                 continue
             try:
                 st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
-                if not stat.S_ISDIR(st.st_mode) or is_mount_boundary(pst, st):
-                    continue
+                if _PRE_OPEN_HOOK is not None:
+                    _PRE_OPEN_HOOK(name)
                 cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=pfd)  # inode compared below
             except OSError:
                 continue
@@ -1027,7 +1070,7 @@ def prune_old(parent, days, token):
                     continue
                 if _PRUNE_HOOK is not None:
                     _PRUNE_HOOK(name)
-                _delete_pinned(cfd, fst.st_dev)
+                _delete_pinned(cfd, pst.st_dev)
                 now = os.stat(name, dir_fd=pfd, follow_symlinks=False)
                 if (now.st_ino, now.st_dev) == (fst.st_ino, fst.st_dev):
                     os.rmdir(name, dir_fd=pfd)
@@ -1159,12 +1202,13 @@ def check(args, report, state):
     state["work"], state["scratch"] = work, scratch
     report["work_dir"] = work
     write_marker(work, token)
-    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache", "empty"):
+    for d in ("home", "cache", "config", "data", "pip-cache", "npm-cache", "tmp", "pycache"):
         os.mkdir(os.path.join(work, d), 0o700)
     clone = os.path.join(work, "repo")
     chk = Checker(args, report)
     env = sanitized_env(os.path.join(work, "home"), work)
-    hide = (os.path.join(work, "empty"), pparent) if args.hide_private == "auto" else None
+    hide_source = tempfile.mkdtemp(prefix="empty-", dir=private)  # random, 0700, in the private root, not in work
+    hide = (hide_source, pparent) if args.hide_private == "auto" else None
     wrap, test_wrap, iso = isolation_wrapper(args.isolation, env, hide)
     state["process_isolation"] = iso["process"]
     degraded = iso["network"] != "net-namespace" or iso["process"] != "pid-namespace"
@@ -1191,14 +1235,14 @@ def check(args, report, state):
     for d in ("home", "tmp"):
         os.mkdir(os.path.join(private, d), 0o700)
     tenv = trusted_env(os.path.join(private, "home"), os.path.join(private, "tmp"))
-    report["trusted"] = {"env_keys": sorted(tenv), "private_dir": private}
+    report["trusted"] = {"env_keys": sorted(tenv), "private_dir": private, "hide_source": hide_source}
     state["copy_failed"] = True  # cleared once both copies exist; any failure in between deletes the partial copies
     base = os.path.join(private, "base.git")
     # The private object store: a bare copy of the source, made before the test runs, with its own configuration.
     Git(git_exe, tenv, chk.record, wrap, strict=False).run(
         private, "clone", "--bare", "--local", "--no-hardlinks", "--", root, base, phase="trusted-base"
     )
-    guard = StoreGuard(base)
+    guard = StoreGuard(base, [os.path.join(private, "home"), os.path.join(private, "tmp")])
     trusted = Trusted(
         Git(git_exe, tenv, chk.record, wrap, strict=True), private, clone, os.path.join(base, "objects"), head, guard
     )
@@ -1208,6 +1252,17 @@ def check(args, report, state):
     state["copy_failed"] = False
     check_patch_paths(files, clone)
 
+    def recheck_hidden():
+        """Before every test run: from inside the test's own namespace the private parent must list as empty."""
+        if not iso["private_dir_hidden"]:
+            return
+        argv = [*test_wrap, sys.executable, "-I", "-c", HIDECHECK_CODE, pparent]
+        res = run(argv, cwd=clone, env=env, timeout=30, cap=4096)
+        chk.record("hide-check", argv, res)
+        if res.status != "exited" or res.code != 0:
+            raise Inconclusive("the private directory is no longer hidden from the test (re-check failed)")
+
+    recheck_hidden()
     kind = chk.test_run("test-at-head", test_argv, clone, env, test_wrap)
     report["green_before"] = kind == "green"
     if kind != "green":
@@ -1223,6 +1278,7 @@ def check(args, report, state):
     _, dirty = trusted.out("status", "--porcelain=v1", "--untracked-files=all", envx=envx)
     if not dirty:
         raise Inconclusive("the revert changed nothing in the clone")
+    recheck_hidden()
     kind = chk.test_run("test-after-revert", test_argv, clone, env, test_wrap)
     guard.verify()
     report["red_after_revert"] = True if kind == "red" else (False if kind == "green" else None)
@@ -1235,6 +1291,7 @@ def check(args, report, state):
         report["tree_clean"]["final"] = after_restore
         state["conclusion"] = "vacuous"
     elif kind == "red":
+        recheck_hidden()
         k3 = chk.test_run("test-after-restore", test_argv, clone, env, test_wrap)
         guard.verify()
         report["green_after_restore"] = k3 == "green"

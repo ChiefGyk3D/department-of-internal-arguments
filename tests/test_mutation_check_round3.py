@@ -51,6 +51,15 @@ ATTACK_BODIES = {
         "                open(fp, 'wb').write(b'garbage')\n"
     ),
     "delete": "        import shutil\n        shutil.rmtree(base, ignore_errors=True)\n",
+    # git never notices these, only the guard's digest does
+    "plant": (
+        "        os.makedirs(os.path.join(base, 'objects', 'info'), exist_ok=True)\n"
+        "        open(os.path.join(base, 'objects', 'info', 'extra'), 'w').write('x')\n"
+    ),
+    "dirlink": "        os.symlink('/', os.path.join(base, 'objects', 'evil'))\n",
+    "fifo": "        os.mkfifo(os.path.join(base, 'objects', 'pipe'))\n",
+    "homefile": "        open(os.path.join(p, 'home', 'evil'), 'w').write('x')\n",
+    "tmplink": "        os.symlink('/', os.path.join(p, 'tmp', 'evil'))\n",
 }
 # The write of the large file happens in runs 1 and 3: one byte flipped, same length, timestamps restored.
 BIGWRITE_SRC = (
@@ -180,6 +189,28 @@ class PrivateRepository(Base):
         code, r = self.run_tool(repo, c2, c2, extra=["--hide-private", "off"])
         self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
 
+    def test_links_and_special_files_are_refused_and_never_opened(self):
+        base = self.tmp / "s.git"
+        (base / "objects").mkdir(parents=True)
+        (base / "objects" / "link").symlink_to("/")
+        with self.assertRaises(mc.Inconclusive):
+            mc.StoreGuard(str(base))
+        (base / "objects" / "link").unlink()
+        os.mkfifo(base / "objects" / "pipe")
+        out = []
+
+        def build():
+            try:
+                mc.StoreGuard(str(base))
+            except mc.Inconclusive as e:
+                out.append(e)
+
+        t = threading.Thread(target=build, daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "the guard opened a FIFO")
+        self.assertEqual(len(out), 1)
+
     def test_every_trusted_step_asks_the_guard_first(self):
         calls = []
 
@@ -224,6 +255,145 @@ class PrivateRepository(Base):
             guard.verify()
 
 
+class InProc(Base):
+    def inproc(self, repo, c2, *extra):
+        argv = ["--repo", str(repo), f"--head={c2}", f"--revert={c2}", "--test", "python3 tests/check.py"]
+        argv += ["--scratch", str(self.scratch), "--private-parent", str(self.tmp / "priv"), "--settle", "0.2"]
+        argv += list(extra)
+        if not host_has_pid_namespace():
+            argv.append("--allow-degraded-isolation")
+        out = io.StringIO()
+        saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = mc.main(argv)
+        finally:
+            restored = {s: signal.getsignal(s) for s in saved}
+            for s, h in saved.items():
+                signal.signal(s, h)
+        self.assertEqual(restored, saved, "main() must restore the caller's signal handlers")
+        return code, json.loads(out.getvalue())
+
+    def no_copy_made(self, r):
+        self.assertNotIn("clone", [c["phase"] for c in r["commands"]])
+        self.assertIsNone(r.get("work_dir"))
+        priv = self.tmp / "priv"
+        self.assertEqual([p.name for p in priv.glob("doia-mc-private-*")] if priv.exists() else [], [])
+
+
+class HiddenChecks(InProc):
+    @unittest.skipUnless(probe_hide(), "this host cannot bind-mount inside a user namespace")
+    def test_the_hiding_is_rechecked_before_every_run(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.inproc(repo, c2)
+        self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
+        self.assertEqual([c["phase"] for c in r["commands"] if c["phase"] == "hide-check"], ["hide-check"] * 3)
+
+    @unittest.skipUnless(probe_hide(), "this host cannot bind-mount inside a user namespace")
+    def test_a_failed_recheck_is_inconclusive(self):
+        repo, _, c2 = self.make_repo()
+        real = mc.run
+        seen = []
+
+        def flaky(argv, **kw):
+            if any("HIDECHECK" in str(a) for a in argv):
+                seen.append(1)
+                if len(seen) == 2:
+                    return mc.Result("exited", 1, 0.0, "listing the private parent found entries", 0)
+            return real(argv, **kw)
+
+        with mock.patch.object(mc, "run", side_effect=flaky):
+            code, r = self.inproc(repo, c2)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"))
+        self.assertIn("private", r["reason"])
+
+    def test_the_mount_source_is_made_in_the_private_root_not_in_the_work_dir(self):
+        repo, _, c2 = self.make_repo()
+        code, r = self.inproc(repo, c2, "--keep")
+        self.addCleanup(shutil.rmtree, r["work_dir"], ignore_errors=True)
+        src = r["trusted"]["hide_source"]
+        self.assertEqual(os.path.dirname(src), r["trusted"]["private_dir"])
+        self.assertTrue(os.path.basename(src).startswith("empty-"))
+        self.assertFalse(mc.under(os.path.realpath(src), os.path.realpath(r["work_dir"])))
+
+
+def run_helper(*argv, prelude=""):
+    return subprocess.run(
+        [sys.executable, "-I", "-c", prelude + mc.INIT_HELPER, *argv], capture_output=True, text=True, timeout=60
+    )
+
+
+STUB = (
+    "import ctypes\n"
+    "class F:\n"
+    "    def mount(self, *a): return -1 if 'mount' in FAIL else 0\n"
+    "    def prctl(self, op, *a): return -1 if ('bound' in FAIL and op == 24) else 0\n"
+    "    def capset(self, *a): return -1 if 'capset' in FAIL else 0\n"
+    "ctypes.CDLL = lambda *a, **k: F()\n"
+    "import builtins, io\n"
+    "_open = builtins.open\n"
+    "def _fake_open(path, *a, **k):\n"
+    "    if path == '/proc/self/status':\n"
+    "        return io.StringIO(CAPS)\n"
+    "    return _open(path, *a, **k)\n"
+    "builtins.open = _fake_open\n"
+)
+ZERO = "'CapInh:\\t0\\nCapPrm:\\t0\\nCapEff:\\t0\\nCapBnd:\\t0\\nCapAmb:\\t0\\n'"
+
+
+def stub(fail=(), caps=ZERO):
+    return STUB.replace("FAIL", repr(set(fail))).replace("CAPS", caps)
+
+
+class Helper(Base):
+    """The PID 1 shim's mount-and-drop-capabilities step, run outside a namespace with a stubbed libc."""
+
+    def setUp(self):
+        super().setUp()
+        self.empty = self.tmp / "empty-src"
+        self.empty.mkdir(mode=0o700)
+        self.target = self.tmp / "target"
+        self.target.mkdir()
+
+    def test_a_real_mount_failure_exits_126_never_a_red_code(self):
+        p = run_helper(str(self.empty), str(self.target), "--", "true")
+        self.assertEqual(p.returncode, 126, p.stderr)
+        p = run_helper(str(self.empty), str(self.target), "--", "true", prelude=stub(["mount"]))
+        self.assertEqual(p.returncode, 126, p.stderr)
+
+    def test_each_failing_libc_call_is_fatal_and_all_succeeding_goes_on(self):
+        for call in ("bound", "capset"):
+            p = run_helper(str(self.empty), str(self.target), "--", "true", prelude=stub([call]))
+            self.assertEqual(p.returncode, 126, (call, p.stderr))
+        p = run_helper(str(self.empty), str(self.target), "--", "true", prelude=stub())
+        self.assertEqual(p.returncode, 0, p.stderr)  # negative case: every call succeeds, all sets zero
+
+    def test_capabilities_that_are_not_zero_are_fatal_even_when_every_call_succeeds(self):
+        for line in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            caps = (
+                "'"
+                + "".join(
+                    f"{k}:\\t{'1' if k == line else '0'}\\n" for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+                )
+                + "'"
+            )
+            p = run_helper(str(self.empty), str(self.target), "--", "true", prelude=stub(caps=caps))
+            self.assertEqual(p.returncode, 126, (line, p.stderr))
+
+    def test_a_non_empty_or_symlinked_mount_source_is_refused(self):
+        (self.empty / "planted").write_text("x")
+        p = run_helper(str(self.empty), str(self.target), "--", "true", prelude=stub())
+        self.assertEqual(p.returncode, 126, p.stderr)
+        link = self.tmp / "linked-src"
+        link.symlink_to(self.tmp / "target")
+        p = run_helper(str(link), str(self.target), "--", "true", prelude=stub())
+        self.assertEqual(p.returncode, 126, p.stderr)
+
+    def test_without_a_target_the_shim_only_forwards_the_exit_status(self):
+        p = run_helper("-", "-", "--", sys.executable, "-c", "raise SystemExit(7)")
+        self.assertEqual(p.returncode, 7)
+
+
 class Pruning(Base):
     def setUp(self):
         super().setUp()
@@ -250,6 +420,8 @@ class Pruning(Base):
             real.write_text(text)
             real.chmod(0o600)
             m.symlink_to(real)
+            old = time.time() - age_days * 86400
+            os.utime(real, (old, old))
         if kind != "symlink" and kind != "fifo" and kind != "dir":
             old = time.time() - age_days * 86400
             os.utime(m, (old, old))
@@ -349,24 +521,88 @@ class Pruning(Base):
                 mc.refuse_foreign_device(cfd, home_dev)
         mc.refuse_foreign_device(cfd, os.fstat(cfd).st_dev)  # negative case: same device passes
 
-    def test_a_mount_point_candidate_is_refused(self):
+    def test_the_device_check_gates_every_deletion(self):
         d = self.made("doia-mc-mnt")
-        real_stat = os.stat
-
-        def fake(path, *a, **k):
-            r = real_stat(path, *a, **k)
-            if path == "doia-mc-mnt":
-                f = list(r)
-                f[2] = r.st_dev + 1  # st_dev
-                return os.stat_result(f)
-            return r
-
-        with mock.patch.object(mc.os, "stat", side_effect=fake):
+        with mock.patch.object(mc, "refuse_foreign_device", side_effect=OSError("mount point")) as check:
             pruned = mc.prune_old(str(self.scratch), 7, self.token)
-        self.assertEqual(pruned, [])
+        self.assertEqual((pruned, check.call_count), ([], 1))
         self.assertTrue((d / "payload.txt").exists())
         self.assertTrue(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0, 0, 1) + (0,) * 7)))
         self.assertFalse(mc.is_mount_boundary(os.stat_result((0,) * 10), os.stat_result((0,) * 10)))
+
+    def test_a_fifo_named_like_a_candidate_does_not_hang_the_pruner(self):
+        os.mkfifo(self.scratch / "doia-mc-fifo-top")
+        out = []
+        t = threading.Thread(target=lambda: out.append(mc.prune_old(str(self.scratch), 7, self.token)), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "opening a FIFO candidate blocked")
+        self.assertEqual(out, [[]])
+
+    def test_a_candidate_swapped_between_the_lstat_and_the_open_is_not_followed(self):
+        self.made("doia-mc-old")
+        other = self.made("doia-mc-other-real")
+        moved = self.tmp / "moved3"
+        # `other` carries a perfectly valid marker for the name it will be renamed to
+        for f in (other / mc.MARKER,):
+            f.write_text(f"{self.token}\ndoia-mc-old\n")
+            f.chmod(0o600)
+            os.utime(f, (1, 1))
+
+        def swap(name):
+            if name == "doia-mc-old":
+                os.rename(self.scratch / name, moved)
+                os.rename(other, self.scratch / name)
+
+        self.addCleanup(setattr, mc, "_PRE_OPEN_HOOK", None)
+        mc._PRE_OPEN_HOOK = swap
+        mc.prune_old(str(self.scratch), 7, self.token)
+        self.assertTrue((self.scratch / "doia-mc-old" / "payload.txt").exists(), "the swapped-in directory was deleted")
+
+    def test_deletion_never_resolves_a_multi_component_path(self):
+        d = self.made("doia-mc-old")
+        (d / "a" / "b" / "c").mkdir(parents=True)
+        (d / "a" / "b" / "c" / "f").write_text("x")
+        (d / "a" / "link").symlink_to(self.tmp)
+        (d / "a" / "b" / "c").chmod(0o500)  # read-only directory: removal needs the descriptor's chmod first
+        self.addCleanup(lambda: [p.chmod(0o700) for p in d.rglob("*") if p.is_dir() and not p.is_symlink()])
+        calls = []
+        real_rmdir, real_unlink = os.rmdir, os.unlink
+
+        def rmdir(p, *a, **k):
+            calls.append(("rmdir", str(p), k.get("dir_fd")))
+            return real_rmdir(p, *a, **k)
+
+        def unlink(p, *a, **k):
+            calls.append(("unlink", str(p), k.get("dir_fd")))
+            return real_unlink(p, *a, **k)
+
+        with (
+            mock.patch.object(mc.os, "rmdir", side_effect=rmdir),
+            mock.patch.object(mc.os, "unlink", side_effect=unlink),
+        ):
+            pruned = mc.prune_old(str(self.scratch), 7, self.token)
+        self.assertEqual(pruned, ["doia-mc-old"])
+        self.assertGreaterEqual(len(calls), 6)
+        for kind, p, dir_fd in calls:
+            self.assertNotIn("/", p, f"{kind} resolved a multi-component path")
+            self.assertIsNotNone(dir_fd, f"{kind} {p} was not descriptor-relative")
+        self.assertTrue(self.tmp.exists(), "the symlink target was followed")
+
+    def test_write_marker_never_overwrites_or_follows(self):
+        d = self.tmp / "doia-mc-w"
+        d.mkdir()
+        (d / mc.MARKER).write_text("precious")
+        with self.assertRaises(FileExistsError):
+            mc.write_marker(str(d), self.token)
+        self.assertEqual((d / mc.MARKER).read_text(), "precious")
+        (d / mc.MARKER).unlink()
+        target = self.tmp / "elsewhere-marker"
+        target.write_text("precious")
+        (d / mc.MARKER).symlink_to(target)
+        with self.assertRaises(FileExistsError):
+            mc.write_marker(str(d), self.token)
+        self.assertEqual(target.read_text(), "precious")
 
     def test_token_file_must_be_ours_and_look_like_a_token(self):
         real = os.fstat
@@ -393,7 +629,7 @@ class Pruning(Base):
             mc.get_token(str(self.priv))
         tok.unlink()
         real = self.tmp / "elsewhere"
-        real.write_text("t" * 64)
+        real.write_text("a" * 64)
         real.chmod(0o600)
         tok.symlink_to(real)
         with self.assertRaises(mc.Inconclusive):
@@ -479,31 +715,7 @@ class ExitCodes(Base):
         self.assertEqual(mc.parse([*base, "--red-exit=1,2,125"]).red_exit_codes, {1, 2, 125})
 
 
-class Storage(Base):
-    def inproc(self, repo, c2, *extra):
-        argv = ["--repo", str(repo), f"--head={c2}", f"--revert={c2}", "--test", "python3 tests/check.py"]
-        argv += ["--scratch", str(self.scratch), "--private-parent", str(self.tmp / "priv"), "--settle", "0.2"]
-        argv += list(extra)
-        if not host_has_pid_namespace():
-            argv.append("--allow-degraded-isolation")
-        out = io.StringIO()
-        saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                code = mc.main(argv)
-        finally:
-            restored = {s: signal.getsignal(s) for s in saved}
-            for s, h in saved.items():
-                signal.signal(s, h)
-        self.assertEqual(restored, saved, "main() must restore the caller's signal handlers")
-        return code, json.loads(out.getvalue())
-
-    def no_copy_made(self, r):
-        self.assertNotIn("clone", [c["phase"] for c in r["commands"]])
-        self.assertIsNone(r.get("work_dir"))
-        priv = self.tmp / "priv"
-        self.assertEqual([p.name for p in priv.glob("doia-mc-private-*")] if priv.exists() else [], [])
-
+class Storage(InProc):
     def test_too_little_free_space_is_inconclusive_before_any_copy(self):
         repo, _, c2 = self.make_repo()
         with mock.patch.object(mc, "free_bytes", return_value=10 * 1024 * 1024):

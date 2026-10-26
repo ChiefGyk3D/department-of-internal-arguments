@@ -192,7 +192,7 @@ class CloneControlledGit(Base):
         repo, _, c2 = self.make_repo()
         code, r = self.run_tool(repo, c2, c2)
         self.assertEqual(code, 0, r["reason"])
-        steps = [c for c in r["commands"] if not c["phase"].startswith("test-")]
+        steps = [c for c in r["commands"] if not c["phase"].startswith("test-") and c["phase"] != "hide-check"]
         phases = {c["phase"] for c in steps}
         self.assertTrue(
             {"clone", "checkout-head", "trusted-init", "trusted-read-tree", "revert", "restore-checkout"} <= phases,
