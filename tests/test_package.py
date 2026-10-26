@@ -512,10 +512,60 @@ class LocalLlmRule(unittest.TestCase):
         self.assertIn("never applied or quoted unverified", text)
         self.assertIn("LOCAL-LLM:", text)
 
+    STATUS = "INFERRED, untested on gemma4:12b"
+    INFERRED_KEYS = (
+        "lose most of its text while the instructions survive",
+        "1. **Echo and compare identifiers.**",
+        "2. **Quote, then answer.**",
+        "4. **Keep roles apart.**",
+        "means text was dropped",
+    )
+
+    def unmarked(self, text):
+        """Keys whose own line lacks the status (a key that is missing or repeated counts as unmarked)."""
+        bad = []
+        for key in self.INFERRED_KEYS:
+            lines = [ln for ln in text.splitlines() if key in ln]
+            if len(lines) != 1 or self.STATUS not in lines[0]:
+                bad.append(key)
+        return bad
+
     def test_pack_does_not_promote_inferred_causes_to_rules(self):
         text = self.pack()
         self.assertIn("INFERRED", text)
         self.assertIn("untested", text)
+        self.assertEqual(self.unmarked(text), [])
+
+    def test_status_check_bites_when_marker_is_missing(self):
+        text = self.pack()
+        self.assertEqual(len(self.unmarked(text.replace(self.STATUS, "fact"))), len(self.INFERRED_KEYS))
+        one = text.replace("means text was dropped (" + self.STATUS + ")", "means text was dropped")
+        self.assertNotEqual(one, text)
+        self.assertEqual(self.unmarked(one), ["means text was dropped"])
+
+    SCOPE = "model not recorded; measured 2026-10-07; not a finding about local models in general"
+
+    def test_pack_makes_no_class_level_claims_without_scope(self):
+        text = self.pack()
+        self.assertGreaterEqual(text.count(self.SCOPE), 4)
+        stripped = text.replace(self.SCOPE, "").replace("statement about local models in general", "")
+        stripped = stripped.replace("not a finding about local models in general", "")
+        for pattern in (
+            r"small local",
+            r"small model",
+            r"\d+B-class",
+            r"\d+B class",
+            r"class models?",
+            r"local models (do|are|can|were|have)",
+            r"in general",
+        ):
+            self.assertIsNone(re.search(pattern, stripped, re.IGNORECASE), pattern)
+        self.assertNotIn("small local", text.split("---", 2)[1].lower())
+
+    def test_scope_guard_bites(self):
+        bad = "what small local models do well and badly, a 4B-class model. " + self.SCOPE
+        hits = [p for p in (r"small local", r"\d+B-class") if re.search(p, bad.replace(self.SCOPE, ""))]
+        self.assertEqual(len(hits), 2)
 
     def test_behavioral_eval_rows_cover_the_local_llm_line(self):
         rows = [ln for ln in (ROOT / "evals/behavioral-evals.md").read_text().splitlines() if "LOCAL-LLM:" in ln]
@@ -544,6 +594,14 @@ class Summariser(unittest.TestCase):
             {**good, "local_model": "gemma4:12b"},
             {**good, "local_discrepancies": 0},
             {**ok, "local_model": ""},
+            {**ok, "local_model": " "},
+            {**ok, "local_model": "ollama"},
+            {**ok, "local_model": "gemma4"},
+            {**ok, "local_model": "local models"},
+            {**ok, "local_model": "gemma4:12b\n"},
+            {**ok, "local_model": " gemma4:12b"},
+            {**ok, "local_model": "gemma4:12b\u200b"},
+            {**ok, "local_model": "gemma4:12"},
             {**ok, "local_model": "inherit"},
             {**ok, "local_model": "x" * 65},
             {**ok, "local_model": 12},

@@ -1,6 +1,6 @@
 # Pilot log schema
 
-One JSON object per line, appended by the lead after each task from the report's shared header. `scripts/summarize_log.py` validates every line and prints the table used in the pilot notes; a malformed line fails the run rather than being skipped. The real log is private (task labels can leak work); [example-log.jsonl](example-log.jsonl) is synthetic and only exists so the summariser has a fixture.
+One JSON object per line, appended by the lead after each task from the report's shared header. `scripts/summarize_log.py` validates every line and prints the table used in the pilot notes; a malformed line fails the run rather than being skipped. The real log is private (task labels can leak work); [example-log.jsonl](example-log.jsonl) is synthetic and only exists so the summarizer has a fixture.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -15,10 +15,10 @@ One JSON object per line, appended by the lead after each task from the report's
 | `findings` | `{"blocking": n, "important": n, "minor": n}` | Counts from the reviewer and adversarial reports for this task |
 | `violations` | integer | Rule slips (masked check, wrong trailer, reviewer edit, missing gate exit code, leaked identifier, unclean tree) |
 | `gate_exit` | integer or `null` | From `GATE:`; `null` when the gate was not-run or n-a |
-| `local_model` | string, 64 chars max, optional | The exact tag of the local model that answered, with its size (for example `gemma4:12b`), from the report's `LOCAL-LLM:` line. Never a family name or `ollama`. Omit when no local model was used. Must come with `local_discrepancies` |
+| `local_model` | string, 64 chars max, optional | The exact `name:size` tag of the local model that answered (for example `gemma4:12b`; an optional suffix such as `-q4_K_M` is allowed), from the report's `LOCAL-LLM:` line. Checked strictly: no surrounding whitespace, control or zero-width characters, no family name, no `ollama`. Omit when no local model was used. Must come with `local_discrepancies` |
 | `local_discrepancies` | integer, optional | The report's `DISCREPANCIES:` count: claims in the local output that did not match the source and were corrected or dropped. Zero is a real result and must be logged as 0 |
 | `notes` | string, optional | One sentence, sanitised |
 
-The two local fields exist so the discrepancy rate is measured per model before the rule is expanded: the summariser prints the number of local-model tasks, the total discrepancies and the count per model. A task that used a local model and has no `local_model` field is a logging slip, not a clean run.
+The two local fields exist so the discrepancy rate is measured per model before the rule is expanded: the summarizer prints the number of local-model tasks, the total discrepancies and the count per model. A task that used a local model and has no `local_model` field is a logging slip, not a clean run.
 
 A line that names a private host, a real callsign or a secret fails the repository's privacy sweep if it is ever committed. Keep the real log outside the repository or under a gitignored path.

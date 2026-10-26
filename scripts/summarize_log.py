@@ -7,6 +7,7 @@ line is an error, not a skipped row, so a typo cannot quietly shrink the sample.
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -31,6 +32,9 @@ REQUIRED = (
 )
 OPTIONAL = ("notes", "local_model", "local_discrepancies")
 MAX_MODEL = 64
+# name:size with an optional tag suffix such as a quantization (gemma4:12b, qwen3.5:4b, llama3.2:1b-instruct-q4_K_M).
+# fullmatch, ASCII only: no surrounding whitespace, newline, control or zero-width character gets through.
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+:[0-9]+(?:\.[0-9]+)?[bB](?:-[A-Za-z0-9_.]+)*", re.ASCII)
 MAX_LINE = 4096
 
 
@@ -83,8 +87,8 @@ def parse_line(line, n):
         raise ValueError(f"line {n}: local_model and local_discrepancies come as a pair")
     if local[0] in row:
         model, count = row["local_model"], row["local_discrepancies"]
-        if not (isinstance(model, str) and 0 < len(model) <= MAX_MODEL and model != "inherit"):
-            raise ValueError(f"line {n}: local_model must be the exact model tag, {MAX_MODEL} chars at most")
+        if not (isinstance(model, str) and len(model) <= MAX_MODEL and MODEL_RE.fullmatch(model)):
+            raise ValueError(f"line {n}: local_model must be an exact name:size tag such as gemma4:12b")
         if not (isinstance(count, int) and not isinstance(count, bool) and count >= 0):
             raise ValueError(f"line {n}: local_discrepancies must be a non-negative int")
     return row
