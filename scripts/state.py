@@ -15,8 +15,12 @@ One file per target and layout: <first 32 hex of sha256(realpath(target) NUL lay
 
 body_sha256 and pending_sha256 are each optional but an entry carries at least one. A target path must be valid UTF-8
 (a path the JSON file cannot hold is refused by load and save alike, so save never writes a file load cannot read).
-Public functions never leak a raw exception: mutators raise StateError on any hostile argument, and accepts() and
-verdict() are total (they accept only plain dict entries and plain str digests and answer False or unverified).
+The functions that take data from a caller never leak a raw exception and never run foreign code: state_key,
+state_path, load, load_or_empty, save, Store, lock_held, body_sha256, check_entries, check_rel_path, with_pending,
+settle, with_entry and without_entry raise StateError on any hostile argument, and accepts() and verdict() are total
+(they accept only plain dict entries and plain str digests and answer False or unverified). _parse_strict,
+_check_location and _serialize are internal: they take arguments built by this module (bytes it read, a directory it
+computed, entries already validated) and make no such promise; nothing outside this file and its tests uses them.
 
 Threat model. The defended case: a marker-valid file that arrived by clone, synced dotfiles, a copy or a lower
 privileged writer is not treated as owned, because nothing it ships can add an entry here. Not defended, by design:
@@ -155,7 +159,8 @@ def _shown(text, limit=80):
 
 
 def _oserr(exc):
-    """The escaped strerror of an OSError raised by the operating system (never a foreign object)."""
+    """The escaped strerror of an OSError raised by the operating system. A strerror that is not an exact str (a
+    foreign object, None) is never rendered: only the exception class name is shown."""
     return _shown(exc.strerror if type(exc.strerror) is str else type(exc).__name__)
 
 
@@ -210,7 +215,7 @@ def _real_path(target):
         raise StateError("the target path cannot be resolved") from None
 
 
-def check_location(target, directory=None):
+def _check_location(target, directory=None):
     """The state directory must not be, be inside, or contain the target or this repository (resolved and literal)."""
     directory = state_dir() if directory is None else directory
     real = Path(os.path.realpath(directory))
@@ -480,7 +485,7 @@ def _no_constant(name):
     raise StateError(f"not allowed in state: {_shown(name)}")
 
 
-def parse(data, real, layout):
+def _parse_strict(data, real, layout):
     """Strictly parse state bytes for (real, layout); returns the entries mapping or raises StateCorrupt."""
     try:
         return _parse(data, real, layout)
@@ -516,7 +521,7 @@ def _parse(data, real, layout):
     return check_entries(doc["entries"])
 
 
-def serialize(real, layout, entries):
+def _serialize(real, layout, entries):
     entries = check_entries(entries)
     doc = {"schema": SCHEMA, "target": real, "layout": layout, "entries": entries}
     data = (json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
@@ -561,14 +566,14 @@ def _read_file(dfd, name, real, layout):
         raise StateError(f"state file {name}: read failed ({_oserr(exc)})") from None
     finally:
         os.close(fd)
-    return parse(b"".join(chunks), real, layout)
+    return _parse_strict(b"".join(chunks), real, layout)
 
 
 def load(target, layout):
     """The entries mapping for (target, layout), None when there is no state file, StateError for anything else."""
     real, layout, stem = state_key(target, layout)
     directory = state_dir()
-    check_location(target, directory)
+    _check_location(target, directory)
     dfd = _open_state_dir(directory, create=False)
     if dfd is None:
         return None
@@ -589,7 +594,7 @@ def lock_held(target, layout):
     nothing afterwards (it takes a shared lock for an instant), so a dry run or a listing can use it."""
     _, _, stem = state_key(target, layout)
     directory = state_dir()
-    check_location(target, directory)
+    _check_location(target, directory)
     dfd = _open_state_dir(directory, create=False)
     if dfd is None:
         return False
@@ -625,7 +630,7 @@ class Store:
     def __init__(self, target, layout):
         self.real, self.layout, self.stem = state_key(target, layout)
         directory = state_dir()
-        check_location(target, directory)
+        _check_location(target, directory)
         self._dfd = _open_state_dir(directory, create=True)
         self._lfd = None
         try:
@@ -695,7 +700,7 @@ class Store:
         """Replace the state atomically. An existing file that does not read cleanly refuses the write. Orphaned
         temporary files of this state (a killed earlier run) are reaped first."""
         self._require_open()
-        data = serialize(self.real, self.layout, entries)
+        data = _serialize(self.real, self.layout, entries)
         self.load()  # tampered or corrupt state refuses the write; recovery is deleting the file
         _sweep(self._dfd, self.stem)
         name = self.stem + ".json"
@@ -750,7 +755,7 @@ def _sweep(dfd, stem):
 def save(target, layout, entries):
     """One-shot atomic save under the lock. For a two-phase update use `with Store(...) as s`."""
     real, layout, _ = state_key(target, layout)
-    serialize(real, layout, entries)  # refuse bad entries before the directory or the lock is touched
+    _serialize(real, layout, entries)  # refuse bad entries before the directory or the lock is touched
     with Store(target, layout) as store:
         store.save(entries)
 

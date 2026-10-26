@@ -325,7 +325,7 @@ class StrictParse(StateCase):
     def test_size_cap_has_three_independent_layers(self):
         big = b" " * (state.MAX_BYTES + 1)
         with self.assertRaisesRegex(state.StateError, "size limit"):
-            state.parse(big, self.real(), LAYOUT)  # layer 1: parse itself
+            state._parse_strict(big, self.real(), LAYOUT)  # layer 1: parse itself
         self.plant(big)
         with mock.patch.object(state.os, "read", side_effect=AssertionError("read")):
             with self.assertRaisesRegex(state.StateError, "size limit"):
@@ -337,7 +337,7 @@ class StrictParse(StateCase):
             fields = (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid, 10, 0, 0, 0)
             return os.stat_result(fields)
 
-        with mock.patch.object(state, "parse", side_effect=AssertionError("parsed")):
+        with mock.patch.object(state, "_parse_strict", side_effect=AssertionError("parsed")):
             with mock.patch.object(state.os, "fstat", side_effect=lying):
                 with self.assertRaisesRegex(state.StateError, "size limit"):
                     state.load(self.target, LAYOUT)  # layer 3: bytes actually read
@@ -429,7 +429,7 @@ class Confinement(StateCase):
         outside = self.tmp / "outside"
         outside.mkdir(mode=0o700)
         state.save(self.target, LAYOUT, {"a.md": entry()})
-        real_check = state.check_location
+        real_check = state._check_location
         moved = self.tmp / "moved"
 
         def swap(*a, **kw):
@@ -437,11 +437,11 @@ class Confinement(StateCase):
             os.replace(self.sdir, moved)
             os.symlink(outside, self.sdir)
 
-        with mock.patch.object(state, "check_location", side_effect=swap):
+        with mock.patch.object(state, "_check_location", side_effect=swap):
             self.assertLoadRefused()
         os.unlink(self.sdir)
         os.replace(moved, self.sdir)
-        with mock.patch.object(state, "check_location", side_effect=swap):
+        with mock.patch.object(state, "_check_location", side_effect=swap):
             with self.assertRaises(state.StateError):
                 state.save(self.target, LAYOUT, {"x.md": entry()})
         self.assertEqual(os.listdir(outside), [])
@@ -594,7 +594,7 @@ class Confinement(StateCase):
 
     def test_target_inside_the_repository_does_not_matter_but_state_must_be_outside(self):
         with self.assertRaises(state.StateError):
-            state.check_location(self.target, ROOT / "x")
+            state._check_location(self.target, ROOT / "x")
 
     def test_env_must_be_absolute(self):
         for bad in ("relative/dir", "", "~/x"):
@@ -1548,7 +1548,7 @@ class Hostile(StateCase):
                     lambda t=target: state.save(t, LAYOUT, {}),
                     lambda t=target: state.Store(t, LAYOUT),
                     lambda t=target: state.lock_held(t, LAYOUT),
-                    lambda t=target: state.check_location(t),
+                    lambda t=target: state._check_location(t),
                 ):
                     with self.assertRaises(state.StateError):
                         call()
@@ -1653,7 +1653,7 @@ class HostileEverywhere(StateCase):
             calls[f"with_pending(entries {field})"] = lambda bad=bad: state.with_pending(bad, {})
             calls[f"settle(entries {field})"] = lambda bad=bad: state.settle(bad, set())
             calls[f"without_entry(entries {field})"] = lambda bad=bad: state.without_entry(bad, "a.md")
-            calls[f"serialize({field})"] = lambda bad=bad: state.serialize("/x", LAYOUT, bad)
+            calls[f"_serialize({field})"] = lambda bad=bad: state._serialize("/x", LAYOUT, bad)
             calls[f"save({field})"] = lambda bad=bad: state.save(self.target, LAYOUT, bad)
             calls[f"new spec {field}"] = lambda field=field: state.with_pending(
                 {}, {}, new={"n.md": {**spec, field: h}}
@@ -1684,7 +1684,7 @@ class HostileEverywhere(StateCase):
         calls["save(entries)"] = lambda: state.save(self.target, LAYOUT, h)
         calls["lock_held"] = lambda: state.lock_held(h, LAYOUT)
         calls["Store"] = lambda: state.Store(h, LAYOUT)
-        calls["check_location"] = lambda: state.check_location(h)
+        calls["_check_location"] = lambda: state._check_location(h)
         if key_ok:
             calls["check_entries(rel key)"] = lambda: state.check_entries({h: e()})
             calls["check_entries(entry key)"] = lambda: state.check_entries({"a.md": {**e(), h: 1}})
@@ -1749,6 +1749,27 @@ class HostileEverywhere(StateCase):
             with self.assertRaises(state.StateError):
                 call()
 
+    def test_oserr_renders_only_an_exact_str_strerror(self):
+        class Loud(str):
+            def __str__(self):
+                FIRED.append("str")
+                raise SystemExit("escaped")
+
+            __repr__ = __format__ = __str__
+
+        self.addCleanup(FIRED.clear)
+        del FIRED[:]
+        self.assertEqual(state._oserr(OSError(5, "real\x1b text")), "real? text")
+        for foreign in (Loud("secret"), None, 5, b"bytes", ["a"], Recording(), EscapingSystemExit()):
+            exc = OSError(5, "x")
+            exc.strerror = foreign
+            with self.subTest(type(foreign).__name__):
+                self.assertEqual(state._oserr(exc), "OSError")
+        exc = PermissionError(13, "x")
+        exc.strerror = None
+        self.assertEqual(state._oserr(exc), "PermissionError")
+        self.assertEqual(FIRED, [])
+
     def test_shown_renders_only_exact_str_and_int(self):
         self.assertEqual(state._shown("a\x1b[0mb"), "a?[0mb")
         self.assertEqual(state._shown(5), "5")
@@ -1795,7 +1816,7 @@ class HostileEverywhere(StateCase):
             lambda: state.settle({"a.md": e}, set()),
             lambda: state.with_entry({}, "a.md", e),
             lambda: state.without_entry({"a.md": e}, "a.md"),
-            lambda: state.serialize("/x", LAYOUT, {"a.md": e}),
+            lambda: state._serialize("/x", LAYOUT, {"a.md": e}),
             lambda: state.save(self.target, LAYOUT, {"a.md": e}),
         ):
             with self.assertRaises(state.StateError):
@@ -2640,6 +2661,12 @@ MUTANTS = [
         "    if not isinstance(written, (set, frozenset, list, tuple)):",
         "Hostile.test_settle_rejects_container_subclasses",
     ),
+    (
+        "oserr exact str",
+        "    return _shown(exc.strerror if type(exc.strerror) is str else type(exc).__name__)",
+        "    return _shown(exc.strerror)",
+        "HostileEverywhere.test_oserr_renders_only_an_exact_str_strerror",
+    ),
 ]
 
 
@@ -2648,7 +2675,7 @@ MUTANTS = [
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
-EXPECTED_ROWS = 96
+EXPECTED_ROWS = 97
 
 
 class GuardTable(unittest.TestCase):
