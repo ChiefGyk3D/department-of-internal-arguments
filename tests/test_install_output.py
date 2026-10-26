@@ -107,6 +107,51 @@ class PreviewForgery(unittest.TestCase):
             self.assertFalse(any(ln.startswith("new:") for ln in out.splitlines()))
 
 
+class UserTextInMessages(unittest.TestCase):
+    def test_a_pack_name_with_a_newline_prints_one_escaped_stderr_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = run_main(
+                "--target", d, "--adapter", "codex", "--pack", "threat-model\nnew: fake  [public, sha256 0]"
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertEqual(len(err.splitlines()), 1, err)
+            self.assertIn("unknown pack", err)
+            self.assertIn("\\x0anew: fake", err)
+
+    def test_a_target_directory_name_with_a_newline_or_esc_prints_one_escaped_line(self):
+        for ch in ("\n", "\x1b[31m"):
+            with self.subTest(ch=repr(ch)), tempfile.TemporaryDirectory() as d:
+                real = Path(d) / "real"
+                real.mkdir()
+                link = Path(d) / f"a{ch}b"
+                os.symlink(real, link)  # the symlink refusal echoes the path
+                code, out, err = run_main("--target", str(link), "--adapter", "codex")
+                self.assertEqual(code, 1)
+                self.assertEqual(len(err.splitlines()), 1, err)
+                self.assertNotIn("\x1b", err)
+                self.assertIn("symlink", err)
+
+    def argparse_error(self, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            installer.main(list(args))
+        self.assertEqual(cm.exception.code, 2)
+        return err.getvalue()
+
+    def test_argparse_invalid_choice_is_echoed_by_repr_so_a_newline_stays_escaped(self):
+        with tempfile.TemporaryDirectory() as d:
+            err = self.argparse_error("--target", d, "--adapter", "bad\nx")
+        self.assertIn("'bad\\nx'", err)  # argparse formats choices with repr
+        self.assertNotIn("bad\nx", err)
+
+    def test_argparse_unrecognized_arguments_gap_is_documented_not_asserted_safe(self):
+        """Gap, reported to the lead and not fixed here (no logic changes this round): argparse prints its own
+        'unrecognized arguments' text, and _safe() does not reach it. This only pins that it exits 2."""
+        with tempfile.TemporaryDirectory() as d:
+            self.argparse_error("--target", d, "stray\nvalue")
+
+
 class FilesystemIdentity(unittest.TestCase):
     """A bind mount of / would keep its own spelling; its (st_dev, st_ino) is the same as /'s. A real bind-mount test
     needs privileges and is NOT run here; os.stat is mocked instead so the identity comparison itself is exercised."""

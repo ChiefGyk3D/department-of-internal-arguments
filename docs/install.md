@@ -40,7 +40,7 @@ UNVERIFIED: that Codex loads the generated TOML and the skills without complaint
 
 ## Keeping a dotfiles repo current
 
-The project install writes `<project>/.claude/...`. A user-level Claude Code tree (the one a dotfiles repo keeps) has no `.claude` level, so `--layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md` instead. It is still additive, still refuses symlinked destinations and whole-install collisions, still previews by default, and `--update` still replaces only files it can prove it generated (see [Overlay and ownership](overlay-and-ownership.md)). It is for Claude Code and Codex (Copilot has no user layout, and asking for it is refused; the Codex form is described above), and a target inside this repository is refused.
+The project install writes `<project>/.claude/...`. A user-level Claude Code tree (the one a dotfiles repo keeps) has no `.claude` level, so `--layout user` writes `<target>/agents/<role>.md` and `<target>/skills/pack-<name>/SKILL.md` instead. It is still additive, still refuses symlinked destinations and whole-install collisions, still previews by default, and `--update` still replaces only files that carry a well-formed marker and a matching hash (see [Overlay and ownership](overlay-and-ownership.md)); as above, files that self-identify as generated may be overwritten by `--update`, because the hash is not a signature. It is for Claude Code and Codex (Copilot has no user layout, and asking for it is refused; the Codex form is described above), and a target inside this repository is refused.
 
 The routine, from a checkout pinned to a release tag:
 

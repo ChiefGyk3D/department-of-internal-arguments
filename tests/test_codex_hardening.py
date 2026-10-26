@@ -114,6 +114,34 @@ class InvalidToml(unittest.TestCase):
             )
 
 
+class CheckCodexToml(unittest.TestCase):
+    """_check_codex_toml is unreachable through render_codex_agent (the header is generated), so call it directly."""
+
+    GOOD = "name = \"r\"\ndescription = \"d\"\ndeveloper_instructions = '''\nx\n'''\n"
+
+    def check(self, text, name="r"):
+        generate._check_codex_toml(text, name, "roles/r.md")
+
+    def test_a_well_formed_file_passes(self):
+        self.check(self.GOOD)
+
+    def test_an_extra_key_is_refused(self):
+        with self.assertRaisesRegex(generate.CodexTomlError, "roles/r.md"):
+            self.check('model = "x"\n' + self.GOOD)
+
+    def test_a_missing_key_is_refused(self):
+        with self.assertRaisesRegex(generate.CodexTomlError, "exactly"):
+            self.check('name = "r"\ndescription = "d"\n')
+
+    def test_a_wrong_name_is_refused(self):
+        with self.assertRaisesRegex(generate.CodexTomlError, "exactly"):
+            self.check(self.GOOD, name="other")
+
+    def test_malformed_toml_is_refused(self):
+        with self.assertRaisesRegex(generate.CodexTomlError, "invalid TOML"):
+            self.check("name = \n")
+
+
 class ValidatorIsolation(unittest.TestCase):
     """drift() is patched to report nothing, so only the validator's own TOML checks can fail the run."""
 
@@ -202,13 +230,45 @@ class TrustModelWording(unittest.TestCase):
         for needle in ("fully trusted", "every adapter", "sha256 of each file", "preview"):
             self.assertIn(needle, text)
 
-    def test_no_page_claims_the_installer_never_overwrites_a_self_identified_file(self):
-        for rel in ("docs/install.md", "docs/overlay-and-ownership.md", "scripts/install.py", "CHANGELOG.md"):
-            self.assertNotIn("never overwrites a file it did not generate", self.read(rel), rel)
-            self.assertNotIn("never overwrite a file it did not generate", self.read(rel), rel)
-        for rel in ("docs/install.md", "docs/overlay-and-ownership.md"):
-            self.assertIn("self-identify as generated may be overwritten", self.read(rel), rel)
-        self.assertIn("self-identify as generated may be overwritten", self.read("CHANGELOG.md"))
+    OLD_CLAIMS = (
+        "never overwrites a file it did not generate",
+        "never overwrite a file it did not generate",
+        "only files it can prove it generated",
+        "can prove it generated",
+    )
+    WORDING = "self-identify as generated may be overwritten"
+
+    def test_the_old_ownership_claim_is_absent_from_every_location(self):
+        pages = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "scripts/install.py"]
+        pages += sorted((ROOT / "docs").glob("*.md"))
+        self.assertGreaterEqual(len(pages), 13)  # loose collection, strict assertion
+        for page in pages:
+            text = " ".join(page.read_text(encoding="utf-8").split())
+            for claim in self.OLD_CLAIMS:
+                self.assertNotIn(claim, text, f"{page.name}: {claim}")
+
+    def paragraph(self, rel, anchor):
+        paras = [" ".join(p.split()) for p in (ROOT / rel).read_text(encoding="utf-8").split("\n\n")]
+        hits = [p for p in paras if anchor in p]
+        self.assertEqual(len(hits), 1, f"{rel}: anchor {anchor!r}")
+        return hits[0]
+
+    def test_every_paragraph_that_discusses_ownership_carries_the_honest_wording(self):
+        places = (
+            ("docs/install.md", "`--adapter` is `claude`"),
+            ("docs/install.md", "The project install writes"),
+            ("docs/install.md", "It writes `<target>/.codex/agents"),
+            ("docs/overlay-and-ownership.md", "The marker line carries"),
+        )
+        for rel, anchor in places:
+            self.assertIn(self.WORDING, self.paragraph(rel, anchor), f"{rel}: {anchor}")
+        lines = [
+            ln
+            for ln in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+            if "hash is not a signature" in ln
+        ]
+        self.assertEqual(len(lines), 1)  # the one bullet that states the limit must carry the wording
+        self.assertIn(self.WORDING, " ".join(lines[0].split()))
 
 
 if __name__ == "__main__":
