@@ -538,7 +538,14 @@ def _safe(text):
 
 class _SafeParser(argparse.ArgumentParser):
     """argparse echoes user-supplied text (an unknown option, a bad value) raw; send the whole message through _safe()
-    so it is one escaped line. The usage text and the exit code 2 are argparse's own."""
+    so it is one escaped line. The usage text and the exit code 2 are argparse's own. The program name comes from
+    sys.argv[0], so it is escaped too: it prefixes the error, the usage line and -h. A lone surrogate in an argument
+    is repr()-escaped by argparse and escaped again here, so it prints with a doubled backslash; that is accepted
+    (readable, ASCII, one line) rather than special-cased."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prog = _safe(self.prog)
 
     def error(self, message):
         self.print_usage(sys.stderr)
