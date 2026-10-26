@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+Tier-to-model pins exported as a generated, drift-checked file (issue #53, unit 1 of the cross-repository model-tier epic). No pin changed.
+
+- `export/model-pins.json`: schema 1, the release, each tier's exact model id, family and roles, each role's tier, and the ordered report-header field names. Sorted keys, two-space indent, ASCII, trailing newline.
+- `scripts/export_models.py` (`--write`, `--check`) and a strict `read_pins` reader: unknown, missing or duplicate keys, wrong types, `NaN`, non-canonical bytes, symlinks and oversize files are errors, and a model id must match `claude-<family>-<version>` (no alias, `latest`, family name, trailing newline or lookalike character). Generation fails closed with exit 1 and writes nothing (temp file, then rename) for a bad pin, a tier with no pin, a role whose tier is not a tier, a duplicate role name or an unreadable source. Echoed text in messages is escaped.
+- `scripts/generate.py` writes and checks the file, so `--check` and `scripts/validate.py` fail naming `export/model-pins.json` when `TIER_MODEL`, a role's tier or the report-header fragment changes without regenerating. Documented in `docs/relationship-to-safo-and-gyst.md` and `docs/policies.md`. `tests/test_export_models.py` covers each.
+
 Behavioral-eval case registry, result schema and matrix renderer (issue #45, unit 1 of #24). No model is called and nothing touches the network; nothing has been run against a model.
 
 - `evals/cases.json`: the 26 exercises as the single source (id, subject, roles, packs, clients, fixture name, input, expected behavior, `mechanical` or `judged` grading with a reason, cost class). `evals/behavioral-evals.md` is now generated from it, gains a Grading column, and `scripts/generate.py --check` fails on drift. Reading is strict: null, absent, mistyped, duplicated or unknown keys and values are errors.
