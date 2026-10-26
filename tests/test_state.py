@@ -20,6 +20,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 # DOIA_STATE_SCRIPTS lets the guard table below run this file against a deliberately weakened copy of state.py.
 sys.path.insert(0, os.environ.get("DOIA_STATE_SCRIPTS") or str(ROOT / "scripts"))
+sys.path.append(str(ROOT / "scripts"))
 
 import state  # noqa: E402  (path set up above)
 
@@ -1202,7 +1203,9 @@ class Api(StateCase):
 
         self.assertEqual(state.body_sha256(b"abc"), hashlib.sha256(b"abc").hexdigest())
         self.assertEqual(state.body_sha256(bytearray(b"abc")), hashlib.sha256(b"abc").hexdigest())
-        for bad in ("abc", None, 5, ["a"]):
+        import array
+
+        for bad in ("abc", None, 5, ["a"], array.array("B", b"abc")):  # only bytes-like types, not any buffer
             with self.subTest(bad=repr(bad)), self.assertRaises(state.StateError):
                 state.body_sha256(bad)
         self.assertRegex(state.body_sha256(b""), r"^[0-9a-f]{64}$")
@@ -1501,6 +1504,200 @@ class Hostile(StateCase):
                 state.state_key(self.target, layout)
 
 
+def _raiser(name):
+    def raiser(self, *args, **kwargs):
+        raise RuntimeError(f"hostile {name} touched")
+
+    return raiser
+
+
+def _boom(name):
+    """A class whose one named dunder raises; the other behavior is plain (and hashable, so it can be a dict key)."""
+    return type("Boom" + name.strip("_"), (), {name: _raiser(name), "__hash__": object.__hash__})
+
+
+class BoomHash:
+    """Unhashable and its hash raises: can only ever be a value."""
+
+    __hash__ = _raiser("__hash__")
+
+
+class BoomAll:
+    __eq__ = __ne__ = __len__ = __iter__ = __getitem__ = __bool__ = __str__ = __repr__ = __contains__ = _raiser("any")
+    __lt__ = __le__ = __gt__ = __ge__ = __index__ = __int__ = __float__ = __bytes__ = __fspath__ = _raiser("any")
+    __hash__ = object.__hash__
+
+
+_DUNDERS = ("__eq__", "__ne__", "__len__", "__iter__", "__getitem__", "__bool__", "__str__", "__repr__", "__contains__")
+KEY_OK_HOSTILE = [_boom(n)() for n in _DUNDERS] + [BoomAll()]
+VALUE_ONLY_HOSTILE = [BoomHash()]
+# (object, may it be a dict key?) -- never use `in` on these lists: that would call the hostile __eq__
+ALL_HOSTILE = [(h, True) for h in KEY_OK_HOSTILE] + [(h, False) for h in VALUE_ONLY_HOSTILE]
+
+
+class HostileEverywhere(StateCase):
+    """No foreign __eq__, __hash__, __len__, __iter__, __getitem__, __bool__, __str__ or __repr__ is ever invoked:
+    every value is type-checked (`type(x) is str`) before any comparison, membership, regex or hashing."""
+
+    SPEC = {"kind": "file", "release": "1", "source": "public", "pending_sha256": D2}
+
+    def mutator_calls(self, h, key_ok):
+        e = entry
+        spec = self.SPEC
+        calls = {}
+        for field in ("kind", "source", "release", "body_sha256", "pending_sha256"):
+            bad = {"a.md": e(**{field: h})}
+            calls[f"check_entries({field})"] = lambda bad=bad: state.check_entries(bad)
+            calls[f"with_entry({field})"] = lambda bad=bad: state.with_entry({}, "b.md", bad["a.md"])
+            calls[f"with_pending(entries {field})"] = lambda bad=bad: state.with_pending(bad, {})
+            calls[f"settle(entries {field})"] = lambda bad=bad: state.settle(bad, set())
+            calls[f"without_entry(entries {field})"] = lambda bad=bad: state.without_entry(bad, "a.md")
+            calls[f"serialize({field})"] = lambda bad=bad: state.serialize("/x", LAYOUT, bad)
+            calls[f"save({field})"] = lambda bad=bad: state.save(self.target, LAYOUT, bad)
+            calls[f"new spec {field}"] = lambda field=field: state.with_pending(
+                {}, {}, new={"n.md": {**spec, field: h}}
+            )
+        calls["check_entries(entry value)"] = lambda: state.check_entries({"a.md": h})
+        calls["check_entries(container)"] = lambda: state.check_entries(h)
+        calls["with_entry(entries)"] = lambda: state.with_entry(h, "a.md", e())
+        calls["with_entry(rel)"] = lambda: state.with_entry({}, h, e())
+        calls["with_entry(entry)"] = lambda: state.with_entry({}, "a.md", h)
+        calls["without_entry(entries)"] = lambda: state.without_entry(h, "a.md")
+        calls["without_entry(rel)"] = lambda: state.without_entry({}, h)
+        calls["with_pending(entries)"] = lambda: state.with_pending(h, {})
+        calls["with_pending(pending)"] = lambda: state.with_pending({"a.md": e()}, h)
+        calls["with_pending(pending value)"] = lambda: state.with_pending({"a.md": e()}, {"a.md": h})
+        calls["with_pending(new)"] = lambda: state.with_pending({}, {}, new=h)
+        calls["with_pending(new value)"] = lambda: state.with_pending({}, {}, new={"n.md": h})
+        calls["settle(entries)"] = lambda: state.settle(h, set())
+        calls["settle(written)"] = lambda: state.settle({}, h)
+        calls["settle(list member)"] = lambda: state.settle({"a.md": e()}, [h])
+        calls["settle(tuple member)"] = lambda: state.settle({"a.md": e()}, (h,))
+        calls["check_rel_path"] = lambda: state.check_rel_path(h)
+        calls["body_sha256"] = lambda: state.body_sha256(h)
+        calls["state_key(target)"] = lambda: state.state_key(h, LAYOUT)
+        calls["state_key(layout)"] = lambda: state.state_key(self.target, h)
+        calls["state_path"] = lambda: state.state_path(h, LAYOUT)
+        calls["load"] = lambda: state.load(h, LAYOUT)
+        calls["save(target)"] = lambda: state.save(h, LAYOUT, {})
+        calls["save(entries)"] = lambda: state.save(self.target, LAYOUT, h)
+        calls["lock_held"] = lambda: state.lock_held(h, LAYOUT)
+        calls["Store"] = lambda: state.Store(h, LAYOUT)
+        calls["check_location"] = lambda: state.check_location(h)
+        if key_ok:
+            calls["check_entries(rel key)"] = lambda: state.check_entries({h: e()})
+            calls["check_entries(entry key)"] = lambda: state.check_entries({"a.md": {**e(), h: 1}})
+            calls["with_pending(pending key)"] = lambda: state.with_pending({"a.md": e()}, {h: D1})
+            calls["with_pending(new key)"] = lambda: state.with_pending({}, {}, new={h: dict(spec)})
+            calls["with_pending(new spec key)"] = lambda: state.with_pending({}, {}, new={"n.md": {**spec, h: 1}})
+            calls["settle(set member)"] = lambda: state.settle({"a.md": e()}, {h})
+            calls["settle(frozenset member)"] = lambda: state.settle({"a.md": e()}, frozenset({h}))
+            calls["without_entry(entries key)"] = lambda: state.without_entry({h: e()}, "a.md")
+            calls["settle(entries key)"] = lambda: state.settle({h: e()}, set())
+        return calls
+
+    def test_every_mutator_gives_state_error_and_never_runs_hostile_code(self):
+        for h, key_ok in ALL_HOSTILE:
+            for name, call in self.mutator_calls(h, key_ok).items():
+                with self.subTest(hostile=type(h).__name__, call=name), self.assertRaises(state.StateError):
+                    call()
+
+    def test_accepts_and_verdict_stay_total_and_fail_closed(self):
+        for h, key_ok in ALL_HOSTILE:
+            who = type(h).__name__
+            with self.subTest(hostile=who):
+                self.assertIs(state.accepts(h, D1), False)
+                self.assertIs(state.accepts(entry(), h), False)
+                self.assertIs(state.accepts(entry(body_sha256=h), D1), False)
+                self.assertIs(state.accepts(entry(pending_sha256=h), D2), False)
+                self.assertIs(state.accepts({"body_sha256": D1, h: 1} if key_ok else {}, D2), False)
+                self.assertEqual(state.verdict(h, "a.md", D1), "unverified")
+                self.assertEqual(state.verdict({"a.md": entry()}, h, D1), "unverified")
+                self.assertEqual(state.verdict({"a.md": h}, "a.md", D1), "unverified")
+                self.assertEqual(state.verdict({"a.md": entry()}, "a.md", h), "unverified")
+                self.assertEqual(state.verdict({"a.md": entry(body_sha256=h)}, "a.md", D1), "unverified")
+                self.assertEqual(state.verdict({"a.md": entry(pending_sha256=h)}, "a.md", D2), "unverified")
+        self.assertEqual(state.verdict({"a.md": entry()}, "a.md", D1), "owned")  # the positive control
+
+    def test_membership_is_never_tested_before_the_type(self):
+        """The exact review repro: a kind whose __eq__ raises."""
+
+        class Boom:
+            def __eq__(self, other):
+                raise RuntimeError("eq")
+
+            __hash__ = object.__hash__
+
+        e = {"kind": Boom(), "release": "1", "source": "public", "body_sha256": "a" * 64}
+        for call in (
+            lambda: state.check_entries({"a.md": e}),
+            lambda: state.with_pending({"a.md": e}, {}),
+            lambda: state.settle({"a.md": e}, set()),
+            lambda: state.with_entry({}, "a.md", e),
+            lambda: state.without_entry({"a.md": e}, "a.md"),
+            lambda: state.serialize("/x", LAYOUT, {"a.md": e}),
+            lambda: state.save(self.target, LAYOUT, {"a.md": e}),
+        ):
+            with self.assertRaises(state.StateError):
+                call()
+        e["kind"], e["source"] = "file", Boom()
+        with self.assertRaises(state.StateError):
+            state.check_entries({"a.md": e})
+
+    def test_hash_colliding_keys_are_never_compared(self):
+        """A key hashing like a real one would make lookups call its __eq__; the key type is checked first."""
+
+        class Collide:
+            armed = False
+
+            def __init__(self, word):
+                self.word = word
+
+            def __hash__(self):
+                return hash(self.word)
+
+            def __eq__(self, other):
+                if Collide.armed:
+                    raise RuntimeError("hostile __eq__ touched")
+                return self is other
+
+        self.addCleanup(setattr, Collide, "armed", False)
+        entry_key = Collide("kind")
+        e = {**entry(), entry_key: 1}
+        spec_key = Collide("kind")
+        spec = {**HostileEverywhere.SPEC, spec_key: 1}
+        rel_key = Collide("a.md")
+        pending_key = Collide("a.md")
+        written_key = Collide("a.md")
+        Collide.armed = True
+        calls = [
+            lambda: state.check_entries({"a.md": e}),
+            lambda: state.with_pending({}, {}, new={"n.md": spec}),
+            lambda: state.check_entries({rel_key: entry()}),
+            lambda: state.with_pending({"a.md": entry()}, {pending_key: D2}),
+            lambda: state.settle({"a.md": entry()}, {written_key}),
+            lambda: state.without_entry({"a.md": entry()}, written_key),
+        ]
+        for n, call in enumerate(calls):
+            with self.subTest(n), self.assertRaises(state.StateError):
+                call()
+        self.assertEqual(
+            state.verdict({"a.md": e}, "a.md", D1), "owned"
+        )  # accepts reads only exact keys of a plain dict
+
+    def test_body_sha256_never_leaks_a_buffer_error(self):
+        released = memoryview(bytearray(b"abc"))
+        released.release()
+        strided = memoryview(bytes(range(16)))[::2]
+        multi = memoryview(bytearray(8)).cast("B", (2, 4))
+        for name, data in (("released", released), ("strided", strided)):
+            with self.subTest(name), self.assertRaises(state.StateError):
+                state.body_sha256(data)
+        self.assertRegex(state.body_sha256(multi), r"^[0-9a-f]{64}$")  # C-contiguous: hashable, or StateError
+        self.assertRegex(state.body_sha256(bytes(8 * 1024 * 1024)), r"^[0-9a-f]{64}$")  # large input
+        # (a bytearray mutated by another thread while it is hashed is out of scope)
+
+
 class LockFile(StateCase):
     """The lock file gets the state file's discipline: owner, type, link count and mode, checked before any fix."""
 
@@ -1569,6 +1766,77 @@ class LockFile(StateCase):
             state.Store(self.target, LAYOUT)
 
 
+class StandInInstaller(StateCase):
+    """Phase 1, real atomic writes through install._write_one, `written` recorded only after each success, phase 2."""
+
+    def run_install(self, files, fail_on=None):
+        import install as installer
+
+        written = set()
+        with state.Store(self.target, LAYOUT) as store:
+            entries = store.load() or {}
+            new = {
+                rel: dict(NEW, pending_sha256=state.body_sha256(data))
+                for rel, data in files.items()
+                if rel not in entries
+            }
+            pending = {rel: state.body_sha256(files[rel]) for rel in files if rel in entries}
+            store.save(state.with_pending(entries, pending, new=new))  # phase 1
+            try:
+                for rel, data in files.items():
+                    if rel == fail_on:
+                        raise ValueError("injected failure")
+                    installer._write_one(self.target / rel, "create", data, None, False)  # the real write helper
+                    written.add(rel)  # recorded only after the write returned
+            except ValueError:
+                pass  # the run stops here; phase 2 still settles what really happened
+            store.save(state.settle(store.load(), written))  # phase 2
+        return written
+
+    def verdicts(self, files):
+        got = state.load(self.target, LAYOUT) or {}
+        out = {}
+        for rel in files:
+            on_disk = (self.target / rel).read_bytes() if (self.target / rel).is_file() else None
+            out[rel] = state.verdict(got, rel, state.body_sha256(on_disk) if on_disk is not None else None)
+        return out
+
+    def test_files_the_installer_wrote_are_owned_after_phase_2(self):
+        files = {"a.md": b"alpha\n", "d/b.md": b"beta\n"}
+        written = self.run_install(files)
+        self.assertEqual(written, set(files))  # derived from the writes, not asserted by hand
+        self.assertEqual(self.verdicts(files), {"a.md": "owned", "d/b.md": "owned"})
+
+    def test_a_failed_write_is_not_promoted_even_if_the_bytes_match(self):
+        files = {"a.md": b"alpha\n", "b.md": b"beta\n", "c.md": b"gamma\n"}
+        (self.target / "b.md").write_bytes(files["b.md"])  # the attacker got there first with the planned bytes
+        written = self.run_install(files)
+        self.assertEqual(written, {"a.md"})  # create refuses to overwrite: the real helper failed on b.md
+        got = state.load(self.target, LAYOUT)
+        self.assertEqual(sorted(got), ["a.md"])  # b.md and c.md left no ownership claim
+        verdicts = self.verdicts({"a.md": 0, "b.md": 0})
+        self.assertEqual(verdicts, {"a.md": "owned", "b.md": "unverified"})
+
+    def test_an_injected_failure_stops_the_run_and_only_earlier_writes_are_owned(self):
+        files = {"a.md": b"alpha\n", "b.md": b"beta\n", "c.md": b"gamma\n"}
+        written = self.run_install(files, fail_on="b.md")
+        self.assertEqual(written, {"a.md"})
+        self.assertEqual(sorted(state.load(self.target, LAYOUT)), ["a.md"])
+        self.assertFalse((self.target / "b.md").exists())
+
+    def test_a_crash_before_phase_2_leaves_every_new_path_unverified(self):
+        import install as installer
+
+        files = {"a.md": b"alpha\n"}
+        with state.Store(self.target, LAYOUT) as store:
+            store.save(
+                state.with_pending({}, {}, new={"a.md": dict(NEW, pending_sha256=state.body_sha256(files["a.md"]))})
+            )
+            installer._write_one(self.target / "a.md", "create", files["a.md"], None, False)
+            # the process dies here, after a real write but before phase 2
+        self.assertEqual(self.verdicts(files), {"a.md": "unverified"})
+
+
 class Processes(StateCase):
     """Real processes: lock contention and kills at each step of a save."""
 
@@ -1616,7 +1884,16 @@ class Processes(StateCase):
                 proc = self.run_child(step, "9")
                 self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stderr)
                 got = state.load(self.target, LAYOUT)  # never a torn or corrupt file
-                self.assertIn(list(got), (["old.md"], ["f-9.md"]))
+                # before the rename (write, file fsync, the rename itself) the new state must NOT be visible;
+                # after it (directory fsync, in either form) it is
+                expected = {
+                    "kill-write": ["old.md"],
+                    "kill-fsync-1": ["old.md"],
+                    "kill-rename": ["old.md"],
+                    "kill-fsync-2": ["f-9.md"],
+                    "kill-dirsync": ["f-9.md"],
+                }[step]
+                self.assertEqual(list(got), expected)
                 self.assertFalse(state.lock_held(self.target, LAYOUT))  # the kernel released the lock
                 for name in os.listdir(self.sdir):
                     if name.endswith(".tmp"):
@@ -1641,8 +1918,7 @@ class Processes(StateCase):
         again = state.settle(crashed, set())  # the next run reports nothing written
         self.assertEqual(state.verdict(again, "n.md", digest), "unverified")
         self.assertNotIn("n.md", again)
-        written = state.settle(crashed, {"n.md"})  # only an install that wrote that exact path owns it
-        self.assertEqual(state.verdict(written, "n.md", digest), "owned")
+        # (the positive case, where an install really writes the path, is in the stand-in installer tests)
 
     def test_a_kill_between_the_phases_of_an_update_converges(self):
         state.save(self.target, LAYOUT, {"a.md": entry()})
@@ -1934,7 +2210,7 @@ MUTANTS = [
     ),
     (
         "body_sha256 type",
-        "    if not isinstance(data, (bytes, bytearray, memoryview)):",
+        "    if not _is_one_of(data, (bytes, bytearray, memoryview)):",
         "    if False:",
         "Api.test_body_sha256",
     ),
@@ -2014,7 +2290,7 @@ MUTANTS = [
     ),
     (
         "settle container",
-        "    if type(written) not in (set, frozenset, list, tuple):",
+        "    if not _is_one_of(written, (set, frozenset, list, tuple)):",
         "    if False:",
         "Hostile.test_mutators_raise_state_error_on_hostile_arguments",
     ),
@@ -2026,8 +2302,8 @@ MUTANTS = [
     ),
     (
         "settle accepted containers",
-        "    if type(written) not in (set, frozenset, list, tuple):",
-        "    if type(written) not in (set,):",
+        "    if not _is_one_of(written, (set, frozenset, list, tuple)):",
+        "    if not _is_one_of(written, (set,)):",
         "Hostile.test_settle_rejects_hostile_containers_but_accepts_the_documented_ones",
     ),
     (
@@ -2108,6 +2384,66 @@ MUTANTS = [
         "_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC",
         "Confinement.test_file_not_regular",
     ),
+    (
+        "kind type before membership",
+        "if type(kind) is not str or kind not in KINDS:",
+        "if kind not in KINDS or type(kind) is not str:",
+        "HostileEverywhere.test_membership_is_never_tested_before_the_type",
+    ),
+    (
+        "source type before membership",
+        "if type(source) is not str or source not in SOURCES:",
+        "if source not in SOURCES or type(source) is not str:",
+        "HostileEverywhere.test_membership_is_never_tested_before_the_type",
+    ),
+    (
+        "kind type before membership (matrix)",
+        "if type(kind) is not str or kind not in KINDS:",
+        "if kind not in KINDS or type(kind) is not str:",
+        "HostileEverywhere.test_every_mutator_gives_state_error_and_never_runs_hostile_code",
+    ),
+    (
+        "entry keys typed",
+        "    if any(type(k) is not str for k in entry):",
+        "    if False:",
+        "HostileEverywhere.test_hash_colliding_keys_are_never_compared",
+    ),
+    (
+        "new spec keys typed",
+        "            or any(type(k) is not str for k in spec)\n",
+        "",
+        "HostileEverywhere.test_hash_colliding_keys_are_never_compared",
+    ),
+    (
+        "body_sha256 buffer errors",
+        "    except (ValueError, TypeError, BufferError):",
+        "    except TypeError:",
+        "HostileEverywhere.test_body_sha256_never_leaks_a_buffer_error",
+    ),
+    (
+        "failed write not promoted",
+        '        if rel in written and "pending_sha256" in entry:',
+        '        if "pending_sha256" in entry:',
+        "StandInInstaller.test_a_failed_write_is_not_promoted_even_if_the_bytes_match",
+    ),
+    (
+        "injected failure not promoted",
+        '        if rel in written and "pending_sha256" in entry:',
+        '        if "pending_sha256" in entry:',
+        "StandInInstaller.test_an_injected_failure_stops_the_run_and_only_earlier_writes_are_owned",
+    ),
+    (
+        "crash before phase 2 unverified",
+        "    if type(body) is not str:\n        return False",
+        '    body = body or entry.get("pending_sha256")\n    if type(body) is not str:\n        return False',
+        "StandInInstaller.test_a_crash_before_phase_2_leaves_every_new_path_unverified",
+    ),
+    (
+        "written paths owned",
+        '        if rel in written and "pending_sha256" in entry:',
+        "        if False:",
+        "StandInInstaller.test_files_the_installer_wrote_are_owned_after_phase_2",
+    ),
 ]
 
 
@@ -2136,7 +2472,7 @@ class GuardTable(unittest.TestCase):
         return "hang" if "test hung" in r.stderr else "red"
 
     def test_every_listed_guard_goes_red_when_weakened_and_green_when_intact(self):
-        self.assertGreaterEqual(len(MUTANTS), 60)
+        self.assertGreaterEqual(len(MUTANTS), 80)
         source = (ROOT / "scripts" / "state.py").read_text()
         tmp = Path(tempfile.mkdtemp(prefix="doia-mut-"))
         self.addCleanup(shutil.rmtree, tmp, True)

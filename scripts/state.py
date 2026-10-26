@@ -73,11 +73,17 @@ the file, and anyone who controls the target can create the planned bytes. A cra
 paths `unverified`; the files it did write are recovered by the explicit adopt step of the installer (#42), after the
 user has looked at the preview; a re-run that writes the path promotes it through settle().
 
+Provenance. `owned` attests that the CONTENT matches a digest the installer recorded, not that the installer wrote
+those bytes. For an already-owned path the pending digest means owned for the pending content even if someone else
+placed it: that is the same content the installer would write, so it adds no new authority to overwrite anything. A
+caller that needs stronger provenance (who wrote the bytes) must not rely on this store alone.
+
 Limits, stated so nobody relies on more than this gives. flock is advisory and its behavior on network filesystems
 (NFS and the like) is not guaranteed; keep the state directory on a local filesystem. The sweep of orphaned temporary
 files checks a name with lstat and then unlinks it, so a same-user process racing it can swap the file in between: a
 same-user attacker is out of scope. lock_held takes a shared lock for an instant, so a same-user process probing in a
-loop could starve a writer; that is also out of scope. Neither flock nor the sweep defends against root.
+loop could starve a writer; that is also out of scope. Hashing a bytearray that another thread mutates while
+body_sha256 reads it is out of scope too. Neither flock nor the sweep defends against root.
 """
 
 import contextlib
@@ -226,11 +232,20 @@ def state_path(target, layout):
     return state_dir() / (stem + ".json")
 
 
+def _is_one_of(obj, types):
+    """Exact-type test that never calls anything on `obj` (no __class__, __eq__ or isinstance hook)."""
+    t = type(obj)
+    return any(t is c for c in types)
+
+
 def body_sha256(data):
     """The one definition of a body digest, for the installer and the store alike: lowercase hex sha256 of the bytes."""
-    if not isinstance(data, (bytes, bytearray, memoryview)):
+    if not _is_one_of(data, (bytes, bytearray, memoryview)):
         raise StateError("body_sha256 takes bytes")
-    return hashlib.sha256(data).hexdigest()
+    try:
+        return hashlib.sha256(data).hexdigest()
+    except (ValueError, TypeError, BufferError):
+        raise StateError("body_sha256: the buffer cannot be read (released or not contiguous)") from None
 
 
 def _check_lock_file(fd, created):
@@ -386,12 +401,16 @@ def _check_entry(rel, entry):
     check_rel_path(rel)
     if type(entry) is not dict:
         raise StateError(f"entry {_shown(rel)}: not an object")
+    if any(type(k) is not str for k in entry):
+        raise StateError(f"entry {_shown(rel)}: keys must be text")
     keys = set(entry)
     if not _ENTRY_REQUIRED <= keys or not keys <= _ENTRY_KEYS:
         raise StateError(f"entry {_shown(rel)}: missing or unknown keys")
-    if entry["kind"] not in KINDS or type(entry["kind"]) is not str:
+    kind, source = entry["kind"], entry["source"]
+    # The exact type is tested FIRST: `in` on a tuple would call a hostile value's __eq__.
+    if type(kind) is not str or kind not in KINDS:
         raise StateError(f"entry {_shown(rel)}: invalid kind")
-    if entry["source"] not in SOURCES or type(entry["source"]) is not str:
+    if type(source) is not str or source not in SOURCES:
         raise StateError(f"entry {_shown(rel)}: invalid source")
     if "body_sha256" not in entry and "pending_sha256" not in entry:
         raise StateError(f"entry {_shown(rel)}: no digest")
@@ -737,8 +756,9 @@ def with_pending(entries, pending, new=None):
 
     `pending` is {relative path: digest} for paths already recorded: pending_sha256 is set next to the old digest.
     `new` is {relative path: {"kind", "release", "source", "pending_sha256"}} for paths not yet recorded: each is added
-    WITHOUT a body digest, so after a crash it reads as owned only for exactly that content, and settle removes it
-    if the file was never written."""
+    WITHOUT a body digest. Such an entry is never owned (accepts and verdict refuse it whatever the digest): it
+    becomes owned only when settle() promotes it because phase 2 reported that exact path as written, and settle
+    removes it if the file was never written. A crash after phase 1 therefore leaves the path unverified."""
     out = check_entries(entries)
     if type(pending) is not dict:
         raise StateError("with_pending: pending must be a plain dict of path to digest")
@@ -751,7 +771,11 @@ def with_pending(entries, pending, new=None):
     for rel, spec in (new or {}).items():
         if type(rel) is not str or rel in out:
             raise StateError(f"new entry is not a fresh path: {_shown(rel)}")
-        if type(spec) is not dict or set(spec) != {"kind", "release", "source", "pending_sha256"}:
+        if (
+            type(spec) is not dict
+            or any(type(k) is not str for k in spec)
+            or set(spec) != {"kind", "release", "source", "pending_sha256"}
+        ):
             raise StateError(f"new entry {_shown(rel)}: needs exactly kind, release, source and pending_sha256")
         out[rel] = dict(spec)
     return check_entries(out)
@@ -764,7 +788,7 @@ def settle(entries, written):
     an entry that exists only as a pending new path and was not written is removed; every pending field is cleared
     (including stale ones). A path in `written` that has no entry is an error."""
     out = check_entries(entries)
-    if type(written) not in (set, frozenset, list, tuple):
+    if not _is_one_of(written, (set, frozenset, list, tuple)):
         raise StateError("settle: written must be a set (or list or tuple) of paths")
     for rel in written:
         if type(rel) is not str:
