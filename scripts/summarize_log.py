@@ -29,7 +29,8 @@ REQUIRED = (
     "violations",
     "gate_exit",
 )
-OPTIONAL = ("notes",)
+OPTIONAL = ("notes", "local_model", "local_discrepancies")
+MAX_MODEL = 64
 MAX_LINE = 4096
 
 
@@ -77,6 +78,15 @@ def parse_line(line, n):
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"line {n}: {msg}")
+    local = ("local_model", "local_discrepancies")
+    if (local[0] in row) != (local[1] in row):
+        raise ValueError(f"line {n}: local_model and local_discrepancies come as a pair")
+    if local[0] in row:
+        model, count = row["local_model"], row["local_discrepancies"]
+        if not (isinstance(model, str) and 0 < len(model) <= MAX_MODEL and model != "inherit"):
+            raise ValueError(f"line {n}: local_model must be the exact model tag, {MAX_MODEL} chars at most")
+        if not (isinstance(count, int) and not isinstance(count, bool) and count >= 0):
+            raise ValueError(f"line {n}: local_discrepancies must be a non-negative int")
     return row
 
 
@@ -118,6 +128,14 @@ def summarise(rows):
     lines.append(f"| Rule slips (violations) | {sum(r['violations'] for r in rows)} in {len(rows)} tasks |")
     gated = [r for r in rows if r["gate_exit"] is not None]
     lines.append(f"| Gate exit non-zero | {sum(r['gate_exit'] != 0 for r in gated)} of {len(gated)} logged gates |")
+    local = [r for r in rows if "local_model" in r]
+    if local:
+        used = Counter(r["local_model"] for r in local)
+        lines.append(
+            f"| Local-model runs | {len(local)} task{'s' if len(local) != 1 else ''}; "
+            f"discrepancies {sum(r['local_discrepancies'] for r in local)}; "
+            f"{', '.join(f'{m} {c}' for m, c in sorted(used.items()))} |"
+        )
     packs = Counter(p for r in rows for p in r["packs"])
     lines.append(f"| Packs loaded | {', '.join(f'{p} {c}' for p, c in sorted(packs.items())) or 'none'} |")
     return "\n".join(lines)

@@ -23,7 +23,7 @@ The lead is [templates/lead.md](../templates/lead.md), copied into the controlle
 
 - Name the role by what the work is: a plan whose code is complete goes to the transcriber; everything else that changes files goes to the implementer; a finished task goes to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also goes to the adversarial reviewer, after the reviewer, never instead of it.
 - Name packs by the domain the diff touches. A pack named in a brief is not proof it was loaded; read `PACKS LOADED`.
-- Read the report header first: `GATE` needs an exit code you believe, `TREE` must be clean for a reviewer, `MODEL` must match the dispatch. `NOT VERIFIED` is a list the lead now owns.
+- Read the report header first: `GATE` needs an exit code you believe, `TREE` must be clean for a reviewer, `MODEL` must match the dispatch. `NOT VERIFIED` is a list the lead now owns. `LOCAL-LLM` must say `n/a - <reason>` or name the exact model that answered, what its draft was checked against and the discrepancy count; a draft nobody checked is not used. The measured failure behind this is about gemma4:12b only (2 of 5 triage runs returned unrelated text on 2026-10-26).
 - Severity is one scale: blocking, important, minor. After two failed rounds on the same finding class, stop and recommend a different model.
 - Append one line per task to the pilot log (see [Evals and measurements](evals-and-measurements.md)).
 - Never infer approval, fill in a missing report field, dispatch the most capable tier without the human's recorded OK, or let an agent push.

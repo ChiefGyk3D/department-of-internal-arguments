@@ -83,7 +83,19 @@ class CurrentTree(unittest.TestCase):
     def test_every_role_report_has_shared_header_and_model_line(self):
         for role in load_roles(ROOT):
             body = role["body"]
-            for field in ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:"):
+            for field in (
+                "ROLE:",
+                "MODEL:",
+                "HEAD:",
+                "BASE:",
+                "GATE:",
+                "PACKS LOADED:",
+                "TREE:",
+                "NOT VERIFIED:",
+                "LOCAL-LLM:",
+                "VERIFIED-AGAINST:",
+                "DISCREPANCIES:",
+            ):
                 self.assertIn(field, body, role["name"])
             self.assertNotIn("{{fragment:", body, role["name"])
             if "reviewer" in role["name"]:
@@ -235,6 +247,26 @@ class RoleRules(unittest.TestCase):
     def test_role_without_shared_header_rejected(self):
         r = self.mutate_role("reviewer", "{{fragment:report-header}}", "HEAD: <sha>")
         self.assertTrue(any("shared header" in e for e in validate(r)))
+
+    def test_report_header_without_local_llm_line_rejected(self):
+        for token in ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:"):
+            with tempfile.TemporaryDirectory() as d:
+                r = copy_fixture(d)
+                f = r / "fragments/report-header.md"
+                text = f.read_text()
+                self.assertIn(token, text)
+                f.write_text(text.replace(token, "REMOVED:"))
+                self.assertTrue(any(f"report header lacks {token}" in e for e in validate(r)), token)
+
+    def test_copilot_template_must_carry_local_llm_line(self):
+        for token in ("LOCAL-LLM:", "VERIFIED-AGAINST:", "DISCREPANCIES:"):
+            with tempfile.TemporaryDirectory() as d:
+                r = copy_fixture(d)
+                f = r / "templates/copilot-instructions.md"
+                text = f.read_text()
+                self.assertIn(token, text)
+                f.write_text(text.replace(token, "REMOVED:"))
+                self.assertTrue(any(f"lacks local-model report token {token!r}" in e for e in validate(r)), token)
 
     def test_editing_role_that_may_push_rejected(self):
         r = self.mutate_role(
@@ -460,17 +492,74 @@ class Guards(unittest.TestCase):
             self.assertTrue(any("symlink in package" in e for e in validate(r)))
 
 
+class LocalLlmRule(unittest.TestCase):
+    """The pack and the eval rows state what was measured, about which model, on which date."""
+
+    def pack(self):
+        return (ROOT / "packs/local-llm-routing/PACK.md").read_text()
+
+    def test_pack_names_the_measured_model_size_and_date(self):
+        text = self.pack()
+        self.assertIn("gemma4:12b, 2026-10-26, 2 of 5 triage runs returned unrelated text", text)
+        self.assertIn("12B", text)
+        self.assertIn("may not hold for another model", text)
+
+    def test_pack_states_context_default_and_verify_step(self):
+        text = self.pack()
+        self.assertIn("4096", text)
+        self.assertIn("num_ctx", text)
+        self.assertIn("## Local output is a draft: verify it against the source", text)
+        self.assertIn("never applied or quoted unverified", text)
+        self.assertIn("LOCAL-LLM:", text)
+
+    def test_pack_does_not_promote_inferred_causes_to_rules(self):
+        text = self.pack()
+        self.assertIn("INFERRED", text)
+        self.assertIn("untested", text)
+
+    def test_behavioral_eval_rows_cover_the_local_llm_line(self):
+        rows = [ln for ln in (ROOT / "evals/behavioral-evals.md").read_text().splitlines() if "LOCAL-LLM:" in ln]
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertTrue(any("DISCREPANCIES: 1" in ln for ln in rows))
+        self.assertTrue(any("n/a" in ln for ln in rows))
+
+
 class Summariser(unittest.TestCase):
     def test_example_log_summarises(self):
         rows = load(ROOT / "evals/example-log.jsonl")
         table = summarise(rows)
-        self.assertIn("| Tasks logged | 4 |", table)
+        self.assertIn("| Tasks logged | 5 |", table)
+        self.assertIn("| Local-model runs | 1 task; discrepancies 2; gemma4:12b 1 |", table)
         self.assertIn("| First-time approval of reviewed implementation tasks | 2 of 3 |", table)
         self.assertIn("| Fix rounds on implementation tasks | 2 |", table)
         self.assertIn("| Findings | blocking 1, important 3, minor 1 |", table)
-        self.assertIn("| Rule slips (violations) | 1 in 4 tasks |", table)
-        self.assertIn("| Gate exit non-zero | 0 of 3 logged gates |", table)
+        self.assertIn("| Rule slips (violations) | 1 in 5 tasks |", table)
+        self.assertIn("| Gate exit non-zero | 0 of 4 logged gates |", table)
         self.assertNotIn("inherit", table)
+
+    def test_local_fields_must_come_as_a_valid_pair(self):
+        good = json.loads((ROOT / "evals/example-log.jsonl").read_text().splitlines()[0])
+        ok = {**good, "local_model": "gemma4:12b", "local_discrepancies": 0}
+        bad_rows = [
+            {**good, "local_model": "gemma4:12b"},
+            {**good, "local_discrepancies": 0},
+            {**ok, "local_model": ""},
+            {**ok, "local_model": "inherit"},
+            {**ok, "local_model": "x" * 65},
+            {**ok, "local_model": 12},
+            {**ok, "local_discrepancies": -1},
+            {**ok, "local_discrepancies": True},
+            {**ok, "local_discrepancies": "1"},
+            {**ok, "local_discrepancies": None},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "log.jsonl"
+            p.write_text(json.dumps(ok) + "\n")
+            self.assertEqual(load(p)[0]["local_model"], "gemma4:12b")
+            for row in bad_rows:
+                p.write_text(json.dumps(row) + "\n")
+                with self.assertRaises(ValueError, msg=row):
+                    load(p)
 
     def test_malformed_line_fails_the_run(self):
         good = json.loads((ROOT / "evals/example-log.jsonl").read_text().splitlines()[0])
