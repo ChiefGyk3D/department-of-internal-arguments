@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+Installer state store, unit 1 of 4 for #31 (issue #39). Library and tests only: nothing in `scripts/install.py` calls it yet (wiring is #40).
+
+- `scripts/state.py`: a trusted per-user record of which installed files this installer owns, kept outside the target and outside this repository (`$DOIA_STATE_DIR`, else `${XDG_STATE_HOME:-~/.local/state}/department-of-internal-arguments/`; one `0600` JSON file per target and layout in a `0700` directory). Entries are a relative path plus a body digest (no device or inode, no keyed MAC). `load` returns the entries, `None` for a missing file, or raises `StateError` for anything else; the parser is strict (duplicate keys, NaN, depth over 4, unknown keys, more than 4096 entries, non-normalized paths, digests that are not 64 lowercase hex, absent, null or mistyped fields, size over 1 MiB). Reads never follow a link and check owner and mode on the open descriptor; a state directory inside the target or this repository is refused. `save` and `Store` write atomically (temporary `0600` file, `O_EXCL`, fsync, rename, fsync of the directory) under a non-blocking `flock` (`another install is running`), and refuse to replace a state file that does not read cleanly. `with_pending`, `settle` and `accepts` support the two-phase update.
+- `tests/test_state.py`: each refusal in the issue, a table of guards with a negative case, and a crash between write and rename.
+
 ## [0.4.0] - 2026-10-26
 
 The documentation is split into pages under `docs/` and published as the project wiki (issues #18 and #19): ten pages, `README.md` trimmed to a landing page, `scripts/gen_wiki.py` (with `--check`) and a `wiki.yml` caller of the shared wiki-publish workflow. `scripts/validate.py` requires `docs/home.md`. The wiki itself is enabled by the maintainer after merge.
