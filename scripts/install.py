@@ -123,6 +123,13 @@ def _check_target(target, root):
     # A typo or a ".." must not turn a home or project install into one rooted at "/" (privileged runs especially).
     if Path(os.path.realpath(target)).parent == Path(os.path.realpath(target)):
         raise ValueError("target cannot be the filesystem root")
+    try:  # a bind mount of / keeps its own spelling, so also compare filesystem identity
+        here, top = os.stat(target), os.stat("/")
+    except OSError:
+        pass  # a missing target is reported just below
+    else:
+        if (here.st_dev, here.st_ino) == (top.st_dev, top.st_ino):
+            raise ValueError("target cannot be the filesystem root")
     if not target.is_dir():
         raise ValueError("target must be an existing project directory")
     if Path(os.path.realpath(target)).is_relative_to(Path(os.path.realpath(root))):
@@ -511,7 +518,22 @@ def list_managed(target, layout="project", overlay=None, root=ROOT):
 
 
 def _safe(text):
-    return "".join(c if " " <= c <= "~" else "?" for c in text)
+    """The one terminal-safe form for anything printed: printable ASCII as is, everything else (controls, ESC, CSI,
+    CR, LF, bidi and zero-width characters, line separators) and the backslash as a visible escape."""
+    out = []
+    for c in str(text):
+        o = ord(c)
+        if c == "\\":
+            out.append("\\\\")
+        elif " " <= c <= "~":
+            out.append(c)
+        elif o <= 0xFF:
+            out.append(f"\\x{o:02x}")
+        elif o <= 0xFFFF:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(f"\\U{o:08x}")
+    return "".join(out)
 
 
 LABELS = {
@@ -556,12 +578,12 @@ def main(argv=None):
             # Provenance and digest of what would be written: the preview is the review control for personas and
             # packs, which become model instructions.
             origin = "overlay" if from_overlay else "public"
-            print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}  [{origin}, sha256 {_sha(data)}]")
+            print(f"{LABELS.get(action, action)}: {_safe(dest.relative_to(target))}  [{origin}, sha256 {_sha(data)}]")
         _refuse_edited(items)
         if a.apply:
             _apply(items)
     except (OSError, ValueError) as exc:
-        print(f"Installation refused: {exc}", file=sys.stderr)
+        print(f"Installation refused: {_safe(exc)}", file=sys.stderr)
         return 1
     print(("Installed" if a.apply else "Preview only; rerun with --apply after review") + f": {len(items)} files")
     return 0
