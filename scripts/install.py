@@ -1,13 +1,18 @@
-"""Additive installer. Preview by default; never overwrite a file it did not generate.
+"""Additive installer. Preview by default; replaces only files that identify themselves as generated (see below).
 
-python3 scripts/install.py --target <dir> --adapter claude|copilot|both [--pack NAME ...] [--update] [--apply]
+python3 scripts/install.py --target <dir> --adapter claude|copilot|both|codex [--pack NAME ...] [--update] [--apply]
                            [--layout project|user] [--overlay DIR] [--force-edited]
 python3 scripts/install.py --target <dir> --list-managed [--layout project|user] [--overlay DIR]
 
 Layouts:
-  project (default)  <target>/.claude/agents, <target>/.claude/skills, <target>/.github/agents
+  project (default)  <target>/.claude/agents, <target>/.claude/skills, <target>/.github/agents,
+                     <target>/.codex/agents (Codex custom agents, TOML), <target>/.agents/skills (Codex skills)
   user               <target>/agents/<role>.md and <target>/skills/pack-<name>/SKILL.md (a user-level Claude Code
-                     tree such as a dotfiles checkout). Claude only: Copilot has no user layout.
+                     tree such as a dotfiles checkout). Claude and Codex only: Copilot has no user layout.
+                     Codex has two user roots (~/.codex/agents and ~/.agents/skills), so --adapter codex with
+                     --layout user takes your home directory (or a tree laid out like it) as the target and writes
+                     the same relative paths as the project layout: .codex/agents/<role>.toml and
+                     .agents/skills/pack-<name>/SKILL.md.
 
 Without --update every existing destination is a collision and the whole install is refused.
 With --update a destination is replaced in place only if its marker is well-formed and its body still matches the
@@ -33,6 +38,8 @@ from pathlib import Path
 
 import generate
 from lib import (
+    CODEX_AGENTS_DIR,
+    CODEX_SKILLS_DIR,
     GENERATED_MARK,
     LEGACY_BODY_SHA256,
     PACK_NAMES,
@@ -46,7 +53,13 @@ from lib import (
 )
 from overlay import load_overlay
 
-ADAPTERS = ("claude", "copilot", "both")
+ADAPTERS = ("claude", "copilot", "both", "codex")
+HOSTS = {
+    "claude": ("claude",),
+    "copilot": ("copilot",),
+    "both": ("claude", "copilot"),  # unchanged meaning; Codex is asked for by name
+    "codex": ("codex",),
+}
 LAYOUTS = ("project", "user")
 MAX_MANAGED_BYTES = 1024 * 1024
 _RELEASE_RE = re.compile(r"[0-9A-Za-z.+_-]{1,40}")
@@ -100,13 +113,23 @@ def _check_options(adapter, layout):
         raise ValueError("unknown adapter")
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout: {layout}")
-    if layout == "user" and adapter != "claude":
-        raise ValueError("copilot has no user layout; use --adapter claude with --layout user")
+    if layout == "user" and "copilot" in HOSTS[adapter]:
+        raise ValueError("copilot has no user layout; use --adapter claude or codex with --layout user")
 
 
 def _check_target(target, root):
     target = Path(target).absolute()
     ensure_safe(target)
+    # A typo or a ".." must not turn a home or project install into one rooted at "/" (privileged runs especially).
+    if Path(os.path.realpath(target)).parent == Path(os.path.realpath(target)):
+        raise ValueError("target cannot be the filesystem root")
+    try:  # a bind mount of / keeps its own spelling, so also compare filesystem identity
+        here, top = os.stat(target), os.stat("/")
+    except OSError:
+        pass  # a missing target is reported just below
+    else:
+        if (here.st_dev, here.st_ino) == (top.st_dev, top.st_ino):
+            raise ValueError("target cannot be the filesystem root")
     if not target.is_dir():
         raise ValueError("target must be an existing project directory")
     if Path(os.path.realpath(target)).is_relative_to(Path(os.path.realpath(root))):
@@ -130,8 +153,11 @@ def _public_source(root, rel):
 
 
 def _items(adapter, packs, layout, root, ov):
-    """Ordered [(source label, relative destination, bytes, origin)] for this checkout plus the overlay."""
+    """Ordered [(source label, relative destination, bytes, origin)] for this checkout plus the overlay.
+
+    adapter is an ADAPTERS name or a tuple of host names."""
     root = Path(root)
+    hosts = HOSTS[adapter] if isinstance(adapter, str) else tuple(adapter)
     ov_roles = {r["name"]: r for r in ov.roles} if ov else {}
     ov_packs = {p["dir"]: p for p in ov.packs} if ov else {}
     known = list(PACK_NAMES) + sorted(set(ov_packs) - set(PACK_NAMES))
@@ -151,7 +177,7 @@ def _items(adapter, packs, layout, root, ov):
         names = {p.name.removesuffix(suffix) for p in (root / pattern).glob("*" + suffix)}
         return sorted(names | set(ov_roles))
 
-    if adapter in ("claude", "both"):
+    if "claude" in hosts:
         for name in role_names(".claude/agents", ".md"):
             rel = f".claude/agents/{name}.md"
             if name in ov_roles:
@@ -186,7 +212,7 @@ def _items(adapter, packs, layout, root, ov):
             else:
                 src = _public_source(root, rel)
                 out.append((src, _layout_rel(rel, layout), src.read_bytes(), "public"))
-    if adapter in ("copilot", "both"):
+    if "copilot" in hosts:
         for name in role_names(".github/agents", ".agent.md"):
             rel = f".github/agents/{name}.agent.md"
             if name in ov_roles:
@@ -202,6 +228,39 @@ def _items(adapter, packs, layout, root, ov):
                     additions=role_adds[name],
                 )
                 out.append((f"overlay-additions:{name}.md", rel, text.encode("utf-8"), "overlay"))
+            else:
+                src = _public_source(root, rel)
+                out.append((src, rel, src.read_bytes(), "public"))
+    if "codex" in hosts:  # same relative paths in both layouts: they are the paths Codex reads from a home or a repo
+        for name in role_names(CODEX_AGENTS_DIR, ".toml"):
+            rel = f"{CODEX_AGENTS_DIR}/{name}.toml"
+            if name in ov_roles:
+                r = ov_roles[name]
+                text = generate.render_codex_agent(r, policies, ver, source=f"overlay role {r['file']}")
+                out.append((f"overlay:{r['file']}", rel, text.encode("utf-8"), "overlay"))
+            elif name in role_adds:
+                text = generate.render_codex_agent(
+                    pub_roles[name],
+                    policies,
+                    ver,
+                    source=f"overlay additions role {name}.md",
+                    additions=role_adds[name],
+                )
+                out.append((f"overlay-additions:{name}.md", rel, text.encode("utf-8"), "overlay"))
+            else:
+                src = _public_source(root, rel)
+                out.append((src, rel, src.read_bytes(), "public"))
+        for name in packs:
+            rel = f"{CODEX_SKILLS_DIR}/pack-{name}/SKILL.md"
+            if name in ov_packs:
+                p = ov_packs[name]
+                text = generate.render_skill(p, ver, source=f"overlay pack {p['dir']}")
+                out.append((f"overlay:pack-{name}", rel, text.encode("utf-8"), "overlay"))
+            elif name in pack_adds:
+                text = generate.render_skill(
+                    pub_packs[name], ver, source=f"overlay additions pack {name}", additions=pack_adds[name]
+                )
+                out.append((f"overlay-additions:pack-{name}", rel, text.encode("utf-8"), "overlay"))
             else:
                 src = _public_source(root, rel)
                 out.append((src, rel, src.read_bytes(), "public"))
@@ -404,10 +463,13 @@ def install(target, adapter, apply=False, packs=None, root=ROOT, update=False, l
     return [str(dest.relative_to(Path(target).absolute())) for _, dest, _, _, _, _ in items]
 
 
+_CODEX_PATTERNS = (f"{CODEX_AGENTS_DIR}/*.toml", f"{CODEX_SKILLS_DIR}/*/SKILL.md")
+
+
 def _scan_patterns(layout):
     if layout == "user":
-        return ("agents/*.md", "skills/*/SKILL.md")
-    return (".claude/agents/*.md", ".claude/skills/*/SKILL.md", ".github/agents/*.agent.md")
+        return ("agents/*.md", "skills/*/SKILL.md") + _CODEX_PATTERNS
+    return (".claude/agents/*.md", ".claude/skills/*/SKILL.md", ".github/agents/*.agent.md") + _CODEX_PATTERNS
 
 
 def _read_capped(path):
@@ -427,8 +489,8 @@ def list_managed(target, layout="project", overlay=None, root=ROOT):
         raise ValueError(f"unknown layout: {layout}")
     ov = load_overlay(overlay, root) if overlay is not None else None
     target = _check_target(target, root)
-    adapter = "claude" if layout == "user" else "both"
-    expected = {rel: data for _s, rel, data, _o in _items(adapter, None, layout, root, ov)}
+    hosts = ("claude", "codex") if layout == "user" else ("claude", "copilot", "codex")
+    expected = {rel: data for _s, rel, data, _o in _items(hosts, None, layout, root, ov)}
     ver = version(root)
     rows = []
     for pattern in _scan_patterns(layout):
@@ -456,7 +518,31 @@ def list_managed(target, layout="project", overlay=None, root=ROOT):
 
 
 def _safe(text):
-    return "".join(c if " " <= c <= "~" else "?" for c in text)
+    """The one terminal-safe form for anything printed: printable ASCII as is, everything else (controls, ESC, CSI,
+    CR, LF, bidi and zero-width characters, line separators) and the backslash as a visible escape."""
+    out = []
+    for c in str(text):
+        o = ord(c)
+        if c == "\\":
+            out.append("\\\\")
+        elif " " <= c <= "~":
+            out.append(c)
+        elif o <= 0xFF:
+            out.append(f"\\x{o:02x}")
+        elif o <= 0xFFFF:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(f"\\U{o:08x}")
+    return "".join(out)
+
+
+class _SafeParser(argparse.ArgumentParser):
+    """argparse echoes user-supplied text (an unknown option, a bad value) raw; send the whole message through _safe()
+    so it is one escaped line. The usage text and the exit code 2 are argparse's own."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {_safe(message)}\n")
 
 
 LABELS = {
@@ -466,7 +552,7 @@ LABELS = {
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _SafeParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=Path, required=True)
     ap.add_argument("--adapter", choices=ADAPTERS, default="claude")
     ap.add_argument("--layout", choices=LAYOUTS, default="project")
@@ -497,13 +583,16 @@ def main(argv=None):
             force_edited=a.force_edited,
         )
         target = Path(a.target).absolute()
-        for _, dest, action, _, _, _ in items:
-            print(f"{LABELS.get(action, action)}: {dest.relative_to(target)}")
+        for _, dest, action, data, _, from_overlay in items:
+            # Provenance and digest of what would be written: the preview is the review control for personas and
+            # packs, which become model instructions.
+            origin = "overlay" if from_overlay else "public"
+            print(f"{LABELS.get(action, action)}: {_safe(dest.relative_to(target))}  [{origin}, sha256 {_sha(data)}]")
         _refuse_edited(items)
         if a.apply:
             _apply(items)
     except (OSError, ValueError) as exc:
-        print(f"Installation refused: {exc}", file=sys.stderr)
+        print(f"Installation refused: {_safe(exc)}", file=sys.stderr)
         return 1
     print(("Installed" if a.apply else "Preview only; rerun with --apply after review") + f": {len(items)} files")
     return 0
