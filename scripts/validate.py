@@ -5,7 +5,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+from benchmark import corpus_errors, load_corpus
 from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
+from export_models import EXPORT_PATH, ModelPinsError, read_pins
 from generate import ADDITIONS_HEADING, drift
 from lib import (
     CAPABILITY_ORDER,
@@ -266,6 +268,17 @@ def evals_errors(root):
     return errors
 
 
+def export_errors(root):
+    """The committed pin export reads strictly and agrees with TIER_MODEL. Byte drift is reported by generate.drift."""
+    try:
+        data = read_pins(Path(root) / EXPORT_PATH)
+    except ModelPinsError as exc:
+        return [f"{EXPORT_PATH}: {exc}"]
+    if {t: v["model"] for t, v in data["tiers"].items()} != TIER_MODEL:
+        return [f"{EXPORT_PATH}: tiers disagree with TIER_MODEL in scripts/lib.py"]
+    return []
+
+
 def validate(root=ROOT):
     root = Path(root)
     errors = []
@@ -355,8 +368,20 @@ def validate(root=ROOT):
 
         errors.extend(workflow_errors(root))
         errors.extend(evals_errors(root))
+        errors.extend(export_errors(root))
 
         # docs/ is mirrored to the wiki; the privacy sweep and link check below already walk it.
+        bench = root / "evals/benchmark"
+        if (bench / "corpus.json").is_file():
+            try:
+                errors.extend(
+                    f"benchmark corpus: {e}"
+                    for e in corpus_errors(load_corpus(bench / "corpus.json"), True, bench / "probes", bench)
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"benchmark corpus: unreadable ({exc})")
+        else:
+            errors.append("evals/benchmark/corpus.json is missing")
         require((root / "docs/home.md").is_file(), "docs/home.md is missing: it becomes the wiki Home page")
 
         # Local Markdown links must resolve (URLs and anchors excluded).

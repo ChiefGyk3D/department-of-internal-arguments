@@ -1,5 +1,5 @@
 """A private overlay entry that shares a public name is append-only: the public file is kept unchanged and the
-overlay body is added after it in a labelled section."""
+overlay body is added after it in a labeled section."""
 
 import sys
 import tempfile

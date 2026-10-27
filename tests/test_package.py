@@ -693,16 +693,31 @@ class AmericanSpelling(unittest.TestCase):
     BRITISH = re.compile(
         r"\b(summaris\w*|sanitis\w*|quantis\w*|organis\w*|recognis\w*|normalis\w*|licence\w*|neighbour\w*|"
         r"behaviour\w*|colour\w*|defence\w*|favour\w*|centre\w*|catalogue\w*|artefact\w*|judgement\w*|"
-        r"whilst|amongst|honour\w*)\b",
+        r"whilst|amongst|honour\w*|\w*labell\w*|cancell\w*|travell\w*|modell\w*|analys(?:e|ed|es|ing)|"
+        r"programme\w*|fulfil)\b",
         re.IGNORECASE,
     )
     DIRS = ("docs", "packs", "policies", "fragments", "templates", "roles", "evals")
 
     def files(self):
-        found = [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+        found = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "SECURITY.md"]
         for d in self.DIRS:
             found.extend(sorted((ROOT / d).rglob("*.md")))
         return found
+
+    def test_the_guard_catches_the_double_l_forms(self):
+        # the double-l forms slipped past the first list; the words are built so this file does not trip it
+        for word in (
+            "label" + "led",
+            "label" + "ling",
+            "relabel" + "led",
+            "cancel" + "led",
+            "analy" + "se",
+            "model" + "ling",
+        ):
+            self.assertIsNotNone(self.BRITISH.search(f"a {word} finding"), word)
+        for word in ("labeled", "labeling", "analysis", "modeling", "canceled"):
+            self.assertIsNone(self.BRITISH.search(f"a {word} finding"), word)
 
     def test_no_british_spellings_in_prose(self):
         files = self.files()

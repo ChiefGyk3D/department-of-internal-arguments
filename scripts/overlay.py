@@ -7,7 +7,7 @@ An overlay is a directory OUTSIDE this repository with the repository's own sour
 
 A NEW name is installed as a whole persona or pack, held to the public rules. A name that equals a PUBLIC role or pack
 is append-only: the file may carry only `name:` in its frontmatter, its body is ADDITIONS, and the installed file is
-the unchanged public file followed by a labelled "Maintainer additions" section (generate.additions_section). Tools,
+the unchanged public file followed by a labeled "Maintainer additions" section (generate.additions_section). Tools,
 tier, model and description therefore cannot change, and no public rule is ever edited out.
 
 It is read through the same parsers as the public sources (lib.parse_frontmatter, lib.resolve_fragments) and
