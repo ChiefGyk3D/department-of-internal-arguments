@@ -508,13 +508,14 @@ class Budget:
 
 def hash_file(path, budget):
     """Content hash of a regular file of any size (streamed), a link target hash for a symlink, a type tag for
-    anything else. Every byte counts against the budget."""
+    anything else. Every byte counts against the budget. A path that cannot be examined or read is inconclusive:
+    a constant stand-in hash would let an unreadable file change unseen."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return "absent"
     except OSError as e:
-        return f"error:{type(e).__name__}"
+        raise Inconclusive(f"source snapshot: a path is unreadable ({type(e).__name__}): {path}") from e
     if stat.S_ISLNK(st.st_mode):
         return "link:" + sha256(os.readlink(path).encode("utf-8", "surrogateescape"))
     if not stat.S_ISREG(st.st_mode):
@@ -526,8 +527,21 @@ def hash_file(path, budget):
                 budget.take(len(block))
                 h.update(block)
     except OSError as e:
-        return f"error:{type(e).__name__}"
+        raise Inconclusive(f"source snapshot: a file is unreadable ({type(e).__name__}): {path}") from e
     return h.hexdigest()
+
+
+def entry_meta(st):
+    """Everything about an entry that a hash of its content leaves out: type and permission bits, owner, size, link
+    count, device and inode (so a replaced FIFO, socket or device node differs), the device number of a special
+    file, and the times. Directories carry no times: git creating and removing a lock file changes them, and the
+    entries inside are hashed on their own. mtime is kept for files because a quiet source repository does not see
+    git rewrite them between the two snapshots (the snapshot itself runs `git status` first); ctime is kept
+    because chmod, link and rename all move it, so a change made and undone in an unreadable file shows."""
+    fields = [stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, st.st_dev, st.st_ino]
+    if not stat.S_ISDIR(st.st_mode):
+        fields += [st.st_nlink, st.st_size, st.st_rdev, st.st_mtime_ns, st.st_ctime_ns]
+    return ",".join(str(x) for x in fields)
 
 
 def status_paths(raw):
@@ -566,7 +580,7 @@ def filter_overrides(git, root):
 
 def gitdir_digest(git, root, budget):
     """One hash over everything inside the source repository's git directories (the private one of a linked
-    worktree and the common one): every entry's name and type, the content of every file (hooks, reflogs, refs,
+    worktree and the common one): every entry's name and metadata (see entry_meta), the content of every file (hooks, reflogs, refs,
     object files and packs included) and the target of every link. Content counts against the budget, so a repository
     too large to hash is inconclusive, never skipped."""
     dirs = []
@@ -579,6 +593,10 @@ def gitdir_digest(git, root, budget):
             dirs.append(d)
     h = hashlib.sha256()
     for top in dirs:
+        try:
+            h.update(b"t\0" + os.fsencode(top) + b"\0" + entry_meta(os.lstat(top)).encode() + b"\0")
+        except OSError as exc:
+            raise Inconclusive(f"source snapshot: the git directory is unreadable ({type(exc).__name__})") from exc
         stack = [top]
         while stack:
             d = stack.pop()
@@ -589,11 +607,18 @@ def gitdir_digest(git, root, budget):
                 raise Inconclusive(f"the source git directory is not readable ({type(e).__name__})") from e
             for e in entries:
                 rel = os.path.relpath(e.path, top)
+                try:
+                    meta = entry_meta(os.lstat(e.path)).encode()
+                except OSError as exc:
+                    raise Inconclusive(
+                        f"source snapshot: a path is unreadable ({type(exc).__name__}): {e.path}"
+                    ) from exc
                 if e.is_dir(follow_symlinks=False):
-                    h.update(b"d\0" + os.fsencode(rel) + b"\0")
+                    h.update(b"d\0" + os.fsencode(rel) + b"\0" + meta + b"\0")
                     stack.append(e.path)
                 else:
-                    h.update(b"f\0" + os.fsencode(rel) + b"\0" + hash_file(e.path, budget).encode() + b"\0")
+                    digest = hash_file(e.path, budget).encode()
+                    h.update(b"f\0" + os.fsencode(rel) + b"\0" + meta + b"\0" + digest + b"\0")
     return h.hexdigest()
 
 
@@ -926,19 +951,46 @@ def clean_evidence(trusted):
 
 
 def open_up(path):
-    """Give the owner full access to every directory under `path` (a link is never followed), so a test that took
-    its own permissions away cannot keep the tool from deleting the disposable directory."""
-    stack = [path]
-    while stack:
-        d = stack.pop()
-        try:
-            if stat.S_ISLNK(os.lstat(d).st_mode):
-                continue
-            os.chmod(d, OWNER_ONLY)
-            entries = list(os.scandir(d))
+    """Give the owner full access to every directory under `path`, so a test that took its own permissions away
+    cannot keep the tool from deleting the disposable directory. Nothing is resolved by path after the first open:
+    each directory is pinned with an O_PATH descriptor opened with O_NOFOLLOW | O_DIRECTORY (a link, or a directory
+    swapped for one, is refused), its mode is set through that descriptor, and its entries are listed and opened
+    relative to it. A directory swapped after it was pinned cannot redirect anything."""
+    try:
+        pinned = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
+    except OSError:
+        return
+    _open_up_fd(pinned)
+
+
+def _open_up_fd(pinned):
+    """Open up the directory pinned as `pinned` (an O_PATH descriptor, closed here) and everything under it."""
+    fd = None
+    try:
+        if not stat.S_ISDIR(os.fstat(pinned).st_mode):
+            return
+        try:  # fchmod needs a real descriptor; chmod through /proc/self/fd follows the pinned inode, not a name
+            os.chmod(f"/proc/self/fd/{pinned}", OWNER_ONLY)
         except OSError:
-            continue
-        stack.extend(e.path for e in entries if e.is_dir(follow_symlinks=False))
+            pass
+        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=pinned)
+        names = [e.name for e in os.scandir(fd) if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return
+    finally:
+        os.close(pinned)
+    try:
+        for name in names:
+            try:
+                child = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=fd)
+            except OSError:
+                continue
+            try:
+                _open_up_fd(child)
+            except RecursionError:
+                return
+    finally:
+        os.close(fd)
 
 
 def remove_tree(path, scratch):
