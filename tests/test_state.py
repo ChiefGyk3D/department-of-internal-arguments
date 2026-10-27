@@ -1420,14 +1420,20 @@ class InstallRoots(StateCase):
 
     def test_an_nfc_nfd_spelling_of_a_root_that_does_not_exist_yet_is_refused(self):
         nfc, nfd = self._nonexistent_root_cases()
-        for root_name, state_name in ((nfc, nfd), (nfd, nfc), (nfc, nfc.upper()), (nfc, nfd.upper()), (nfd, nfc.upper())):
+        for root_name, state_name in (
+            (nfc, nfd),
+            (nfd, nfc),
+            (nfc, nfc.upper()),
+            (nfc, nfd.upper()),
+            (nfd, nfc.upper()),
+        ):
             with self.subTest(root=root_name, state=state_name):
                 roots = [self.tmp / root_name]
                 inside = self.tmp / state_name / "state"
                 with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
                     for call in (
-                        lambda: state.load(self.home, "user", roots=roots),
-                        lambda: state.Store(self.home, "user", roots=roots),
+                        lambda roots=roots: state.load(self.home, "user", roots=roots),
+                        lambda roots=roots: state.Store(self.home, "user", roots=roots),
                     ):
                         with self.assertRaisesRegex(state.StateError, "inside an install root"):
                             call()

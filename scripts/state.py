@@ -229,8 +229,9 @@ def _below(path, parent):
 
     Two tests. Textual: the path text says so. Identity: a case-insensitive, case-preserving filesystem lets a
     differently cased spelling name the same directory, so the ancestors of `path` are compared with the deepest
-    existing ancestor of `parent` by (st_dev, st_ino); names that do not exist yet are compared with _fold, NFC plus case folding (refusing
-    on a case-sensitive filesystem a name that differs only by case or normalization is the safe error)."""
+    existing ancestor of `parent` by (st_dev, st_ino); names that do not exist yet are compared with _fold (NFC
+    plus case folding). Refusing a name that differs only by case or normalization is the safe error on a filesystem
+    that keeps them apart."""
     if path == parent:
         return ()
     if parent in path.parents:
