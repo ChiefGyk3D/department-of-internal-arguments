@@ -117,6 +117,10 @@ class Evidence(unittest.TestCase):
             "by PID",
             "not authenticated with one of your authorized hardware keys",
             "findings section",
+            "physical hardware key itself",
+            "USER-REPORTED",
+            "Change one variable",
+            "ONE real review",
         ):
             with self.subTest(phrase):
                 self.assertIn(phrase, self.text)
