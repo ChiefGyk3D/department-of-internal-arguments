@@ -580,8 +580,8 @@ def filter_overrides(git, root):
 
 def gitdir_digest(git, root, budget):
     """One hash over everything inside the source repository's git directories (the private one of a linked
-    worktree and the common one): every entry's name and metadata (see entry_meta), the content of every file (hooks, reflogs, refs,
-    object files and packs included) and the target of every link. Content counts against the budget, so a repository
+    worktree and the common one): every entry's name and metadata (see entry_meta), the content of every file (hooks,
+    reflogs, refs, object files and packs included) and the target of every link. Content counts against the budget, so a repository
     too large to hash is inconclusive, never skipped."""
     dirs = []
     for flag in ("--absolute-git-dir", "--git-common-dir"):
