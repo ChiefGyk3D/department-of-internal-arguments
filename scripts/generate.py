@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 import evals_matrix
+import export_models
 from lib import (
     CAPABILITY_ORDER,
     CLAUDE_TOOLS,
@@ -243,6 +244,7 @@ def drift(root=ROOT):
     for rel in sorted(have - set(want)):
         problems.append(f"stray file in a generated directory: {rel}")
     problems.extend(evals_matrix.doc_drift(root))  # evals/behavioral-evals.md is generated from evals/cases.json
+    problems.extend(export_models.drift(root))  # export/model-pins.json is generated from lib, roles and fragments
     return problems
 
 
@@ -256,6 +258,7 @@ def write(root=ROOT):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
     evals_matrix.write_doc(root)
+    export_models.write(root)
     for d in GENERATED_DIRS:  # drop directories a removed pack left empty
         base = root / d
         if base.is_dir():

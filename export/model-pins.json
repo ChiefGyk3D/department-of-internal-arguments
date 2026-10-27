@@ -1,0 +1,42 @@
+{
+  "release": "0.4.0",
+  "report_header": [
+    "ROLE",
+    "MODEL",
+    "HEAD",
+    "BASE",
+    "GATE",
+    "OTHER GATES",
+    "PACKS LOADED",
+    "TREE",
+    "NOT VERIFIED",
+    "LOCAL-LLM",
+    "VERIFIED-AGAINST",
+    "DISCREPANCIES"
+  ],
+  "roles": {
+    "adversarial-reviewer": "standard",
+    "implementer": "standard",
+    "reviewer": "standard",
+    "transcriber": "cheap"
+  },
+  "schema": 1,
+  "tiers": {
+    "cheap": {
+      "family": "haiku",
+      "model": "claude-haiku-5-5",
+      "roles": [
+        "transcriber"
+      ]
+    },
+    "standard": {
+      "family": "sonnet",
+      "model": "claude-sonnet-5-5",
+      "roles": [
+        "adversarial-reviewer",
+        "implementer",
+        "reviewer"
+      ]
+    }
+  }
+}
