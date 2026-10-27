@@ -6,6 +6,7 @@ The state directory lives in its own temporary directory, which is never inside 
 
 import os
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -16,6 +17,22 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import state  # noqa: E402  (path set up above)
 
 _active = []
+
+
+def _with_write_bit(path, bit):
+    """Keep the owner and read/execute bits, drop any other group/world write bit, then add exactly `bit`."""
+    current = stat.S_IMODE(os.stat(path).st_mode)
+    os.chmod(path, (current & ~(stat.S_IWGRP | stat.S_IWOTH)) | bit)
+
+
+def make_group_writable(path):
+    """Make `path` group-writable and not world-writable, derived from its current mode."""
+    _with_write_bit(path, stat.S_IWGRP)
+
+
+def make_world_writable(path):
+    """Make `path` world-writable and not group-writable, derived from its current mode."""
+    _with_write_bit(path, stat.S_IWOTH)
 
 
 def set_up_module():

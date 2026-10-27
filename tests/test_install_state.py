@@ -656,9 +656,9 @@ class StateLocation(unittest.TestCase):
         )
 
     def test_the_default_location_in_a_group_or_world_writable_home_is_refused(self):
-        for mode in (0o775, 0o757):
-            with self.subTest(mode=oct(mode)):
-                os.chmod(self.home, mode)
+        for name, make in (("group", state_fixture.make_group_writable), ("world", state_fixture.make_world_writable)):
+            with self.subTest(writable=name):
+                make(self.home)
                 code, out, err = run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--apply")
                 self.assertEqual(code, 1, (out, err))
                 self.assertIn("group- or world-writable", err)
@@ -669,7 +669,7 @@ class StateLocation(unittest.TestCase):
     def test_an_explicit_agents_state_inside_a_writable_home_is_refused_and_inside_a_private_one_accepted(self):
         inside = self.home / "agents" / "state"
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
-            os.chmod(self.home, 0o775)
+            state_fixture.make_group_writable(self.home)
             code, _, err = run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--apply")
             self.assertEqual(code, 1)
             self.assertIn("group- or world-writable", err)
