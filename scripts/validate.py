@@ -314,7 +314,7 @@ def validate(root=ROOT):
             require(phrase in lead, f"templates/lead.md lacks the {rule} rule ({phrase!r})")
 
         packs = load_packs(root)
-        require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the six packs")
+        require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the seven packs")
         for p in packs:
             errors.extend(pack_errors(p))
 

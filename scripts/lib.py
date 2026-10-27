@@ -19,6 +19,7 @@ PACK_NAMES = (
     "rf-emcomm",
     "linux-platform",
     "local-llm-routing",
+    "cyber-tier-review",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 
