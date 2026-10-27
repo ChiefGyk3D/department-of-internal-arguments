@@ -4,9 +4,9 @@ remove_tree verifies the root is gone; main turns a leftover into an inconclusiv
 red without its guard."""
 
 import errno
-import shutil
 import json
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
