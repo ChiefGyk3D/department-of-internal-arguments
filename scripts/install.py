@@ -437,7 +437,9 @@ def _read_state(target, layout, roots):
         return statestore.load_or_empty(target, layout, roots=roots)
     except statestore.StateError as exc:
         hint = ""
-        if "state directory is" in str(exc) or "state directory contains" in str(exc):
+        if "DOIA_STATE_DIR" not in str(exc) and (
+            "state directory is" in str(exc) or "state directory contains" in str(exc)
+        ):
             hint = "; set DOIA_STATE_DIR to a directory outside the install roots"
         raise ValueError(f"ownership state refused: {exc}{hint}") from None
 

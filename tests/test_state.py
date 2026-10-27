@@ -1211,7 +1211,7 @@ class InstallRoots(StateCase):
     def setUp(self):
         super().setUp()
         self.home = self.tmp / "home"
-        self.home.mkdir()
+        self.home.mkdir(mode=0o700)
         self.root_a = self.home / ".claude"
         self.root_b = self.home / ".codex"
         self.root_a.mkdir()
@@ -1231,6 +1231,102 @@ class InstallRoots(StateCase):
             self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
             self.assertEqual(state.load_or_empty(self.home, "user", roots=self.roots), {"a.md": entry()})
             self.assertIs(state.lock_held(self.home, "user", roots=self.roots), False)
+
+    # --- a state directory inside the nominal target needs a private path to it (Codex review of PR #60) ---------
+
+    def _default_env(self):
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("DOIA_STATE_DIR", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+
+    def _plant(self, directory):
+        """A state file another account could have planted: mode 0600, owned by us (the test user), valid JSON."""
+        directory.mkdir(parents=True, exist_ok=True)
+        for d in (directory, *directory.parents):  # a permissive umask must not make the fixture parents writable
+            if d == self.home.parent:
+                break
+            os.chmod(d, 0o700)
+        real, layout, stem = state.state_key(self.home, "user")
+        (directory / (stem + ".json")).write_text(
+            json.dumps({"schema": 1, "target": real, "layout": layout, "entries": {"a.md": entry()}})
+        )
+        os.chmod(directory / (stem + ".json"), 0o600)
+
+    def test_a_planted_state_in_a_group_or_world_writable_target_is_refused(self):
+        self._default_env()
+        want = self.home / ".local" / "state" / state.APP_DIR
+        self._plant(want)
+        for mode in (GROUP_WRITABLE_DIR, WORLD_WRITABLE_DIR):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.home, mode)
+                for call in (
+                    lambda: state.load(self.home, "user", roots=self.roots),
+                    lambda: state.load_or_empty(self.home, "user", roots=self.roots),
+                    lambda: state.lock_held(self.home, "user", roots=self.roots),
+                    lambda: state.Store(self.home, "user", roots=self.roots),
+                ):
+                    with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                        call()
+        os.chmod(self.home, 0o700)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_a_writable_directory_below_the_target_on_the_way_to_the_state_directory_is_refused(self):
+        self._default_env()
+        want = self.home / ".local" / "state" / state.APP_DIR
+        self._plant(want)
+        for mid in (self.home / ".local", self.home / ".local" / "state", want):
+            with self.subTest(mid=mid.name):
+                os.chmod(mid, GROUP_WRITABLE_DIR)
+                with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                    state.load(self.home, "user", roots=self.roots)
+                os.chmod(mid, 0o700)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_a_target_or_parent_owned_by_another_account_is_refused(self):
+        self._default_env()
+        self._plant(self.home / ".local" / "state" / state.APP_DIR)
+        real_stat = state._chain_stat
+        for owned_by_other in (self.home.name, ".local", "state"):
+            with self.subTest(other=owned_by_other):
+
+                def fake(fd, other=owned_by_other):
+                    st = real_stat(fd)
+                    here = os.readlink(f"/proc/self/fd/{fd}")
+                    if os.path.basename(here) == other:
+                        return mock.Mock(st_mode=st.st_mode, st_uid=st.st_uid + 1)
+                    return st
+
+                with mock.patch.object(state, "_chain_stat", fake):
+                    with self.assertRaisesRegex(state.StateError, "not owned by the current user"):
+                        state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_an_explicit_state_directory_inside_a_private_target_is_accepted_and_in_a_writable_one_refused(self):
+        inside = self.home / "agents" / "state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+            os.chmod(self.home / "agents", GROUP_WRITABLE_DIR)
+            with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_link_on_the_way_to_the_state_directory_inside_the_target_is_refused(self):
+        outside = self.tmp / "elsewhere"
+        outside.mkdir(mode=0o700)
+        os.symlink(outside, self.home / "link")
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / "link" / "state")}):
+            with self.assertRaises(state.StateError):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_state_directory_outside_the_target_does_not_need_a_private_target(self):
+        os.chmod(self.home, GROUP_WRITABLE_DIR)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "state-elsewhere")}):
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
 
     def test_the_single_target_form_still_refuses_the_same_directory(self):
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".local" / "state" / "x")}):
@@ -2823,6 +2919,18 @@ MUTANTS = [
         "        _check_location(target, directory)\n        self._dfd",
         "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
     ),
+    (
+        "private chain checks writability",
+        "            elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):",
+        "            elif False:",
+        "InstallRoots.test_a_planted_state_in_a_group_or_world_writable_target_is_refused",
+    ),
+    (
+        "private chain checks the owner",
+        "            elif st.st_uid != _euid():",
+        "            elif False:",
+        "InstallRoots.test_a_target_or_parent_owned_by_another_account_is_refused",
+    ),
 ]
 
 
@@ -2831,7 +2939,7 @@ MUTANTS = [
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
-EXPECTED_ROWS = 105
+EXPECTED_ROWS = 107
 
 
 class LooseModeConstants(unittest.TestCase):

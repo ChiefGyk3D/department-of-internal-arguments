@@ -219,24 +219,94 @@ def _real_path(target):
         raise StateError("the target path cannot be resolved") from None
 
 
+class _Spec:
+    """The location rule for a run with install roots: the roots, and the nominal target they were computed from."""
+
+    __slots__ = ("roots", "nominal")
+
+    def __init__(self, roots, nominal):
+        self.roots, self.nominal = roots, nominal
+
+
 def _location_spec(target, roots):
-    """What _check_location checks: the target, or the install roots (which must then be an exact list or tuple)."""
+    """What _check_location checks: the target, or the install roots (which must then be an exact list or tuple)
+    together with the nominal target (needed by the private-path rule for a state directory inside it)."""
     if roots is None:
         return target
     if not _is_one_of(roots, (list, tuple)):
         raise StateError("roots must be a list or tuple of paths")
-    return roots
+    return _Spec(roots, target)
+
+
+def _chain_stat(fd):
+    """The stat the private-path walk judges (a seam: tests inject another owner without touching real files)."""
+    return os.fstat(fd)
+
+
+def _check_private_chain(nominal, cand):
+    """A state directory inside the nominal target is trusted only when nobody else can write on the way to it.
+
+    Whoever can write a directory on the path from the target down to the state directory could plant a valid-looking
+    state file there and make their own marked files read as owned. So the target, every directory below it down to
+    the state directory (those that exist; the rest are created 0700 by this user) must be a real directory (no link
+    followed), owned by the current user and not group or world writable. Sticky does not excuse a writable one."""
+    rel = cand.relative_to(nominal).parts
+    path = Path(nominal)
+    try:
+        fd = os.open(str(nominal), _DIR_FLAGS)
+    except OSError:
+        raise StateError(
+            "the state directory is inside the target and the target cannot be opened as a plain directory; "
+            "set DOIA_STATE_DIR to a directory outside the target"
+        ) from None
+    try:
+        for i in range(len(rel) + 1):
+            st = _chain_stat(fd)
+            label = _tail(path)
+            why = None
+            if not stat.S_ISDIR(st.st_mode):
+                why = "not a directory"
+            elif st.st_uid != _euid():
+                why = "not owned by the current user"
+            elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                why = "group- or world-writable"
+            if why:
+                raise StateError(
+                    f"the state directory is inside the target, and {label} on the way to it is {why}, so another "
+                    f"account may have planted a state file; set DOIA_STATE_DIR to a directory outside the target"
+                )
+            if i == len(rel):
+                break
+            try:
+                nxt = os.open(rel[i], _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                return  # the rest is created by this user, 0700
+            except OSError:
+                raise StateError(
+                    f"the state directory is inside the target, and {_tail(path / rel[i])} on the way to it is not "
+                    f"a plain directory (a link?); set DOIA_STATE_DIR to a directory outside the target"
+                ) from None
+            os.close(fd)
+            fd = nxt
+            path = path / rel[i]
+    finally:
+        os.close(fd)
 
 
 def _check_location(target, directory=None):
     """The state directory must not be, be inside, or contain the target or this repository (resolved and literal).
 
-    `target` is one path (the target; the project layout) or an exact list or tuple of paths: the INSTALL ROOTS, the
-    directories the installer actually writes managed files into (issue #40). With a list, the rule applies to each
-    root instead of the nominal target, so a `--layout user` target that is the home directory can keep its state in
-    ~/.local/state: that directory is not part of any install root. An empty list checks only the repository."""
+    `target` is one path (the target; the project layout) or a _Spec / exact list or tuple of paths: the INSTALL ROOTS,
+    the directories the installer actually writes managed files into (issue #40). With roots, the "not inside, not
+    containing" rule applies to each root instead of the nominal target, so a `--layout user` target that is the home
+    directory can keep its state in ~/.local/state. But a state directory inside the NOMINAL target is accepted only
+    when every directory from the target down to it is private to this user (_check_private_chain): otherwise a writer
+    of the target could plant the state file that vouches for its own files. An empty list checks only the repo."""
     directory = state_dir() if directory is None else directory
     real = Path(os.path.realpath(directory))
+    nominal = None
+    if type(target) is _Spec:
+        target, nominal = target.roots, target.nominal
     if _is_one_of(target, (list, tuple)):
         if len(target) > MAX_ROOTS:
             raise StateError("too many install roots")
@@ -250,6 +320,12 @@ def _check_location(target, directory=None):
                 raise StateError(f"the state directory is inside {label}; refused")
             if _inside(base, cand):
                 raise StateError(f"the state directory contains {label}; refused")
+    if nominal is not None:
+        real_nominal = Path(_real_path(nominal))
+        effective = Path(os.path.realpath(directory.parent)) / directory.name
+        for cand in (real, effective, directory):
+            if _inside(cand, real_nominal):
+                _check_private_chain(real_nominal, cand)
 
 
 def state_key(target, layout):

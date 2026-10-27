@@ -636,7 +636,7 @@ class StateLocation(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="doia-install-loc-")).resolve()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.home = self.tmp / "home"
-        self.home.mkdir()
+        self.home.mkdir(mode=0o700)  # the default state location inside the target needs a private home
         env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         env.start()
         self.addCleanup(env.stop)
@@ -654,6 +654,30 @@ class StateLocation(unittest.TestCase):
         self.assertEqual(
             run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--update", "--apply")[0], 0
         )
+
+    def test_the_default_location_in_a_group_or_world_writable_home_is_refused(self):
+        for mode in (0o775, 0o757):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.home, mode)
+                code, out, err = run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--apply")
+                self.assertEqual(code, 1, (out, err))
+                self.assertIn("group- or world-writable", err)
+                self.assertIn("DOIA_STATE_DIR", err)
+                self.assertFalse(self.default.exists())
+                self.assertFalse((self.home / ".codex").exists())
+
+    def test_an_explicit_agents_state_inside_a_writable_home_is_refused_and_inside_a_private_one_accepted(self):
+        inside = self.home / "agents" / "state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+            os.chmod(self.home, 0o775)
+            code, _, err = run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--apply")
+            self.assertEqual(code, 1)
+            self.assertIn("group- or world-writable", err)
+            self.assertFalse((self.home / ".codex").exists())
+            os.chmod(self.home, 0o700)
+            code, out, err = run_main("--target", self.home, "--layout", "user", "--adapter", "codex", "--apply")
+            self.assertEqual(code, 0, (out, err))
+            self.assertEqual(len(list(inside.glob("*.json"))), 1)
 
     def test_claude_user_layout_on_a_client_directory_uses_the_default_location(self):
         client = self.home / ".claude"
