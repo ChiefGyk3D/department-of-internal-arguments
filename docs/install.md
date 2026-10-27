@@ -90,7 +90,7 @@ To see drift without writing, `--list-managed` prints every file under the targe
 
 ## Ownership state
 
-The installer keeps a record of what it wrote, outside the target and outside this repository: `$DOIA_STATE_DIR` if set (an absolute path), else `${XDG_STATE_HOME:-~/.local/state}/department-of-internal-arguments/`. There is one `0600` file per target and layout. It holds, for each installed path, the sha256 of the whole file as written. A file is **owned**, and so may be updated, only when its bytes match a recorded digest. Anything else is left alone and reported:
+The installer keeps a record of what it wrote, outside every install root and this repository: `$DOIA_STATE_DIR` if set (an absolute path), else `${XDG_STATE_HOME:-~/.local/state}/department-of-internal-arguments/`. There is one `0600` file per target and layout. It holds, for each installed path, the sha256 of the whole file as written. A file is **owned**, and so may be updated, only when its bytes match a recorded digest. Anything else is left alone and reported:
 
 - `unverified (refused; --adopt records it, --force-edited replaces it)`: a well-formed marker, but no record. This is what a clone, synced dotfiles or a forged file looks like. `--adopt` arrives with the adopt step (#42); until then `--update --force-edited` replaces the file and records it.
 - `edited`: a record exists but the bytes differ (you edited it, or someone replaced it). Put the recorded bytes back by hand and it is owned again. `--force-edited` discards your changes.

@@ -1409,6 +1409,77 @@ class InstallRoots(StateCase):
         self.assertNotIn("_identity", [k for k in os.environ])
         self.assertEqual(state._identity(self.home), (os.stat(self.home).st_dev, os.stat(self.home).st_ino))
 
+    # --- Unicode-normalization aliases of names that do not exist yet (Codex review of PR #60, pass 3) -------------
+    # On a normalization-insensitive filesystem NFC and NFD spell the same future directory.
+
+    def _nonexistent_root_cases(self):
+        nfc = "\u00e9root"
+        nfd = "e\u0301root"
+        self.assertNotEqual(nfc, nfd)
+        return nfc, nfd
+
+    def test_an_nfc_nfd_spelling_of_a_root_that_does_not_exist_yet_is_refused(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        for root_name, state_name in ((nfc, nfd), (nfd, nfc), (nfc, nfc.upper()), (nfc, nfd.upper()), (nfd, nfc.upper())):
+            with self.subTest(root=root_name, state=state_name):
+                roots = [self.tmp / root_name]
+                inside = self.tmp / state_name / "state"
+                with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+                    for call in (
+                        lambda: state.load(self.home, "user", roots=roots),
+                        lambda: state.Store(self.home, "user", roots=roots),
+                    ):
+                        with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                            call()
+                self.assertEqual(sorted(os.listdir(self.tmp)).count(root_name), 0)
+                self.assertFalse(any(n.casefold() == state_name.casefold() for n in os.listdir(self.tmp)))
+
+    def test_an_nfd_spelling_of_the_nominal_target_still_gets_the_private_chain_walk(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        seen = []
+        with mock.patch.object(state, "_check_private_chain", lambda nominal, rel: seen.append((nominal, rel))):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / nfd / "s" / "t")}):
+                state.load(self.tmp / nfc, "user", roots=[self.home / ".nothing"])
+        self.assertTrue(seen)
+        self.assertEqual({rel for _, rel in seen}, {("s", "t")})
+
+    def test_an_unrelated_name_is_not_refused_as_a_nonexistent_root(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        roots = [self.tmp / nfc]
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / ("x" + nfd) / "state")}):
+            self.assertIsNone(state.load(self.home, "user", roots=roots))
+
+    def test_the_same_inode_on_another_device_is_a_different_place(self):
+        a, b = self.tmp / "dev-a", self.tmp / "dev-b"
+        a.mkdir()
+        b.mkdir()
+
+        def fake(path):
+            text = os.fspath(path)
+            if text.startswith(str(a)):
+                return (1, 77)
+            if text.startswith(str(b)):
+                return (2, 77)
+            return (3, os.stat(text).st_ino)
+
+        with mock.patch.object(state, "_identity", fake):
+            self.assertIsNone(state._below(b / "x", a))
+            self.assertIsNone(state._below(a / "x", b))
+
+    def test_the_same_device_and_inode_is_an_alias(self):
+        a, b = self.tmp / "dev-a", self.tmp / "dev-b"
+        a.mkdir()
+        b.mkdir()
+
+        def fake(path):
+            text = os.fspath(path)
+            if text.startswith(str(a)) or text.startswith(str(b)):
+                return (1, 77)
+            return (3, os.stat(text).st_ino)
+
+        with mock.patch.object(state, "_identity", fake):
+            self.assertEqual(state._below(b, a), ())
+
     def test_a_state_directory_equal_to_a_root_is_refused(self):
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.root_b)}):
             with self.assertRaisesRegex(state.StateError, "inside an install root"):
