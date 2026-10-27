@@ -21,7 +21,7 @@ sha256 in the marker (or it is a known release-0.2.0 file). A file you edited is
 discards your edits. A file without the marker is still a collision.
 
 --overlay DIR is a private directory outside this repository (roles/, packs/; see scripts/overlay.py). An overlay
-entry with a public name is append-only (the public file unchanged, then a labelled additions section); a new name is
+entry with a public name is append-only (the public file unchanged, then a labeled additions section); a new name is
 installed as a whole persona. Overlay files carry the
 generator marker with the word "overlay" and the file's own name, never a path.
 
