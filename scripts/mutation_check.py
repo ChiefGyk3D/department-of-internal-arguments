@@ -988,9 +988,10 @@ def _grant_owner(parent_fd, name, pinned):
         return f"{name}: cannot chmod ({type(e).__name__})"
 
 
-def _enter(parent_fd, name, problems):
+def _enter(parent_fd, name, problems, files=None):
     """Pin the child directory `name` of `parent_fd`, open it up, and return (fd, identity, subdirectory names),
-    or None (with the reason appended to `problems`) when it cannot be opened. A link is refused."""
+    or None (with the reason appended to `problems`) when it cannot be opened. A link is refused. When `files` is a
+    list, the names of the entries that are not directories (links included) are appended to it."""
     try:
         pinned = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
     except FileNotFoundError:
@@ -1009,7 +1010,12 @@ def _enter(parent_fd, name, problems):
         except OSError:
             problems.append(why or f"{name}: cannot open")
             return None
-        names = [e.name for e in os.scandir(fd) if e.is_dir(follow_symlinks=False)]
+        names = []
+        for e in os.scandir(fd):
+            if e.is_dir(follow_symlinks=False):
+                names.append(e.name)
+            elif files is not None:
+                files.append(e.name)
         return fd, (st.st_dev, st.st_ino), names
     except OSError as e:
         if fd is not None:
@@ -1073,37 +1079,138 @@ def open_up(path):
         os.close(cur)
 
 
+def _entries(fd):
+    """The entries of the directory `fd` as they are now. scandir on a descriptor continues from the descriptor's
+    current offset, so it is rewound first; without that a second listing can come back short."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    return list(os.scandir(fd))
+
+
+def _unlink_all(fd, files, problems):
+    """Unlink the named non-directory entries of the directory `fd`. unlink never follows a link and acts only inside
+    the directory the descriptor names, so a swapped entry cannot lead it elsewhere."""
+    for f in files:
+        try:
+            os.unlink(f, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            problems.append(f"{f}: cannot unlink ({type(e).__name__})")
+
+
+def _delete_from_pin(parent_fd, name, problems):
+    """Delete the directory `name` of `parent_fd` and everything under it, and return the root's (dev, ino) as
+    pinned, or None when there was no such directory. Same shape as open_up: iterative, three descriptors at most,
+    every step relative to a descriptor, and each climb with `..` checked against the identity remembered on the way
+    down. Each directory is emptied (files and links unlinked) before it is entered or removed; a subdirectory is
+    removed from its parent's descriptor only while it still has the identity it was entered with. The one residual
+    window is between that identity check and the rmdir of a directory that is already empty, and an rmdir cannot
+    remove anything that has contents. The root itself is not removed here (see remove_tree)."""
+    files = []
+    root = _enter(parent_fd, name, problems, files)
+    if root is None:
+        return None
+    cur, ident, names = root
+    root_ident = ident
+    stack = []  # (identity, names still to visit) of each directory above `cur`, and cur's name inside it
+    cname = name
+    try:
+        _unlink_all(cur, files, problems)
+        while True:
+            if names:
+                child_name = names.pop()
+                files = []
+                child = _enter(cur, child_name, problems, files)
+                if child is None:
+                    continue
+                stack.append((ident, names, child_name))
+                os.close(cur)
+                cur, ident, names = child
+                _unlink_all(cur, files, problems)
+                continue
+            if not stack:
+                return root_ident
+            want, rest, cname = stack.pop()
+            have = ident
+            try:
+                up = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+            except OSError as e:
+                problems.append(f"cannot climb ({type(e).__name__}); the rest of the tree was not deleted")
+                return root_ident
+            os.close(cur)
+            cur = up
+            st = os.fstat(up)
+            if (st.st_dev, st.st_ino) != want:
+                problems.append("a directory changed while climbing; the rest of the tree was not deleted")
+                return root_ident
+            ident, names = want, rest
+            try:
+                got = os.stat(cname, dir_fd=up, follow_symlinks=False)
+                if (got.st_dev, got.st_ino) != have:
+                    problems.append(f"{cname}: swapped before removal, left alone")
+                else:
+                    os.rmdir(cname, dir_fd=up)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                problems.append(f"{cname}: cannot remove ({type(e).__name__})")
+    finally:
+        os.close(cur)
+
+
 def remove_tree(path, scratch):
     """Delete the disposable directory, never following a symlink and never leaving the scratch directory. Raises
-    CleanupIncomplete (carrying the leftover path) unless the directory is gone afterwards: the delete's own errors
-    are collected, not ignored, and the check is a fresh lstat of the root, tolerating only not-found."""
+    CleanupIncomplete (carrying the leftover path) unless the directory is gone afterwards.
+
+    The directory is pinned once, by name, from a descriptor of its parent (which must be the scratch directory),
+    and its identity is remembered. The whole delete then runs through descriptors (see _delete_from_pin) and the
+    pathname is never resolved again, so a process that renames the directory away and puts a sibling under the same
+    name cannot make this delete the sibling. shutil.rmtree is not used. The root is removed from the pinned parent
+    by the name that still has the pinned identity (the entry is looked up by identity, so the original is removed
+    even if it was renamed). Verification is against the pinned identity: no parent entry may still have it, and an
+    entry under the original name with any other identity is reported as unexpected, not as success."""
     real = os.path.realpath(path)
     if os.path.islink(path) or os.path.dirname(real) != os.path.realpath(scratch):
         raise RuntimeError("refusing to delete a path that is not a direct child of the scratch directory")
-    problems = open_up(path)
-
-    def fix(func, p, exc):
-        if func is os.open:  # a directory open_up could not open: nothing to retry here, but it is recorded
-            problems.append(f"{os.path.basename(p)}: cannot open for delete ({type(exc[1]).__name__})")
-            return
-        try:
-            os.chmod(os.path.dirname(p), OWNER_ONLY)
-            os.chmod(p, OWNER_ONLY)
-            func(p)
-        except OSError as e:
-            problems.append(f"{os.path.basename(p)}: {type(e).__name__}")
-
+    name = os.path.basename(path)
+    problems = []
     try:
-        shutil.rmtree(path, onerror=fix)
-    except (OSError, RecursionError) as e:
-        problems.append(f"rmtree: {type(e).__name__}")
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        return
+        pin = os.open(os.path.dirname(path) or ".", os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
     except OSError as e:
-        problems.append(f"lstat: {type(e).__name__}")
-    raise CleanupIncomplete(path, problems)
+        raise CleanupIncomplete(path, [f"parent: cannot open ({type(e).__name__})"]) from e
+    try:
+        want = os.fstat(pin)
+        have = os.stat(scratch)
+        if (want.st_dev, want.st_ino) != (have.st_dev, have.st_ino):
+            raise RuntimeError("refusing to delete: the parent is not the scratch directory")
+        try:
+            pdir = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=pin)
+        except OSError as e:
+            raise CleanupIncomplete(path, [f"parent: cannot list ({type(e).__name__})"]) from e
+        try:
+            root_ident = _delete_from_pin(pdir, name, problems)
+            if root_ident is not None:
+                for entry in _entries(pdir):
+                    st = entry.stat(follow_symlinks=False)
+                    if (st.st_dev, st.st_ino) == root_ident:
+                        try:
+                            os.rmdir(entry.name, dir_fd=pdir)
+                        except FileNotFoundError:
+                            pass
+                        except OSError as e:
+                            problems.append(f"{entry.name}: cannot remove root ({type(e).__name__})")
+            for entry in _entries(pdir):  # verify against the pinned identity, then the original name
+                st = entry.stat(follow_symlinks=False)
+                if root_ident is not None and (st.st_dev, st.st_ino) == root_ident:
+                    problems.append(f"{entry.name}: the pinned directory is still there")
+                elif entry.name == name:
+                    problems.append(f"{name}: an entry with a different identity is there; left alone")
+        finally:
+            os.close(pdir)
+    finally:
+        os.close(pin)
+    if problems:
+        raise CleanupIncomplete(path, problems)
 
 
 class Checker:
@@ -1677,8 +1784,12 @@ def main(argv=None):
             remove_tree(private, state["private_parent"])
         except Exception as e:  # reported, never hidden
             cleanup_failed = True
+            report["kept"] = True
+            report["cleanup_error"] = f"{type(e).__name__}: {e}"
+            report["leftover"] = private
             report["cleanup_error_private"] = f"{type(e).__name__}: {e}"
             report["private_leftover"] = private
+            print(f"mutation_check: cleanup incomplete, the private directory is still at {private}", file=sys.stderr)
 
     work = state.get("work")
     if work:
@@ -1689,7 +1800,7 @@ def main(argv=None):
         else:
             try:
                 remove_tree(work, state["scratch"])
-                report["kept"] = False
+                report["kept"] = cleanup_failed  # true only when the private directory is what was left behind
             except Exception as e:  # leaving a directory behind is reported, never hidden
                 cleanup_failed = True
                 report["kept"] = True
