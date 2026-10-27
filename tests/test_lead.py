@@ -15,8 +15,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import install as installer  # noqa: E402  (path set up above)
+import state_fixture  # noqa: E402  (path set up above)
 import validate as validate_mod  # noqa: E402
 from test_user_layout import copy_fixture  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 LEAD = (ROOT / "templates" / "lead.md").read_text(encoding="utf-8")
 # Words that would make the public template maintainer-specific (the validator sweeps hosts and paths separately).

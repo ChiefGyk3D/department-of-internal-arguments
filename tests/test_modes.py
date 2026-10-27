@@ -14,9 +14,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import install as installer  # noqa: E402  (path set up above)
+import state_fixture  # noqa: E402  (path set up above)
 from install import install  # noqa: E402
 from lib import version  # noqa: E402
 from test_user_layout import make_overlay, role_text  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 
 def perms(text):
@@ -29,7 +34,8 @@ def mode(p):
 
 
 def staled(path):
-    path.write_text(path.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+    older = path.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+    state_fixture.rewrite(path.parent.parent, f"{path.parent.name}/{path.name}", older)
 
 
 class UpdateKeepsModes(unittest.TestCase):
@@ -84,7 +90,14 @@ class UpdateKeepsModes(unittest.TestCase):
             a = t / "agents/reviewer.md"
             staled(a)
             before = a.read_text()
-            with mock.patch.object(installer.os, "rename", side_effect=OSError("boom")), self.assertRaises(OSError):
+            real_rename = os.rename
+
+            def boom(src, dst, **kw):  # only the installer's temporary file fails; the state store renames normally
+                if str(src).endswith(".doia-tmp"):
+                    raise OSError("boom")
+                return real_rename(src, dst, **kw)
+
+            with mock.patch.object(installer.os, "rename", side_effect=boom), self.assertRaises(OSError):
                 install(t, "claude", True, update=True, layout="user")
             self.assertEqual(list(Path(d).rglob("*.doia-tmp")), [])
             self.assertEqual(a.read_text(), before)
