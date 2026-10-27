@@ -929,6 +929,19 @@ def _check_findings(findings, bad):
             bad(f"findings[{i}] holds a control character")
 
 
+def _setup_key(rec):
+    """The one identity of a model setup: role, model, quantization and context (empty for a cloud model), client and
+    client version. The loader's uniqueness key and summarize()'s row key both build on it so they cannot drift."""
+    return (
+        rec["role"],
+        rec["model"],
+        rec.get("quantization", ""),
+        rec.get("context", 0),
+        rec["client"],
+        rec["client_version"],
+    )
+
+
 def load_results(path, c, repo=None):
     rows, keys = [], set()
     total = 0
@@ -943,7 +956,7 @@ def load_results(path, c, repo=None):
             if not line.strip():
                 continue
             rec = parse_result(line, n, c, repo)
-            key = (rec["task"], rec["role"], rec["model"], rec["client"], rec["client_version"], rec["run"])
+            key = (rec["task"], *_setup_key(rec), rec["run"])
             if key in keys:
                 raise ValueError(f"line {n}: duplicate record for {key}")
             keys.add(key)
@@ -963,14 +976,7 @@ def summarize(rows, c):
     and for pre-existing ones separately."""
     groups = defaultdict(list)
     for rec in rows:
-        key = (
-            rec["role"],
-            rec["model"],
-            rec.get("quantization", ""),
-            rec.get("context", 0),
-            rec["client"],
-            rec["client_version"],
-        )
+        key = _setup_key(rec)
         groups[key].append(score_record(rec, c))
     lines = [
         "| Role | Model | Client | Tasks | Recall % | In-diff recall % | Pre-existing recall % | Precision % | "

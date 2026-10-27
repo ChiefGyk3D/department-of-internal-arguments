@@ -694,8 +694,16 @@ class Scoring(unittest.TestCase):
 
     def test_different_quantization_and_context_are_different_rows(self):
         local = {"model": "gemma4:12b"}
-        a = parse(record(**local, quantization="q4_K_M", context=8192), self.c)
-        b = parse(record(**local, quantization="q8_0", context=32768), self.c)
+        a = record(**local, quantization="q4_K_M", context=8192)
+        b = record(**local, quantization="q8_0", context=32768)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.jsonl"
+            p.write_text(json.dumps(a) + "\n" + json.dumps(b) + "\n", encoding="utf-8")
+            a, b = benchmark.load_results(p, self.c)  # through the loader: same run, different setup, not a duplicate
+            p.write_text(json.dumps(a) + "\n" + json.dumps(a) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as cm:  # a real duplicate of a local record still bites
+                benchmark.load_results(p, self.c)
+            self.assertIn("duplicate", str(cm.exception))
         lines = [ln for ln in benchmark.summarize([a, b], self.c).splitlines() if "gemma4:12b" in ln]
         self.assertEqual(len(lines), 2)
         self.assertTrue(any("q4_K_M" in ln and "8192" in ln and "q8_0" not in ln for ln in lines))

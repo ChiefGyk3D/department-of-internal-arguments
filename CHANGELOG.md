@@ -35,7 +35,7 @@ Round 2 of the review of the benchmark corpus (issue #47):
 - The test-gap findings are reproduced by the real mutation (a change applied to a copy of the head, unit tests run, expected to stay green); `lead-lost-update` has a probe that races an in-place edit; the one absence-only repro is marked `proxy`.
 - `exact_model_id` rejects `:latest` tags and a bare vendor and major (`claude-3`, `gpt-5`); the `lead_list` probe fails on a crash instead of confirming a finding.
 - Result records: calendar-valid dates, a 40-character commit or a resolvable abbreviation, bounded tokens, seconds, cost, context and run, no control or invisible characters in text fields, a duplicate JSON key is an error, and client versions are separate rows.
-- `tarfile` extraction uses the `data` filter where Python has it (3.11.4 and later) and an equivalent member check on earlier 3.11 patch releases.
+- Historical trees are extracted by a hand-written `_write_member()` with a confined path and no links, devices or special members; no `TarFile.extract` and no `tarfile` filter is used.
 
 Docs: stop claiming SAFO installs personas, and pin the documented checkout by commit (issue #54, part of SAFO#161).
 
