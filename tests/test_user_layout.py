@@ -14,13 +14,19 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import generate  # noqa: E402  (path set up above)
 import install as installer  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
+import state_fixture  # noqa: E402  (path set up above)
 from install import install, is_generated, list_managed, plan  # noqa: E402
 from lib import GENERATED_MARK, PACK_NAMES, ROLE_NAMES, version  # noqa: E402
 from validate import validate  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 PUBLIC_REVIEWER = (ROOT / "roles/reviewer.md").read_text(encoding="utf-8")
 PUBLIC_PACK = (ROOT / "packs/threat-model/PACK.md").read_text(encoding="utf-8")
@@ -142,7 +148,7 @@ class UserLayout(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             install(d, "claude", True, layout="user")
             agent = Path(d) / "agents/reviewer.md"
-            agent.write_text(agent.read_text().replace("(release ", "(release 0.0.0-", 1))
+            state_fixture.rewrite(d, "agents/reviewer.md", agent.read_text().replace("(release ", "(release 0.0.0-", 1))
             with self.assertRaises(ValueError):
                 install(d, "claude", True, layout="user")  # still a collision without --update
             install(d, "claude", True, update=True, layout="user")
@@ -610,11 +616,15 @@ class ListManaged(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             install(d, "claude", True, layout="user")
             old = Path(d) / "agents/reviewer.md"
-            old.write_text(old.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+            state_fixture.rewrite(
+                d, "agents/reviewer.md", old.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+            )
             edited = Path(d) / "agents/implementer.md"
             edited.write_text(edited.read_text() + "\nlocal edit\n")
             orphan = Path(d) / "agents/gone.md"
             orphan.write_text(generate._seal("---\nname: gone\n---\n", "body\n", "roles/gone.md", version()))
+            # an orphan is a file the state knows; without a record it would be unverified
+            state_fixture.record(d, "agents/gone.md")
             rows = self.rows(d, layout="user")
             self.assertEqual(rows["agents/reviewer.md"]["status"], "stale")
             self.assertEqual(rows["agents/reviewer.md"]["release"], "0.0.1")
@@ -724,7 +734,9 @@ class Cli(unittest.TestCase):
             self.assertIn("current", out)
             self.assertIn(version(), out)
             agent = Path(d) / "agents/reviewer.md"
-            agent.write_text(agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+            state_fixture.rewrite(
+                d, "agents/reviewer.md", agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+            )
             code, out, _ = self.run_main("--target", d, "--layout", "user", "--list-managed")
             self.assertEqual(code, 3)
             self.assertIn("stale", out)

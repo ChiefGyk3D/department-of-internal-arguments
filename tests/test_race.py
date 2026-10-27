@@ -10,10 +10,16 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import install as installer  # noqa: E402  (path set up above)
+import state_fixture  # noqa: E402  (path set up above)
 from install import install  # noqa: E402
 from lib import version  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 
 def stale_install(d):
@@ -22,7 +28,9 @@ def stale_install(d):
     t.mkdir()
     install(t, "claude", True, layout="user")
     a = t / "agents/reviewer.md"
-    a.write_text(a.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+    state_fixture.rewrite(
+        t, "agents/reviewer.md", a.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+    )
     return t, a
 
 

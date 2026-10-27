@@ -14,12 +14,18 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import generate  # noqa: E402  (path set up above)
 import install as installer  # noqa: E402
 import lib  # noqa: E402
+import state_fixture  # noqa: E402  (path set up above)
 import validate as validate_mod  # noqa: E402
 from lib import PACK_NAMES  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 ADAPTERS = installer.ADAPTERS
 
@@ -236,7 +242,7 @@ class TrustModelWording(unittest.TestCase):
         "only files it can prove it generated",
         "can prove it generated",
     )
-    WORDING = "self-identify as generated may be overwritten"
+    WORDING = "ownership is the installer's own state record"
 
     def test_the_old_ownership_claim_is_absent_from_every_location(self):
         pages = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "scripts/install.py"]
@@ -258,14 +264,14 @@ class TrustModelWording(unittest.TestCase):
             ("docs/install.md", "`--adapter` is `claude`"),
             ("docs/install.md", "The project install writes"),
             ("docs/install.md", "It writes `<target>/.codex/agents"),
-            ("docs/overlay-and-ownership.md", "The marker line carries"),
+            ("docs/overlay-and-ownership.md", "Since the ownership state landed"),
         )
         for rel, anchor in places:
             self.assertIn(self.WORDING, self.paragraph(rel, anchor), f"{rel}: {anchor}")
         lines = [
             ln
             for ln in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-            if "hash is not a signature" in ln
+            if "Limit, stated plainly" in ln
         ]
         self.assertEqual(len(lines), 1)  # the one bullet that states the limit must carry the wording
         self.assertIn(self.WORDING, " ".join(lines[0].split()))

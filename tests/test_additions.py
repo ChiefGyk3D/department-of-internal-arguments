@@ -13,10 +13,15 @@ sys.path.insert(0, str(ROOT / "tests"))
 import generate  # noqa: E402  (path set up above)
 import lib  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
+import state_fixture  # noqa: E402  (path set up above)
 import validate  # noqa: E402
 from install import install, list_managed  # noqa: E402
 from lib import GENERATED_MARK  # noqa: E402
 from test_user_layout import make_overlay, pack_text, role_text  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 HEADING = "## Maintainer additions (private overlay)"
 SENTINEL = "ZQX-PRIVATE-OVERLAY-SENTINEL"

@@ -18,9 +18,14 @@ sys.path.insert(0, str(ROOT / "tests"))
 import install as installer  # noqa: E402  (path set up above)
 import lib  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
+import state_fixture  # noqa: E402  (path set up above)
 from install import install, list_managed, plan  # noqa: E402
 from lib import GENERATED_MARK, version  # noqa: E402
 from test_user_layout import make_overlay, role_text  # noqa: E402
+
+# Every test in this module runs against a private state directory (issue #40): no write reaches the home.
+setUpModule = state_fixture.set_up_module
+tearDownModule = state_fixture.tear_down_module
 
 LEGACY_MARKER = f"<!-- {GENERATED_MARK} (release 0.2.0) from roles/reviewer.md. Do not edit; run the generator. -->"
 EDITED_LABEL = "edited (refused; --force-edited discards your changes)"
@@ -138,7 +143,9 @@ class EditedFiles(unittest.TestCase):
     def test_marker_only_changes_do_not_count_as_edits(self):
         with tempfile.TemporaryDirectory() as d:
             agent = self.setup_installed(d)
-            agent.write_text(agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+            state_fixture.rewrite(
+                d, "agents/reviewer.md", agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+            )
             install(d, "claude", True, update=True, layout="user")
             self.assertEqual(agent.read_bytes(), (ROOT / ".claude/agents/reviewer.md").read_bytes())
 
@@ -146,7 +153,9 @@ class EditedFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             agent = self.setup_installed(d)
             self.assertEqual({a for _, _, a in plan(d, "claude", update=True, layout="user")}, {"unchanged"})
-            agent.write_text(agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+            state_fixture.rewrite(
+                d, "agents/reviewer.md", agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+            )
             actions = {dest.name: a for _, dest, a in plan(d, "claude", update=True, layout="user")}
             self.assertEqual(actions["reviewer.md"], "update")
             self.assertEqual(actions["implementer.md"], "unchanged")
@@ -188,7 +197,9 @@ class EditedFiles(unittest.TestCase):
     def test_changed_between_preflight_and_write(self):
         with tempfile.TemporaryDirectory() as d:
             agent = self.setup_installed(d)
-            agent.write_text(agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1))
+            state_fixture.rewrite(
+                d, "agents/reviewer.md", agent.read_text().replace(f"(release {version()})", "(release 0.0.1)", 1)
+            )
             items = installer._plan(d, "claude", update=True, layout="user")
             self.assertIn("update", [i[2] for i in items])
             agent.write_text("replaced after the preflight\n")

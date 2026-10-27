@@ -1205,6 +1205,336 @@ class Containment(StateCase):
             self.assertEqual(state.load(self.target, LAYOUT), {})
 
 
+class InstallRoots(StateCase):
+    """Issue #40: the location rule applies to the install roots (a list), not to the layout's nominal target."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp / "home"
+        self.home.mkdir(mode=0o700)
+        self.root_a = self.home / ".claude"
+        self.root_b = self.home / ".codex"
+        self.root_a.mkdir()
+        self.root_b.mkdir()
+        self.roots = [self.root_a, self.root_b]
+
+    def test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root(self):
+        env = {"HOME": str(self.home)}
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("DOIA_STATE_DIR")
+            os.environ.pop("XDG_STATE_HOME", None)
+            # the nominal target is the home directory; the default directory is inside it, and that is accepted
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            want = self.home / ".local" / "state" / state.APP_DIR
+            self.assertTrue(want.is_dir())
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+            self.assertEqual(state.load_or_empty(self.home, "user", roots=self.roots), {"a.md": entry()})
+            self.assertIs(state.lock_held(self.home, "user", roots=self.roots), False)
+
+    # --- a state directory inside the nominal target needs a private path to it (Codex review of PR #60) ---------
+
+    def _default_env(self):
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("DOIA_STATE_DIR", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+
+    def _plant(self, directory):
+        """A state file another account could have planted: mode 0600, owned by us (the test user), valid JSON."""
+        directory.mkdir(parents=True, exist_ok=True)
+        for d in (directory, *directory.parents):  # a permissive umask must not make the fixture parents writable
+            if d == self.home.parent:
+                break
+            os.chmod(d, 0o700)
+        real, layout, stem = state.state_key(self.home, "user")
+        (directory / (stem + ".json")).write_text(
+            json.dumps({"schema": 1, "target": real, "layout": layout, "entries": {"a.md": entry()}})
+        )
+        os.chmod(directory / (stem + ".json"), 0o600)
+
+    def test_a_planted_state_in_a_group_or_world_writable_target_is_refused(self):
+        self._default_env()
+        want = self.home / ".local" / "state" / state.APP_DIR
+        self._plant(want)
+        for mode in (GROUP_WRITABLE_DIR, WORLD_WRITABLE_DIR):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.home, mode)
+                for call in (
+                    lambda: state.load(self.home, "user", roots=self.roots),
+                    lambda: state.load_or_empty(self.home, "user", roots=self.roots),
+                    lambda: state.lock_held(self.home, "user", roots=self.roots),
+                    lambda: state.Store(self.home, "user", roots=self.roots),
+                ):
+                    with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                        call()
+        os.chmod(self.home, 0o700)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_a_writable_directory_below_the_target_on_the_way_to_the_state_directory_is_refused(self):
+        self._default_env()
+        want = self.home / ".local" / "state" / state.APP_DIR
+        self._plant(want)
+        for mid in (self.home / ".local", self.home / ".local" / "state", want):
+            with self.subTest(mid=mid.name):
+                os.chmod(mid, GROUP_WRITABLE_DIR)
+                with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                    state.load(self.home, "user", roots=self.roots)
+                os.chmod(mid, 0o700)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_a_target_or_parent_owned_by_another_account_is_refused(self):
+        self._default_env()
+        self._plant(self.home / ".local" / "state" / state.APP_DIR)
+        real_stat = state._chain_stat
+        for owned_by_other in (self.home.name, ".local", "state"):
+            with self.subTest(other=owned_by_other):
+
+                def fake(fd, other=owned_by_other):
+                    st = real_stat(fd)
+                    here = os.readlink(f"/proc/self/fd/{fd}")
+                    if os.path.basename(here) == other:
+                        return mock.Mock(st_mode=st.st_mode, st_uid=st.st_uid + 1)
+                    return st
+
+                with mock.patch.object(state, "_chain_stat", fake):
+                    with self.assertRaisesRegex(state.StateError, "not owned by the current user"):
+                        state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_an_explicit_state_directory_inside_a_private_target_is_accepted_and_in_a_writable_one_refused(self):
+        inside = self.home / "agents" / "state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+            os.chmod(self.home / "agents", GROUP_WRITABLE_DIR)
+            with self.assertRaisesRegex(state.StateError, "group- or world-writable"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_link_on_the_way_to_the_state_directory_inside_the_target_is_refused(self):
+        outside = self.tmp / "elsewhere"
+        outside.mkdir(mode=0o700)
+        os.symlink(outside, self.home / "link")
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / "link" / "state")}):
+            with self.assertRaises(state.StateError):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_state_directory_outside_the_target_does_not_need_a_private_target(self):
+        os.chmod(self.home, GROUP_WRITABLE_DIR)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "state-elsewhere")}):
+            with state.Store(self.home, "user", roots=self.roots) as store:
+                store.save({"a.md": entry()})
+            self.assertEqual(state.load(self.home, "user", roots=self.roots), {"a.md": entry()})
+
+    def test_the_single_target_form_still_refuses_the_same_directory(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".local" / "state" / "x")}):
+            with self.assertRaisesRegex(state.StateError, "inside the target"):
+                state.load(self.home, "user")
+
+    def test_a_state_directory_inside_an_install_root_is_refused_by_every_entry_point(self):
+        inside = self.root_a / "state"
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+            for call in (
+                lambda: state.load(self.home, "user", roots=self.roots),
+                lambda: state.load_or_empty(self.home, "user", roots=self.roots),
+                lambda: state.lock_held(self.home, "user", roots=self.roots),
+                lambda: state.Store(self.home, "user", roots=self.roots),
+            ):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    call()
+        self.assertEqual(os.listdir(self.root_a), [])
+
+    # --- case-insensitive filesystem aliases (Codex review of PR #60, pass 2) ---------------------------------------
+    # The host here is case-sensitive, so the tests emulate a case-insensitive, case-preserving filesystem through the
+    # _identity seam: it answers for a differently cased spelling as the filesystem would, with the same (dev, ino).
+
+    @contextlib.contextmanager
+    def _case_insensitive(self, **folds):
+        real = getattr(state, "_identity", None) or (lambda p: (os.stat(p).st_dev, os.stat(p).st_ino))
+
+        def fake(path):
+            text = os.fspath(path)
+            for cased, on_disk in folds.items():
+                text = text.replace("/" + cased, "/" + on_disk)
+            return real(text)
+
+        with mock.patch.object(state, "_identity", fake, create=True):
+            yield
+
+    def test_a_differently_cased_spelling_of_an_install_root_is_refused(self):
+        with self._case_insensitive(**{".CODEX": ".codex"}):
+            for spelling in ("state", "a/b/c"):
+                with self.subTest(spelling=spelling):
+                    inside = self.home / ".CODEX" / spelling
+                    with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+                        for call in (
+                            lambda: state.load(self.home, "user", roots=self.roots),
+                            lambda: state.Store(self.home, "user", roots=self.roots),
+                        ):
+                            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                                call()
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".CODEX")}):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(os.listdir(self.root_b), [])
+
+    def test_a_cased_spelling_of_a_directory_that_contains_a_root_is_refused(self):
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME")}):
+                with self.assertRaisesRegex(state.StateError, "contains an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+
+    def test_a_root_that_does_not_exist_yet_is_matched_through_its_existing_parent_by_case(self):
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME" / ".AGENTS" / "s")}):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    state.load(self.home, "user", roots=[self.home / ".agents"])
+
+    def test_a_cased_spelling_of_the_nominal_target_still_gets_the_private_chain_walk(self):
+        seen = []
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.object(state, "_check_private_chain", lambda nominal, rel: seen.append((nominal, rel))):
+                with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME" / "s" / "t")}):
+                    state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(set(seen), {(Path(os.path.realpath(self.home)), ("s", "t"))})
+
+    def test_unrelated_names_that_differ_only_by_what_the_filesystem_keeps_apart_are_not_refused(self):
+        with self._case_insensitive(**{".CODEX": ".codex"}):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "elsewhere" / "state")}):
+                self.assertIsNone(state.load(self.home, "user", roots=self.roots))
+
+    def test_the_identity_seam_is_not_reachable_from_the_environment(self):
+        self.assertNotIn("_identity", [k for k in os.environ])
+        self.assertEqual(state._identity(self.home), (os.stat(self.home).st_dev, os.stat(self.home).st_ino))
+
+    # --- Unicode-normalization aliases of names that do not exist yet (Codex review of PR #60, pass 3) -------------
+    # On a normalization-insensitive filesystem NFC and NFD spell the same future directory.
+
+    def _nonexistent_root_cases(self):
+        nfc = "\u00e9root"
+        nfd = "e\u0301root"
+        self.assertNotEqual(nfc, nfd)
+        return nfc, nfd
+
+    def test_an_nfc_nfd_spelling_of_a_root_that_does_not_exist_yet_is_refused(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        for root_name, state_name in (
+            (nfc, nfd),
+            (nfd, nfc),
+            (nfc, nfc.upper()),
+            (nfc, nfd.upper()),
+            (nfd, nfc.upper()),
+        ):
+            with self.subTest(root=root_name, state=state_name):
+                roots = [self.tmp / root_name]
+                inside = self.tmp / state_name / "state"
+                with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+                    for call in (
+                        lambda roots=roots: state.load(self.home, "user", roots=roots),
+                        lambda roots=roots: state.Store(self.home, "user", roots=roots),
+                    ):
+                        with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                            call()
+                self.assertEqual(sorted(os.listdir(self.tmp)).count(root_name), 0)
+                self.assertFalse(any(n.casefold() == state_name.casefold() for n in os.listdir(self.tmp)))
+
+    def test_an_nfd_spelling_of_the_nominal_target_still_gets_the_private_chain_walk(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        seen = []
+        with mock.patch.object(state, "_check_private_chain", lambda nominal, rel: seen.append((nominal, rel))):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / nfd / "s" / "t")}):
+                state.load(self.tmp / nfc, "user", roots=[self.home / ".nothing"])
+        self.assertTrue(seen)
+        self.assertEqual({rel for _, rel in seen}, {("s", "t")})
+
+    def test_an_unrelated_name_is_not_refused_as_a_nonexistent_root(self):
+        nfc, nfd = self._nonexistent_root_cases()
+        roots = [self.tmp / nfc]
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / ("x" + nfd) / "state")}):
+            self.assertIsNone(state.load(self.home, "user", roots=roots))
+
+    def test_the_same_inode_on_another_device_is_a_different_place(self):
+        a, b = self.tmp / "dev-a", self.tmp / "dev-b"
+        a.mkdir()
+        b.mkdir()
+
+        def fake(path):
+            text = os.fspath(path)
+            if text.startswith(str(a)):
+                return (1, 77)
+            if text.startswith(str(b)):
+                return (2, 77)
+            return (3, os.stat(text).st_ino)
+
+        with mock.patch.object(state, "_identity", fake):
+            self.assertIsNone(state._below(b / "x", a))
+            self.assertIsNone(state._below(a / "x", b))
+
+    def test_the_same_device_and_inode_is_an_alias(self):
+        a, b = self.tmp / "dev-a", self.tmp / "dev-b"
+        a.mkdir()
+        b.mkdir()
+
+        def fake(path):
+            text = os.fspath(path)
+            if text.startswith(str(a)) or text.startswith(str(b)):
+                return (1, 77)
+            return (3, os.stat(text).st_ino)
+
+        with mock.patch.object(state, "_identity", fake):
+            self.assertEqual(state._below(b, a), ())
+
+    def test_a_state_directory_equal_to_a_root_is_refused(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.root_b)}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_state_directory_that_contains_a_root_is_refused(self):
+        for d in (self.home, self.tmp):
+            with self.subTest(d=d.name), mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(d)}):
+                with self.assertRaisesRegex(state.StateError, "contains an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+
+    def test_a_symlinked_alias_of_a_root_is_refused(self):
+        alias = self.tmp / "alias"
+        os.symlink(self.root_a, alias)
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(alias / "s")}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_a_root_that_does_not_exist_yet_still_counts(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".agents" / "s")}):
+            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                state.load(self.home, "user", roots=[self.home / ".agents"])
+
+    def test_the_repository_is_still_refused_with_roots(self):
+        with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(state._REPO_ROOT / "scripts" / ".state-test")}):
+            with self.assertRaisesRegex(state.StateError, "inside this repository"):
+                state.load(self.home, "user", roots=self.roots)
+
+    def test_an_empty_list_checks_only_the_repository(self):
+        self.assertIsNone(state.load(self.home, "user", roots=[]))
+
+    def test_hostile_roots_are_state_errors(self):
+        for bad in ([None], [5], [b"/x"], [["/x"]], [StrSub("/x")], ["a\0b"], "not-a-list", 5, ListSub([self.root_a])):
+            with self.subTest(repr(bad)), self.assertRaises(state.StateError):
+                state.load(self.home, "user", roots=bad)
+            with self.subTest(repr(bad)), self.assertRaises(state.StateError):
+                state.Store(self.home, "user", roots=bad)
+        with self.assertRaises(state.StateError):
+            state.load(self.home, "user", roots=[str(self.root_a)] * (state.MAX_ROOTS + 1))
+        self.assertFalse(self.sdir.exists())
+
+    def test_the_key_still_comes_from_the_target_not_the_roots(self):
+        a = state.state_path(self.home, "user")
+        with state.Store(self.home, "user", roots=self.roots) as store:
+            store.save({})
+        self.assertEqual(a, self.sdir / (state.state_key(self.home, "user")[2] + ".json"))
+        self.assertTrue(a.exists())
+
+
 class BytesSub(bytes):
     pass
 
@@ -2226,8 +2556,8 @@ MUTANTS = [
     ),
     (
         "inside target",
-        'for label, base in (("the target", Path(_real_path(target))), ',
-        "for label, base in (",
+        '        bases = [("the target", Path(_real_path(target)))]',
+        "        bases = []",
         "Confinement.test_state_directory_inside_the_target",
     ),
     (
@@ -2677,6 +3007,82 @@ MUTANTS = [
         "    return _shown(exc.strerror)",
         "HostileEverywhere.test_oserr_renders_only_an_exact_str_strerror",
     ),
+    (
+        "install roots checked",
+        '        bases = [("an install root", Path(_real_path(root))) for root in target]',
+        "        bases = []",
+        "InstallRoots.test_a_state_directory_inside_an_install_root_is_refused_by_every_entry_point",
+    ),
+    (
+        "install roots cap",
+        "        if len(target) > MAX_ROOTS:",
+        "        if False:",
+        "InstallRoots.test_hostile_roots_are_state_errors",
+    ),
+    (
+        "roots exact list",
+        "    if not _is_one_of(roots, (list, tuple)):",
+        "    if False:",
+        "InstallRoots.test_hostile_roots_are_state_errors",
+    ),
+    (
+        "roots replace the target",
+        "    if roots is None:\n        return target",
+        "    if True:\n        return target",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "roots keep the repository",
+        '    bases.append(("this repository", _REPO_ROOT.resolve()))',
+        "    pass",
+        "InstallRoots.test_the_repository_is_still_refused_with_roots",
+    ),
+    (
+        "load uses roots",
+        "    directory = state_dir()\n    _check_location(_location_spec(target, roots), directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return None",
+        "    directory = state_dir()\n    _check_location(target, directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return None",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "lock_held uses roots",
+        "    directory = state_dir()\n    _check_location(_location_spec(target, roots), directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return False",
+        "    directory = state_dir()\n    _check_location(target, directory)\n"
+        "    dfd = _open_state_dir(directory, create=False)\n    if dfd is None:\n        return False",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "Store uses roots",
+        "        _check_location(_location_spec(target, roots), directory)\n        self._dfd",
+        "        _check_location(target, directory)\n        self._dfd",
+        "InstallRoots.test_default_location_under_the_nominal_target_is_fine_when_it_is_outside_every_root",
+    ),
+    (
+        "private chain checks writability",
+        "            elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):",
+        "            elif False:",
+        "InstallRoots.test_a_planted_state_in_a_group_or_world_writable_target_is_refused",
+    ),
+    (
+        "private chain checks the owner",
+        "            elif st.st_uid != _euid():",
+        "            elif False:",
+        "InstallRoots.test_a_target_or_parent_owned_by_another_account_is_refused",
+    ),
+    (
+        "identity containment",
+        "        if cid == pid:\n",
+        "        if False:\n",
+        "InstallRoots.test_a_differently_cased_spelling_of_an_install_root_is_refused",
+    ),
+    (
+        "identity nominal chain",
+        "            if rel is not None:\n                _check_private_chain(real_nominal, rel)",
+        "            if False:\n                _check_private_chain(real_nominal, rel)",
+        "InstallRoots.test_a_cased_spelling_of_the_nominal_target_still_gets_the_private_chain_walk",
+    ),
 ]
 
 
@@ -2685,7 +3091,7 @@ MUTANTS = [
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
-EXPECTED_ROWS = 97
+EXPECTED_ROWS = 109
 
 
 class LooseModeConstants(unittest.TestCase):
