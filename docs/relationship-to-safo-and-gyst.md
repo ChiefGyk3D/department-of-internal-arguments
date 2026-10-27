@@ -15,3 +15,9 @@ CI is the reusable workflows in [git-your-ship-together](https://github.com/Chie
 ## The wiki
 
 These pages are the `docs/` folder. `scripts/gen_wiki.py` turns them into a flat wiki tree and GYST's `wiki-publish.yml` replaces the wiki's contents with it, from `.github/workflows/wiki.yml`, on the default branch only. Edit `docs/`, never the wiki: the next publish overwrites it.
+
+## Model tiers: one source, one export
+
+This repository owns the tier-to-model pins (`TIER_MODEL` in `scripts/lib.py`): `standard` and `cheap` each map to one exact model id, never an alias, never `latest`, never a family name. The pins are published as `export/model-pins.json`, generated and drift-checked: `python3 scripts/export_models.py --write` writes it, `--check` (also run by `scripts/generate.py --check` and `scripts/validate.py`) exits 1 naming the file when it is stale. The file holds the schema number, the release, each tier's model id, family and roles, each role's tier, and the ordered field names of the report header.
+
+Consumers (SAFO first) read the file at a pinned commit and compare it with their own text. Read it with `read_pins` from `scripts/export_models.py`: the reader refuses unknown or duplicate keys, wrong types, anything that is not an exact model id and any bytes other than the canonical rendering. Floating aliases stay legal only in the dispatch parameter a host demands; they are refused in the export. Bumping a pin is a CHANGELOG event and a new release.
