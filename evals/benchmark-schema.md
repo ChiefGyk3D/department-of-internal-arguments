@@ -100,7 +100,7 @@ Numbers, each with its unit:
 | Tokens | input and output, sums | from the record; required |
 | Refusals | count | every refusal or filter cut-off entry |
 
-A refused or cut-off run stays in the table with its findings (usually none); it is never dropped from the denominator. Runs of different client versions are different rows.
+A refused or cut-off run stays in the table with its findings (usually none); it is never dropped from the denominator. Runs of different client versions, or of a local model at a different quantization or context, are different rows.
 
 ## Result records: one JSON object per line
 
@@ -112,7 +112,7 @@ This is the result format of the behavioral-evals matrix (issue #24: `client`, `
 | `client`, `client_version` | Exact client name and version; both required |
 | `model` | An exact id, stated once here (below) |
 | `quantization`, `context` | Local models only (an Ollama tag), and then both required; `context` at most 100,000,000 |
-| `date`, `commit` | A real calendar date `YYYY-MM-DD`, no later than tomorrow (UTC), and the commit of this repository the run used: the full 40-character lowercase hex id (an abbreviation can resolve to another object in a fork, so it is refused). `--score` checks the commit exists in `--repo` and prints `commits: verified`; `--skip-commit-check` skips that and the output is headed `commits: NOT VERIFIED`. Without a repository only the shape is checked |
+| `date`, `commit` | A real calendar date `YYYY-MM-DD`, no later than tomorrow (UTC), and the commit of this repository the run used: the full 40-character lowercase hex id (an abbreviation can resolve to another object in a fork, so it is refused). `--score` checks the commit exists in `--repo` and is the checkout the task pins, and prints `commits: verified`. For a diff task the commit must equal the task's `head`. A brief task pins no commit, so its commit must hold the task's `input_file` (under `evals/benchmark/`) with the recorded `input_sha256` unchanged; `--skip-commit-check` skips that and the output is headed `commits: NOT VERIFIED`. Without a repository only the shape is checked |
 | `tools_enabled` | List of tool names the model had |
 | `outcome` | `completed`, `refused`, `filter-cutoff`, `error`, `timeout` |
 | `findings` | List of exactly `{class, path, evidence}`, at most 50, evidence at most 2000 characters |

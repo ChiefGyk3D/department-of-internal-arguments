@@ -41,6 +41,12 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env).stdout
 
 
+def nested(ch):
+    """A nested-quantifier pattern that backtracks catastrophically on 'aaaa...!'. Built from fragments at runtime: the
+    tests need the hostile pattern, but it is data for the matcher's time budget, not a pattern this suite relies on."""
+    return "(" + ch + "+" + ")" + "+$"
+
+
 def finding(
     fid="f1", cls="input-validation", rnd=1, paths=("src/a.py",), evidence=("unchecked", "value"), quotes=None, **extra
 ):
@@ -686,6 +692,15 @@ class Scoring(unittest.TestCase):
         cells = [x.strip() for x in row.strip("|").split("|")]
         self.assertEqual((cells[4], cells[7], cells[8]), ("50.0", "33.3", "2"))
 
+    def test_different_quantization_and_context_are_different_rows(self):
+        local = {"model": "gemma4:12b"}
+        a = parse(record(**local, quantization="q4_K_M", context=8192), self.c)
+        b = parse(record(**local, quantization="q8_0", context=32768), self.c)
+        lines = [ln for ln in benchmark.summarize([a, b], self.c).splitlines() if "gemma4:12b" in ln]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(any("q4_K_M" in ln and "8192" in ln and "q8_0" not in ln for ln in lines))
+        self.assertTrue(any("q8_0" in ln and "32768" in ln and "q4_K_M" not in ln for ln in lines))
+
     def test_different_client_versions_are_different_rows(self):
         a = parse(record(), self.c)
         b = parse(record(client_version="2.2.0"), self.c)
@@ -721,10 +736,18 @@ class Scoring(unittest.TestCase):
             head = git(ROOT, "rev-parse", "HEAD").strip()
             real = Path(d) / "real.jsonl"
             real.write_text(json.dumps({**rec, "commit": head}) + "\n", encoding="utf-8")
+            pinned = copy.deepcopy(benchmark.load_corpus())
+            pinned["tasks"][0]["head"] = head  # the checkout this clone has; a record must name the task's pinned head
             out = io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(benchmark.main(["--score", str(real)]), 0)
+            with mock.patch.object(benchmark, "load_corpus", return_value=pinned):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(benchmark.main(["--score", str(real)]), 0)
             self.assertIn("commits: verified", out.getvalue())
+            # a commit that exists but is not the task's pinned head is refused
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(benchmark.main(["--score", str(real)]), 1)
+            self.assertIn("pinned head", err.getvalue())
         self.assertEqual(hashlib.sha256(routing.read_bytes()).hexdigest(), before)
 
 
@@ -1465,17 +1488,54 @@ class GitBacked(unittest.TestCase):
 
     def test_a_commit_in_a_record_must_exist_in_the_given_repository(self):
         real = self.shas["defect"]
-        self.assertEqual(parse(record(commit=real), repo=self.repo)["commit"], real)
+        c = corpus(task(head=real))
+        self.assertEqual(parse(record(commit=real), c, self.repo)["commit"], real)
         with self.assertRaises(ValueError) as cm:
-            parse(record(commit="f" * 40), repo=self.repo)
+            parse(record(commit="f" * 40), c, self.repo)
         self.assertIn("not in the given repository", str(cm.exception))
         with self.assertRaises(ValueError):
-            parse(record(commit=real[:10]), repo=self.repo)  # an abbreviation is never accepted
+            parse(record(commit=real[:10]), c, self.repo)  # an abbreviation is never accepted
         with tempfile.TemporaryDirectory() as notrepo:
             with self.assertRaises(ValueError):
-                parse(record(commit=real), repo=notrepo)
+                parse(record(commit=real), c, notrepo)
         # without a repository only the shape is checked
         self.assertEqual(parse(record(commit="f" * 40))["commit"], "f" * 40)
+
+    def test_a_diff_record_must_name_the_pinned_head_of_its_task(self):
+        c = corpus(task(head=self.shas["defect"]))
+        self.assertEqual(parse(record(commit=self.shas["defect"]), c, self.repo)["commit"], self.shas["defect"])
+        for other in (self.shas["base"], self.shas["fixed"]):  # real commits of the repository, but not the pin
+            with self.assertRaises(ValueError) as cm:
+                parse(record(commit=other), c, self.repo)
+            self.assertIn("pinned head", str(cm.exception))
+
+    def test_a_brief_record_must_name_a_commit_that_holds_the_recorded_input(self):
+        rel = benchmark.BENCH.relative_to(benchmark.ROOT) / "inputs" / "b.md"
+        (self.repo / rel.parent).mkdir(parents=True)
+        (self.repo / rel).write_text("the recorded input\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "input")
+        with_input = git(self.repo, "rev-parse", "HEAD").strip()
+        (self.repo / rel).write_text("an edited input\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "edit")
+        edited = git(self.repo, "rev-parse", "HEAD").strip()
+        brief = {
+            "id": "b1",
+            "roles": ["brief-writer"],
+            "kind": "brief",
+            "title": "A synthetic brief task",
+            "input_file": "inputs/b.md",
+            "input_sha256": hashlib.sha256(b"the recorded input\n").hexdigest(),
+            "findings": [],
+        }
+        c = corpus(brief)
+        ok = record(task="b1", role="brief-writer", commit=with_input)
+        self.assertEqual(parse(ok, c, self.repo)["commit"], with_input)
+        for other in (self.shas["base"], edited):  # no input file at all; a changed input file
+            with self.assertRaises(ValueError) as cm:
+                parse({**ok, "commit": other}, c, self.repo)
+            self.assertIn("recorded input", str(cm.exception))
 
     def test_check_commits_needs_no_network(self):
         c = self.corpus_for(self.pattern_finding())
@@ -1715,6 +1775,20 @@ class Extraction(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(self.archive("ok/file.txt"))) as tf:
             self.assertEqual([m.name for m in benchmark._safe_members(tf)], ["ok/file.txt"])
 
+    def test_a_member_is_re_confined_before_it_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "dest"
+            dest.mkdir()
+            outside = Path(d) / "outside.txt"
+            for name in (str(outside), "ok/../../outside.txt"):  # as if _check_member had let it through
+                with tarfile.open(fileobj=io.BytesIO(self.archive(name))) as tf:
+                    with self.assertRaises(RuntimeError):
+                        benchmark._write_member(tf, tf.getmembers()[0], dest.resolve())
+            self.assertFalse(outside.exists())
+            with tarfile.open(fileobj=io.BytesIO(self.archive("ok/file.txt"))) as tf:
+                benchmark._extract_stream(tf, dest)
+            self.assertEqual((dest / "ok" / "file.txt").read_bytes(), b"x")
+
     def test_links_and_devices_are_not_extracted(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tf:
@@ -1921,14 +1995,14 @@ class Patterns(unittest.TestCase):
     def test_the_matcher_has_a_hard_time_budget(self):
         started = time.monotonic()
         with self.assertRaises(benchmark.RegexBudget):
-            benchmark._search("(a+)+$", "a" * 24 + "!", budget=0.3)
+            benchmark._search(nested("a"), "a" * 24 + "!", budget=0.3)
         with self.assertRaises(benchmark.RegexBudget):
-            benchmark._spans("(a+)+$", "a" * 24 + "!", budget=0.3)
+            benchmark._spans(nested("a"), "a" * 24 + "!", budget=0.3)
         self.assertLess(time.monotonic() - started, 10)
         self.assertTrue(benchmark._search("a+", "caab", budget=0.3))
 
     def test_matching_a_hostile_pattern_that_got_past_validation_is_cut_off(self):
-        t = task(findings=[finding("f1", evidence=("(a+)+$", "(b+)+$"), quotes=["unchecked value"])])
+        t = task(findings=[finding("f1", evidence=(nested("a"), nested("b")), quotes=["unchecked value"])])
         report = {"class": "input-validation", "path": "src/a.py", "evidence": "a" * 24 + "! unchecked value"}
         with mock.patch.object(benchmark, "REGEX_BUDGET_S", 0.3):
             with self.assertRaises(benchmark.RegexBudget):

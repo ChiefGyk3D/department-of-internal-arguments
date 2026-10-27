@@ -834,7 +834,7 @@ def parse_result(line, n, c, repo=None):
     if not _is_int(rec["run"], 1) or rec["run"] > MAX_RUN:
         bad(f"run must be an integer from 1 to {MAX_RUN}")
     _check_date(rec["date"], bad)
-    _check_commit(rec["commit"], repo, bad)
+    _check_commit(rec["commit"], repo, bad, task)
     tools = rec["tools_enabled"]
     if not (isinstance(tools, list) and all(isinstance(x, str) and x and len(x) <= 64 and _clean(x) for x in tools)):
         bad("tools_enabled must be a list of names")
@@ -890,14 +890,28 @@ def _check_date(value, bad):
         bad("date is in the future")
 
 
-def _check_commit(value, repo, bad):
+def _check_commit(value, repo, bad, task=None):
     """A record names its commit by the full 40-character id: an abbreviation can resolve to another object in a fork.
-    With a repository given, the commit must exist in it; without one the id is only checked for shape, and the output
-    of `--score` says so (it is headed 'commits: NOT VERIFIED')."""
+    With a repository given, the commit must exist in it and must be the checkout the task pins: for a diff task the
+    task's `head`; for a brief task a commit whose tree holds the task's recorded input file with the recorded
+    `input_sha256` (a brief task pins its input, not a commit). Without a repository the id is only checked for shape,
+    and the output of `--score` says so (it is headed 'commits: NOT VERIFIED')."""
     if not (isinstance(value, str) and COMMIT_RE.fullmatch(value)):
         bad("commit must be the full 40-character lowercase hex id of a commit of this repository")
-    if repo is not None and not (_is_git_repo(repo) and _has_commit(repo, value)):
+    if repo is None:
+        return
+    if not (_is_git_repo(repo) and _has_commit(repo, value)):
         bad("commit is not in the given repository (fetch it, or pass --skip-commit-check to skip the check)")
+    if task is None:
+        return
+    if task["kind"] == "diff":
+        if value != task["head"]:
+            bad(f"commit is not the pinned head of task {task['id']} ({task['head']}): the run must use that checkout")
+    else:
+        rel = (BENCH.relative_to(ROOT) / task["input_file"]).as_posix()
+        blob = _git(repo, "show", f"{value}:{rel}", check=False)
+        if blob.returncode or hashlib.sha256(blob.stdout).hexdigest() != task["input_sha256"]:
+            bad(f"commit does not hold the recorded input {task['input_file']} of task {task['id']} unchanged")
 
 
 def _check_findings(findings, bad):
@@ -944,24 +958,34 @@ def _pct(a, b):
 
 
 def summarize(rows, c):
-    """The table per role, model and client version. Code does every count; sums for counts and tokens, a mean for
-    wall-clock. Recall is also reported for findings the diff touches and for pre-existing ones separately."""
+    """The table per role, model (with quantization and context for a local one) and client version. Code does every
+    count; sums for counts and tokens, a mean for wall-clock. Recall is also reported for findings the diff touches
+    and for pre-existing ones separately."""
     groups = defaultdict(list)
     for rec in rows:
-        groups[(rec["role"], rec["model"], rec["client"], rec["client_version"])].append(score_record(rec, c))
+        key = (
+            rec["role"],
+            rec["model"],
+            rec.get("quantization", ""),
+            rec.get("context", 0),
+            rec["client"],
+            rec["client_version"],
+        )
+        groups[key].append(score_record(rec, c))
     lines = [
         "| Role | Model | Client | Tasks | Recall % | In-diff recall % | Pre-existing recall % | Precision % | "
         "False findings | Fix rounds avoided | Wall clock s (mean) | Tokens in | Tokens out | Refusals |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for (role, model, client, version), ms in sorted(groups.items()):
+    for (role, model, quant, ctx, client, version), ms in sorted(groups.items()):
+        label = f"{model} ({quant}, {ctx})" if quant else model
         pool = sum(role in t["roles"] for t in c["tasks"])
         exp, hit, fls, rep = (sum(m[k] for m in ms) for k in ("expected", "matched", "false", "reported"))
         sc = {s: (sum(m["by_scope"][s][0] for m in ms), sum(m["by_scope"][s][1] for m in ms)) for s in SCOPES}
         got, tot = sum(m["rounds_avoided"] for m in ms), sum(m["rounds_total"] for m in ms)
         wall = sum(m["wall_clock_s"] for m in ms) / len(ms)
         lines.append(
-            f"| {role} | {model} | {client} {version} | {len({m['task'] for m in ms})} of {pool} | {_pct(hit, exp)} | "
+            f"| {role} | {label} | {client} {version} | {len({m['task'] for m in ms})} of {pool} | {_pct(hit, exp)} | "
             f"{_pct(sc['in_diff'][1], sc['in_diff'][0])} | {_pct(sc['pre_existing'][1], sc['pre_existing'][0])} | "
             f"{_pct(hit, rep)} | {fls} | {got} of {tot} | {wall:.1f} | "
             f"{sum(m['tokens_input'] for m in ms)} | {sum(m['tokens_output'] for m in ms)} | "
@@ -1190,6 +1214,7 @@ class _Capped(io.RawIOBase):
 
 
 def _extract_stream(tf, dest):
+    dest_root = Path(dest).resolve()
     files = total = 0
     for m in tf:
         if not _check_member(m):
@@ -1203,10 +1228,22 @@ def _extract_stream(tf, dest):
                 raise RuntimeError(f"archive member {m.name!r} is over {MAX_MEMBER_BYTES} bytes")
             if total > MAX_EXPANDED_BYTES:
                 raise RuntimeError(f"archive expands to more than {MAX_EXPANDED_BYTES} bytes")
-        if hasattr(tarfile, "data_filter"):  # Python 3.11.4 and later (and 3.12+): the standard hardened filter
-            tf.extract(m, dest, set_attrs=False, filter="data")
-        else:  # earlier 3.11 patch releases: _check_member is the only guard
-            tf.extract(m, dest, set_attrs=False)  # noqa: S202 (member vetted by _check_member)
+        _write_member(tf, m, dest_root)
+
+
+def _write_member(tf, m, dest_root):
+    """Write one vetted member (a regular file or a directory) under dest_root. The path is joined and re-confined
+    here, so nothing depends on the tarfile extraction filters, which differ between 3.11 patch releases."""
+    target = (dest_root / m.name).resolve()
+    if target != dest_root and dest_root not in target.parents:
+        raise RuntimeError(f"archive member escapes the destination: {m.name}")
+    if m.isdir():
+        target.mkdir(parents=True, exist_ok=True)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = tf.extractfile(m)
+    with target.open("wb") as out:
+        shutil.copyfileobj(src, out)
 
 
 def _extract(repo, sha, dest):
