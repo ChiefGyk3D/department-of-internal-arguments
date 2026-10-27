@@ -950,67 +950,160 @@ def clean_evidence(trusted):
     }
 
 
-def open_up(path):
-    """Give the owner full access to every directory under `path`, so a test that took its own permissions away
-    cannot keep the tool from deleting the disposable directory. Nothing is resolved by path after the first open:
-    each directory is pinned with an O_PATH descriptor opened with O_NOFOLLOW | O_DIRECTORY (a link, or a directory
-    swapped for one, is refused), its mode is set through that descriptor, and its entries are listed and opened
-    relative to it. A directory swapped after it was pinned cannot redirect anything."""
+class CleanupIncomplete(RuntimeError):
+    """The disposable directory is still on disk after the delete. Carries the leftover path."""
+
+    def __init__(self, path, problems):
+        super().__init__(f"cleanup incomplete: {path} still exists ({'; '.join(problems[:5]) or 'no detail'})")
+        self.path, self.problems = path, problems
+
+
+def _grant_owner(parent_fd, name, pinned):
+    """Give the owner full access to the directory pinned as `pinned` (an O_PATH descriptor, opened without
+    following a link). Three routes, in order of how little they trust a name: chmod through /proc/self/fd (follows
+    the pinned inode; needs procfs); chmod of `name` relative to the parent descriptor without following a link
+    (Linux fchmodat with AT_SYMLINK_NOFOLLOW, which needs a kernel and libc that support it and otherwise fails);
+    chmod of `name` relative to the parent descriptor, taken only if the entry still has the pinned inode (a
+    residual check-then-use window that matters only while a hostile process is still alive, and the test's process
+    tree is gone before cleanup). fchmod on the O_PATH descriptor itself is not allowed on Linux (EBADF). Returns
+    None on success or a short description of why every route failed."""
     try:
-        pinned = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
+        os.chmod(f"/proc/self/fd/{pinned}", OWNER_ONLY)
+        return None
     except OSError:
-        return
-    _open_up_fd(pinned)
+        pass
+    try:
+        os.chmod(name, OWNER_ONLY, dir_fd=parent_fd, follow_symlinks=False)
+        return None
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        want = os.fstat(pinned)
+        got = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (want.st_dev, want.st_ino) != (got.st_dev, got.st_ino):
+            return f"{name}: swapped before chmod"
+        os.chmod(name, OWNER_ONLY, dir_fd=parent_fd)
+        return None
+    except (OSError, NotImplementedError) as e:
+        return f"{name}: cannot chmod ({type(e).__name__})"
 
 
-def _open_up_fd(pinned):
-    """Open up the directory pinned as `pinned` (an O_PATH descriptor, closed here) and everything under it."""
+def _enter(parent_fd, name, problems):
+    """Pin the child directory `name` of `parent_fd`, open it up, and return (fd, identity, subdirectory names),
+    or None (with the reason appended to `problems`) when it cannot be opened. A link is refused."""
+    try:
+        pinned = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        problems.append(f"{name}: cannot pin ({type(e).__name__})")
+        return None
     fd = None
     try:
-        if not stat.S_ISDIR(os.fstat(pinned).st_mode):
-            return
-        try:  # fchmod needs a real descriptor; chmod through /proc/self/fd follows the pinned inode, not a name
-            os.chmod(f"/proc/self/fd/{pinned}", OWNER_ONLY)
+        st = os.fstat(pinned)
+        if not stat.S_ISDIR(st.st_mode):
+            return None
+        why = _grant_owner(parent_fd, name, pinned)
+        try:
+            fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=pinned)
         except OSError:
-            pass
-        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=pinned)
+            problems.append(why or f"{name}: cannot open")
+            return None
         names = [e.name for e in os.scandir(fd) if e.is_dir(follow_symlinks=False)]
-    except OSError:
-        return
+        return fd, (st.st_dev, st.st_ino), names
+    except OSError as e:
+        if fd is not None:
+            os.close(fd)
+        problems.append(f"{name}: cannot open ({type(e).__name__})")
+        return None
     finally:
         os.close(pinned)
+
+
+def open_up(path):
+    """Give the owner full access to every directory under `path`, so a test that took its own permissions away
+    cannot keep the tool from deleting the disposable directory. Returns a list of what could not be opened (empty
+    when everything was); remove_tree reports a tree that survives the delete either way.
+
+    The walk is iterative, so no tree depth hits Python's recursion limit, and it holds at most three descriptors at
+    once whatever the depth or width, so there is no descriptor budget to run out of: it descends by replacing the
+    current descriptor with the child's, remembers the identity and the unvisited names of each ancestor on a list,
+    and climbs back with `..` from the current descriptor (the climb is checked against the remembered identity).
+    Nothing is resolved by path after the first open: a link, or a directory swapped for one, is refused."""
+    problems = []
     try:
-        for name in names:
-            try:
-                child = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=fd)
-            except OSError:
-                continue
-            try:
-                _open_up_fd(child)
-            except RecursionError:
-                return
+        parent = os.open(os.path.dirname(path) or ".", os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
+    except OSError as e:
+        return [f"parent: cannot open ({type(e).__name__})"]
+    try:
+        entered = _enter(parent, os.path.basename(path), problems)
     finally:
-        os.close(fd)
+        os.close(parent)
+    if entered is None:
+        return problems
+    cur, ident, names = entered
+    ancestors = []  # (identity, names still to visit) of each directory above `cur`
+    try:
+        while True:
+            if names:
+                name = names.pop()
+                child = _enter(cur, name, problems)
+                if child is None:
+                    continue
+                ancestors.append((ident, names))
+                os.close(cur)
+                cur, ident, names = child
+                continue
+            if not ancestors:
+                return problems
+            want, rest = ancestors.pop()
+            try:
+                up = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+            except OSError as e:
+                problems.append(f"cannot climb ({type(e).__name__}); the rest of the tree was not opened")
+                return problems
+            st = os.fstat(up)
+            os.close(cur)
+            cur = up
+            if (st.st_dev, st.st_ino) != want:
+                problems.append("a directory changed while climbing; the rest of the tree was not opened")
+                return problems
+            ident, names = want, rest
+    finally:
+        os.close(cur)
 
 
 def remove_tree(path, scratch):
-    """Delete the disposable directory, never following a symlink and never leaving the scratch directory."""
+    """Delete the disposable directory, never following a symlink and never leaving the scratch directory. Raises
+    CleanupIncomplete (carrying the leftover path) unless the directory is gone afterwards: the delete's own errors
+    are collected, not ignored, and the check is a fresh lstat of the root, tolerating only not-found."""
     real = os.path.realpath(path)
     if os.path.islink(path) or os.path.dirname(real) != os.path.realpath(scratch):
         raise RuntimeError("refusing to delete a path that is not a direct child of the scratch directory")
-    open_up(path)
+    problems = open_up(path)
 
-    def fix(func, p, _exc):
-        if func is os.open:  # a directory that could not be opened was handled by open_up; nothing to retry here
+    def fix(func, p, exc):
+        if func is os.open:  # a directory open_up could not open: nothing to retry here, but it is recorded
+            problems.append(f"{os.path.basename(p)}: cannot open for delete ({type(exc[1]).__name__})")
             return
         try:
             os.chmod(os.path.dirname(p), OWNER_ONLY)
             os.chmod(p, OWNER_ONLY)
             func(p)
-        except OSError:
-            pass
+        except OSError as e:
+            problems.append(f"{os.path.basename(p)}: {type(e).__name__}")
 
-    shutil.rmtree(path, onerror=fix)
+    try:
+        shutil.rmtree(path, onerror=fix)
+    except (OSError, RecursionError) as e:
+        problems.append(f"rmtree: {type(e).__name__}")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        problems.append(f"lstat: {type(e).__name__}")
+    raise CleanupIncomplete(path, problems)
 
 
 class Checker:
@@ -1577,12 +1670,15 @@ def main(argv=None):
     code = {"bites": EXIT_BITES, "vacuous": EXIT_VACUOUS}.get(verdict, EXIT_INCONCLUSIVE)
     report["exit_code"] = code
 
+    cleanup_failed = False
     private = state.get("private")
     if private:
         try:
             remove_tree(private, state["private_parent"])
         except Exception as e:  # reported, never hidden
+            cleanup_failed = True
             report["cleanup_error_private"] = f"{type(e).__name__}: {e}"
+            report["private_leftover"] = private
 
     work = state.get("work")
     if work:
@@ -1595,8 +1691,15 @@ def main(argv=None):
                 remove_tree(work, state["scratch"])
                 report["kept"] = False
             except Exception as e:  # leaving a directory behind is reported, never hidden
+                cleanup_failed = True
                 report["kept"] = True
                 report["cleanup_error"] = f"{type(e).__name__}: {e}"
+                report["leftover"] = work
+                print(f"mutation_check: cleanup incomplete, the disposable copy is still at {work}", file=sys.stderr)
+    if cleanup_failed:  # a verdict that claims a deletion that did not happen is not a verdict
+        verdict, code = "inconclusive", EXIT_INCONCLUSIVE
+        report["verdict"], report["exit_code"] = verdict, code
+        report["reason"] = "cleanup incomplete: " + report["reason"]
     for s, handler in saved.items():
         signal.signal(s, handler)
     try:
