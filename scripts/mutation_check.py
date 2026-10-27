@@ -160,6 +160,7 @@ EXIT_BITES, EXIT_VACUOUS, EXIT_INCONCLUSIVE = 0, 2, 3
 SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 TAIL_BYTES = 4000
 MAX_PATCH = 1024 * 1024
+OWNER_ONLY = stat.S_IRWXU  # 0700 by name: the permissions are the owner's alone
 DEFAULT_MAX_SOURCE = 4 * 1024 * 1024 * 1024
 DEFAULT_MAX_COPY = 16 * 1024 * 1024 * 1024
 COPY_MARGIN = 64 * 1024 * 1024
@@ -470,7 +471,7 @@ class Trusted:
         return self.git.out(self.clone, "-c", "core.bare=false", *args, env_extra=envx or self.prepare())
 
 
-def trusted_env(home, tmp):
+def post_test_env(home, tmp):
     """The environment of the tool's own git steps after the test ran: nothing from the test's environment, an empty
     HOME and XDG_CONFIG_HOME the test never sees, no global or system configuration or attributes, and no GIT_*
     variable except these four (the caller adds GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE per step)."""
@@ -563,6 +564,39 @@ def filter_overrides(git, root):
     return opts
 
 
+def gitdir_digest(git, root, budget):
+    """One hash over everything inside the source repository's git directories (the private one of a linked
+    worktree and the common one): every entry's name and type, the content of every file (hooks, reflogs, refs,
+    object files and packs included) and the target of every link. Content counts against the budget, so a repository
+    too large to hash is inconclusive, never skipped."""
+    dirs = []
+    for flag in ("--absolute-git-dir", "--git-common-dir"):
+        code, out = git.out(root, "rev-parse", flag)
+        if code != 0:
+            raise Inconclusive(f"source snapshot: git rev-parse {flag} exited {code}: {git.last_err}")
+        d = os.path.realpath(os.path.join(root, out.decode("utf-8", "surrogateescape").strip()))
+        if d not in dirs:
+            dirs.append(d)
+    h = hashlib.sha256()
+    for top in dirs:
+        stack = [top]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError as e:
+                raise Inconclusive(f"the source git directory is not readable ({type(e).__name__})") from e
+            for e in entries:
+                rel = os.path.relpath(e.path, top)
+                if e.is_dir(follow_symlinks=False):
+                    h.update(b"d\0" + os.fsencode(rel) + b"\0")
+                    stack.append(e.path)
+                else:
+                    h.update(b"f\0" + os.fsencode(rel) + b"\0" + hash_file(e.path, budget).encode() + b"\0")
+    return h.hexdigest()
+
+
 def snapshot(git, root, max_bytes=DEFAULT_MAX_SOURCE):
     """Everything about the source repository the tool promises not to change, as hashes."""
 
@@ -594,6 +628,7 @@ def snapshot(git, root, max_bytes=DEFAULT_MAX_SOURCE):
     for name in ("config", "index"):
         gp = read("rev-parse", "--git-path", name).decode("utf-8", "surrogateescape").strip()
         snap[f"{name}_sha256"] = hash_file(os.path.join(root, gp), budget)
+    snap["gitdir_sha256"] = gitdir_digest(git, root, budget)
     snap["combined_sha256"] = sha256(json.dumps(snap, sort_keys=True).encode())
     return snap
 
@@ -890,16 +925,35 @@ def clean_evidence(trusted):
     }
 
 
+def open_up(path):
+    """Give the owner full access to every directory under `path` (a link is never followed), so a test that took
+    its own permissions away cannot keep the tool from deleting the disposable directory."""
+    stack = [path]
+    while stack:
+        d = stack.pop()
+        try:
+            if stat.S_ISLNK(os.lstat(d).st_mode):
+                continue
+            os.chmod(d, OWNER_ONLY)
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        stack.extend(e.path for e in entries if e.is_dir(follow_symlinks=False))
+
+
 def remove_tree(path, scratch):
     """Delete the disposable directory, never following a symlink and never leaving the scratch directory."""
     real = os.path.realpath(path)
     if os.path.islink(path) or os.path.dirname(real) != os.path.realpath(scratch):
         raise RuntimeError("refusing to delete a path that is not a direct child of the scratch directory")
+    open_up(path)
 
     def fix(func, p, _exc):
+        if func is os.open:  # a directory that could not be opened was handled by open_up; nothing to retry here
+            return
         try:
-            os.chmod(os.path.dirname(p), 0o700)
-            os.chmod(p, 0o700)
+            os.chmod(os.path.dirname(p), OWNER_ONLY)
+            os.chmod(p, OWNER_ONLY)
             func(p)
         except OSError:
             pass
@@ -1020,7 +1074,7 @@ def _delete_pinned(cfd, dev):
     directory (no multi-component path is ever resolved), after refusing any other device."""
     refuse_foreign_device(cfd, dev)
     for _dp, dn, fn, rfd in os.fwalk(".", dir_fd=cfd, topdown=False):
-        os.fchmod(rfd, 0o700)
+        os.fchmod(rfd, OWNER_ONLY)
         for f in fn:
             os.unlink(f, dir_fd=rfd)
         for d in dn:
@@ -1234,17 +1288,22 @@ def check(args, report, state):
     git = Git(git_exe, env, chk.record, wrap, strict=False)
     for d in ("home", "tmp"):
         os.mkdir(os.path.join(private, d), 0o700)
-    tenv = trusted_env(os.path.join(private, "home"), os.path.join(private, "tmp"))
-    report["trusted"] = {"env_keys": sorted(tenv), "private_dir": private, "hide_source": hide_source}
+    post_env = post_test_env(os.path.join(private, "home"), os.path.join(private, "tmp"))
+    report["trusted"] = {"env_keys": sorted(post_env), "private_dir": private, "hide_source": hide_source}
     state["copy_failed"] = True  # cleared once both copies exist; any failure in between deletes the partial copies
     base = os.path.join(private, "base.git")
     # The private object store: a bare copy of the source, made before the test runs, with its own configuration.
-    Git(git_exe, tenv, chk.record, wrap, strict=False).run(
+    Git(git_exe, post_env, chk.record, wrap, strict=False).run(
         private, "clone", "--bare", "--local", "--no-hardlinks", "--", root, base, phase="trusted-base"
     )
     guard = StoreGuard(base, [os.path.join(private, "home"), os.path.join(private, "tmp")])
     trusted = Trusted(
-        Git(git_exe, tenv, chk.record, wrap, strict=True), private, clone, os.path.join(base, "objects"), head, guard
+        Git(git_exe, post_env, chk.record, wrap, strict=True),
+        private,
+        clone,
+        os.path.join(base, "objects"),
+        head,
+        guard,
     )
 
     git.run(work, "clone", "--local", "--no-hardlinks", "--no-checkout", "--", root, clone, phase="clone")

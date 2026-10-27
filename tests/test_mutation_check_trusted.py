@@ -41,15 +41,15 @@ else:
     open('junk.txt', 'w').write('left behind and hidden by the planted ignore file')
 """
 )
-# Overwrite the loose object of the fixed calc.py, in the clone AND in the source repository, with the reverted text;
-# plant a replace ref and a grafts file too.
-TAMPER_SRC = (
+# Overwrite the loose object of the fixed calc.py, in the clone AND (@BASES@) in the source repository, with the
+# reverted text; plant a replace ref and a grafts file too.
+TAMPER_TEMPLATE = (
     TEST_SRC
     + r"""import hashlib, zlib
 good = b'def f():\n    return 2\n'
 bad = b'def f():\n    return 1\n'
 sha = hashlib.sha1(b'blob %d\0' % len(good) + good).hexdigest()
-for base in ('.git', '@SRC@/.git'):
+for base in @BASES@:
     obj = base + '/objects/' + sha[:2] + '/' + sha[2:]
     if os.path.exists(obj):
         os.chmod(obj, 0o644)
@@ -59,6 +59,8 @@ open('.git/refs/replace/' + sha, 'w').write(hashlib.sha1(b'blob 1\0x').hexdigest
 open('.git/info/grafts', 'w').write('0' * 40 + '\n')
 """
 )
+TAMPER_SRC = TAMPER_TEMPLATE.replace("@BASES@", "('.git',)")  # the clone only: the verdict is still a bite
+TAMPER_SOURCE_TOO = TAMPER_TEMPLATE.replace("@BASES@", "('.git', '@SRC@/.git')")  # the source gitdir is hashed too
 # Plant the predictable names an earlier version used for the trusted git directories and index files.
 PLANT_SRC = (
     TEST_SRC
@@ -130,6 +132,12 @@ class TrustedBoundary(Base):
         code, r = self.run_tool(repo, c2, c2)
         self.assertEqual((code, r["verdict"]), (0, "bites"), r["reason"])
         self.assertTrue(r["tree_clean"]["clean"])
+
+    def test_an_object_overwritten_in_the_source_repository_is_inconclusive(self):
+        repo, _, c2 = self.make_repo(check_src=TAMPER_SOURCE_TOO)
+        code, r = self.run_tool(repo, c2, c2)
+        self.assertEqual((code, r["verdict"]), (3, "inconclusive"), r["reason"])
+        self.assertIn("source repository changed", r["reason"])
 
     def test_predictable_trusted_names_planted_by_the_test_are_never_used(self):
         repo, _, c2 = self.make_repo(check_src=PLANT_SRC)

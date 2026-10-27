@@ -376,7 +376,8 @@ class Confinement(Base):
         p = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo=-dashrepo", f"--head={c2}", f"--revert={c2}", "--test", TEST_CMD]
             + ["--private-parent", str(self.tmp / "priv")]
-            + ["--scratch", str(self.scratch)],
+            + ["--scratch", str(self.scratch)]
+            + ([] if host_has_pid_namespace() else ["--allow-degraded-isolation"]),
             cwd=self.tmp,
             capture_output=True,
             text=True,
