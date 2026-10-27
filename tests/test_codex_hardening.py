@@ -183,7 +183,7 @@ class PreviewProvenance(unittest.TestCase):
                 self.assertIn("public", line)
                 self.assertIn(f"sha256 {digest}", line)
 
-    def test_overlay_sourced_files_are_labelled_overlay_with_their_digest(self):
+    def test_overlay_sourced_files_are_labeled_overlay_with_their_digest(self):
         with tempfile.TemporaryDirectory() as d:
             ov = Path(d) / "ov"
             (ov / "roles").mkdir(parents=True)

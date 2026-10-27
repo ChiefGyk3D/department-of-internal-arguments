@@ -81,7 +81,7 @@ ADDITIONS_NOTE = (
 
 
 def additions_section(additions):
-    """The only way private overlay text reaches a public persona: appended, labelled, never replacing."""
+    """The only way private overlay text reaches a public persona: appended, labeled, never replacing."""
     return f"\n{ADDITIONS_HEADING}\n\n{ADDITIONS_NOTE}\n\n{additions.strip()}\n"
 
 

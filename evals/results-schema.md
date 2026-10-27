@@ -43,7 +43,7 @@ Every model label also passes the identifier sweep below (local tags are checked
 
 ## The matrix
 
-Columns are client and model, in client order; a local model that ran with different quantization or context gets its own column, labelled with both. Each cell is the latest record by `date` (a later line wins a tie). A cell with no record is `not run`, never blank and never a pass. A case that does not apply to a client is `n/a`. A measured result whose `persona_hash` differs from the current checkout is marked `(stale)`: the prompt it measured is gone, so it proves nothing about the current text. Text echoed into the table is escaped.
+Columns are client and model, in client order; a local model that ran with different quantization or context gets its own column, labeled with both. Each cell is the latest record by `date` (a later line wins a tie). A cell with no record is `not run`, never blank and never a pass. A case that does not apply to a client is `n/a`. A measured result whose `persona_hash` differs from the current checkout is marked `(stale)`: the prompt it measured is gone, so it proves nothing about the current text. Text echoed into the table is escaped.
 
 `persona_hash` covers `roles/`, `policies/`, `packs/` and `fragments/` (path and bytes of every file). It does not cover `templates/`, `scripts/lib.py` (which pins the model ids and tool names the generator writes), the generator itself or the installer, so a change there does not mark results stale; re-run the cases that depend on it by hand.
 

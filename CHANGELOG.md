@@ -13,6 +13,41 @@
 - Round 4 (CI and automated review): the before/after check of the source repository now also hashes everything inside its git directories (hooks, reflogs, refs, object files, packs; the common directory of a linked worktree too) under `--max-source-bytes`, so a write there makes the run `inconclusive`. Removing the disposable directories now also works when a test took the permissions off a subdirectory (a `TypeError` used to leave the private directory behind). Owner-only modes are named (`stat.S_IRWXU`) and the post-test git environment is built by `post_test_env`. New: `tests/test_mutation_check_round4.py`.
 - `tests/test_mutation_check.py`, `tests/test_mutation_check_confinement.py`, `tests/test_mutation_check_trusted.py`: verdicts, exit codes and each confinement promise, each with a case that proves the guard bites.
 
+Benchmark corpus and scoring rubric (issue #47, unit 1 of #3). No model is run and nothing is spent.
+
+- `evals/benchmark/corpus.json`: seven tasks and 19 labeled findings from this repository's own history (the Codex adapter #30, the local-model rule #26 and its follow-ups #28 and #34, the lead persona installer #35), each with a base commit, the defect-introducing head, the fixing commit where there is one, the known finding by class and its expected evidence. A brief-writing task is its own role column (`brief-writer`), scored on the gaps the reviews of #35 found. Every finding was shown to reproduce against the history by a probe or a pattern check; five candidate seeds were dropped and are recorded with the reason. Private seeds are not included.
+- `scripts/benchmark.py`: `--check` (corpus well formed; commits and diffs resolve with local tools only, `not-run` without a full clone), `--reproduce` (re-proves each seed), `--score RESULTS.jsonl` (recall, precision, false findings, fix rounds avoided, wall clock, tokens, refusals per role and model; rejects a family name for an exact model id and a missing client version or cost). Read-only; never touches `policies/model-routing.md`. `scripts/validate.py` checks the corpus structure.
+- `evals/benchmark-schema.md`, a section in `docs/evals-and-measurements.md`, `tests/test_benchmark.py`.
+
+Round 4 of the review of the benchmark corpus (issue #47):
+
+- Precision is matched over everything reported: duplicates count as reported and not as matched, so fifty copies of one valid finding score 2%, not 100%.
+- A record's commit must be the full 40-character id and, by default, must exist in `--repo`; `--skip-commit-check` skips the lookup and the output is headed `commits: NOT VERIFIED`.
+- Hostile corpus input is confined: corpus paths are relative with no `..`, absolute, NUL or pathspec-magic form; `confine()` refuses symlinks and requires the real path to stay in the root (probe, mutation target, brief input); a probe and `tests_file` are plain `.py` names.
+- Every child process runs in its own session and the whole group is killed on a timeout, an error or an interrupt (a grandchild no longer survives); output is capped; git output over the cap is an error. The tests start real grandchildren that would write a marker file after the timeout and assert it never appears.
+- Resource bounds: caps on the corpus and each result line and file, `git archive` streamed with caps on stream, files, member and expanded size, nesting depth made an ordinary error, corpus patterns checked for exponential backtracking at load, and every match under a 2 s limit.
+- American spelling: the double-l British forms of label and its relatives are fixed everywhere, and the spelling guard now catches them (and a few more British forms of analyze, program and fulfill); `SECURITY.md` is scanned too.
+- `--reproduce` prints the git version; the git tests state that they do not depend on the local git configuration.
+
+Round 3 of the review of the benchmark corpus (issue #47):
+
+- `diff_sha256` no longer depends on git attributes: the diff is computed between the two commit objects in a temporary bare repository with no configuration, no `info/attributes` and no working tree (objects borrowed through alternates), with `core.attributesFile` at the null device and `GIT_ATTR_NOSYSTEM=1`. A `-diff` or `binary` attribute, a diff driver selected by an attribute, and a `.gitattributes` in the working tree or index, no longer change it. The existing digests are unchanged.
+- The rubric no longer overstates its controls: they stop accidental or label-only echoing, not a report that copies the public corpus (a test names that a known limit and shows it). A scored run must not show the model `corpus.json`, and a result record needs `corpus_hidden: true` or it is refused.
+- `followups-for-27/version-tag-rejected` is relabeled `in_diff` (its quote is a line the diff adds), making 10 `in_diff`, 6 `pre_existing` and 3 brief findings; `--check` now applies the added-line test to every `pre_existing` finding whatever `at_base` says. `lead-list-fs-error` is shown to be observed at its base commit. `at_base: n/a` now means only that the reproduction cannot run at the base.
+- The matching tie-break, the `--no-ext-diff`, `--no-textconv` and `--full-index` pins, `core.quotePath`, the clone check, the subprocess timeouts, and the `--reproduce` exit code without a clone are now each held by a test. Distinct evidence hits must be on different, non-overlapping text; invisible and default-ignorable characters and non-ASCII spaces are rejected in text fields; a record dated more than a day ahead (UTC) is refused.
+- Documented: `--reproduce` runs pinned history unsandboxed as the invoking user (with a `bwrap` wrapper for untrusted pull-request heads); a note in `SECURITY.md`.
+
+Round 2 of the review of the benchmark corpus (issue #47):
+
+- Matching is a deterministic maximum bipartite assignment (augmenting paths, canonical report order), so the score no longer depends on the order of the report when evidence patterns overlap (the rubric text said it did not; the greedy version did).
+- The evidence match is stated as a keyword heuristic that cannot detect gaming, and is tightened: patterns carry word boundaries, at least two distinct patterns must hit (`evidence_min` lowers it per finding), and on a diff task the evidence must contain a verbatim code line from the head checkout (`quotes`, verified by `--check`). A test builds a report from the label alone and asserts it scores zero recall on every diff task.
+- `diff_sha256` no longer depends on the user's git configuration: every output-changing diff option is pinned on the command line and in `-c`, global and system configuration are not read, and `GIT_*` variables of the caller are dropped. The existing digests are unchanged. A mismatch message names both causes (rewritten history, or a different git version or configuration).
+- Every finding has a `scope` (`in_diff`, `pre_existing`, `brief`); `--check` verifies an `in_diff` finding touches a line of the diff and a finding absent at the base does not have its quote on an added line; the schema says the reviewer gets a checkout at `head` plus the diff; the table reports recall per scope.
+- The test-gap findings are reproduced by the real mutation (a change applied to a copy of the head, unit tests run, expected to stay green); `lead-lost-update` has a probe that races an in-place edit; the one absence-only repro is marked `proxy`.
+- `exact_model_id` rejects `:latest` tags and a bare vendor and major (`claude-3`, `gpt-5`); the `lead_list` probe fails on a crash instead of confirming a finding.
+- Result records: calendar-valid dates, a 40-character commit or a resolvable abbreviation, bounded tokens, seconds, cost, context and run, no control or invisible characters in text fields, a duplicate JSON key is an error, and client versions are separate rows.
+- Historical trees are extracted by a hand-written `_write_member()` with a confined path and no links, devices or special members; no `TarFile.extract` and no `tarfile` filter is used.
+
 Tier-to-model pins exported as a generated, drift-checked file (issue #53, unit 1 of the cross-repository model-tier epic). No pin changed.
 
 - `export/model-pins.json`: schema 1, the release, each tier's exact model id, family and roles, each role's tier, and the ordered report-header field names. Sorted keys, two-space indent, ASCII, trailing newline.

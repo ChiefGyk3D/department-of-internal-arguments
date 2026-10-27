@@ -5,6 +5,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+from benchmark import corpus_errors, load_corpus
 from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
 from export_models import EXPORT_PATH, ModelPinsError, read_pins
 from generate import ADDITIONS_HEADING, drift
@@ -370,6 +371,17 @@ def validate(root=ROOT):
         errors.extend(export_errors(root))
 
         # docs/ is mirrored to the wiki; the privacy sweep and link check below already walk it.
+        bench = root / "evals/benchmark"
+        if (bench / "corpus.json").is_file():
+            try:
+                errors.extend(
+                    f"benchmark corpus: {e}"
+                    for e in corpus_errors(load_corpus(bench / "corpus.json"), True, bench / "probes", bench)
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"benchmark corpus: unreadable ({exc})")
+        else:
+            errors.append("evals/benchmark/corpus.json is missing")
         require((root / "docs/home.md").is_file(), "docs/home.md is missing: it becomes the wiki Home page")
 
         # Local Markdown links must resolve (URLs and anchors excluded).
