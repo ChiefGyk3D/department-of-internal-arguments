@@ -1346,6 +1346,69 @@ class InstallRoots(StateCase):
                     call()
         self.assertEqual(os.listdir(self.root_a), [])
 
+    # --- case-insensitive filesystem aliases (Codex review of PR #60, pass 2) ---------------------------------------
+    # The host here is case-sensitive, so the tests emulate a case-insensitive, case-preserving filesystem through the
+    # _identity seam: it answers for a differently cased spelling as the filesystem would, with the same (dev, ino).
+
+    @contextlib.contextmanager
+    def _case_insensitive(self, **folds):
+        real = getattr(state, "_identity", None) or (lambda p: (os.stat(p).st_dev, os.stat(p).st_ino))
+
+        def fake(path):
+            text = os.fspath(path)
+            for cased, on_disk in folds.items():
+                text = text.replace("/" + cased, "/" + on_disk)
+            return real(text)
+
+        with mock.patch.object(state, "_identity", fake, create=True):
+            yield
+
+    def test_a_differently_cased_spelling_of_an_install_root_is_refused(self):
+        with self._case_insensitive(**{".CODEX": ".codex"}):
+            for spelling in ("state", "a/b/c"):
+                with self.subTest(spelling=spelling):
+                    inside = self.home / ".CODEX" / spelling
+                    with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(inside)}):
+                        for call in (
+                            lambda: state.load(self.home, "user", roots=self.roots),
+                            lambda: state.Store(self.home, "user", roots=self.roots),
+                        ):
+                            with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                                call()
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.home / ".CODEX")}):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(os.listdir(self.root_b), [])
+
+    def test_a_cased_spelling_of_a_directory_that_contains_a_root_is_refused(self):
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME")}):
+                with self.assertRaisesRegex(state.StateError, "contains an install root"):
+                    state.load(self.home, "user", roots=self.roots)
+
+    def test_a_root_that_does_not_exist_yet_is_matched_through_its_existing_parent_by_case(self):
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME" / ".AGENTS" / "s")}):
+                with self.assertRaisesRegex(state.StateError, "inside an install root"):
+                    state.load(self.home, "user", roots=[self.home / ".agents"])
+
+    def test_a_cased_spelling_of_the_nominal_target_still_gets_the_private_chain_walk(self):
+        seen = []
+        with self._case_insensitive(HOME="home"):
+            with mock.patch.object(state, "_check_private_chain", lambda nominal, rel: seen.append((nominal, rel))):
+                with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "HOME" / "s" / "t")}):
+                    state.load(self.home, "user", roots=self.roots)
+        self.assertEqual(set(seen), {(Path(os.path.realpath(self.home)), ("s", "t"))})
+
+    def test_unrelated_names_that_differ_only_by_what_the_filesystem_keeps_apart_are_not_refused(self):
+        with self._case_insensitive(**{".CODEX": ".codex"}):
+            with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.tmp / "elsewhere" / "state")}):
+                self.assertIsNone(state.load(self.home, "user", roots=self.roots))
+
+    def test_the_identity_seam_is_not_reachable_from_the_environment(self):
+        self.assertNotIn("_identity", [k for k in os.environ])
+        self.assertEqual(state._identity(self.home), (os.stat(self.home).st_dev, os.stat(self.home).st_ino))
+
     def test_a_state_directory_equal_to_a_root_is_refused(self):
         with mock.patch.dict(os.environ, {"DOIA_STATE_DIR": str(self.root_b)}):
             with self.assertRaisesRegex(state.StateError, "inside an install root"):
@@ -2931,6 +2994,18 @@ MUTANTS = [
         "            elif False:",
         "InstallRoots.test_a_target_or_parent_owned_by_another_account_is_refused",
     ),
+    (
+        "identity containment",
+        "        if cid == pid:\n",
+        "        if False:\n",
+        "InstallRoots.test_a_differently_cased_spelling_of_an_install_root_is_refused",
+    ),
+    (
+        "identity nominal chain",
+        "            if rel is not None:\n                _check_private_chain(real_nominal, rel)",
+        "            if False:\n                _check_private_chain(real_nominal, rel)",
+        "InstallRoots.test_a_cased_spelling_of_the_nominal_target_still_gets_the_private_chain_walk",
+    ),
 ]
 
 
@@ -2939,7 +3014,7 @@ MUTANTS = [
 HANG_ROWS = {"lock nonblocking", "lock_held shared nonblocking", "O_NONBLOCK read open"}
 
 
-EXPECTED_ROWS = 107
+EXPECTED_ROWS = 109
 
 
 class LooseModeConstants(unittest.TestCase):

@@ -203,8 +203,61 @@ def state_dir():
     return Path(os.path.normpath(base))
 
 
+def _identity(path):
+    """(st_dev, st_ino) of what `path` names, or OSError when it does not exist. A seam: tests inject the answers of a
+    case-insensitive filesystem. Not reachable from the environment or the command line."""
+    st = os.stat(path)
+    return (st.st_dev, st.st_ino)
+
+
+def _anchor(path):
+    """(identity of the deepest EXISTING ancestor of path, the names below it). Identity is None when nothing exists."""
+    names = []
+    cur = Path(path)
+    while True:
+        try:
+            return _identity(cur), tuple(reversed(names))
+        except OSError:
+            if cur.parent == cur:
+                return None, tuple(reversed(names))
+            names.append(cur.name)
+            cur = cur.parent
+
+
+def _below(path, parent):
+    """The names of `path` below `parent` (a tuple, empty when they are the same place), or None when it is not inside.
+
+    Two tests. Textual: the path text says so. Identity: a case-insensitive, case-preserving filesystem lets a
+    differently cased spelling name the same directory, so the ancestors of `path` are compared with the deepest
+    existing ancestor of `parent` by (st_dev, st_ino); names that do not exist yet are compared case-folded (refusing
+    on a case-sensitive filesystem a name that differs only by case is the safe error)."""
+    if path == parent:
+        return ()
+    if parent in path.parents:
+        return path.relative_to(parent).parts
+    pid, psuffix = _anchor(parent)
+    if pid is None:
+        return None
+    names = []
+    cur = path
+    while True:
+        try:
+            cid = _identity(cur)
+        except OSError:
+            cid = None
+        if cid == pid:
+            below = tuple(reversed(names))
+            n = len(psuffix)
+            if tuple(x.casefold() for x in below[:n]) == tuple(x.casefold() for x in psuffix):
+                return below[n:]
+        if cur.parent == cur:
+            return None
+        names.append(cur.name)
+        cur = cur.parent
+
+
 def _inside(path, parent):
-    return path == parent or parent in path.parents
+    return _below(path, parent) is not None
 
 
 def _real_path(target):
@@ -243,14 +296,13 @@ def _chain_stat(fd):
     return os.fstat(fd)
 
 
-def _check_private_chain(nominal, cand):
+def _check_private_chain(nominal, rel):
     """A state directory inside the nominal target is trusted only when nobody else can write on the way to it.
 
     Whoever can write a directory on the path from the target down to the state directory could plant a valid-looking
     state file there and make their own marked files read as owned. So the target, every directory below it down to
     the state directory (those that exist; the rest are created 0700 by this user) must be a real directory (no link
     followed), owned by the current user and not group or world writable. Sticky does not excuse a writable one."""
-    rel = cand.relative_to(nominal).parts
     path = Path(nominal)
     try:
         fd = os.open(str(nominal), _DIR_FLAGS)
@@ -324,8 +376,9 @@ def _check_location(target, directory=None):
         real_nominal = Path(_real_path(nominal))
         effective = Path(os.path.realpath(directory.parent)) / directory.name
         for cand in (real, effective, directory):
-            if _inside(cand, real_nominal):
-                _check_private_chain(real_nominal, cand)
+            rel = _below(cand, real_nominal)
+            if rel is not None:
+                _check_private_chain(real_nominal, rel)
 
 
 def state_key(target, layout):
