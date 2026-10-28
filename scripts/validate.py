@@ -367,7 +367,7 @@ def brief_errors(root):
     errors = []
     keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m]
     if set(keys) != set(data["brief_keys"]):
-        errors.append(f"{rel}: its key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
+        errors.append(f"{rel}: key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
     pins = {t["model"] for t in data["tiers"].values()} | {t["family"] for t in data["tiers"].values()}
     allowed = {"role": set(data["roles"]), "model": pins}
     for key in BRIEF_KEYS:
@@ -377,9 +377,7 @@ def brief_errors(root):
             continue
         value = mine[0][len(key) + 1 :]
         if not value.startswith(" ") or value[1:] not in allowed[key]:
-            errors.append(
-                f"{rel}: `{key}:` must be `{key}: <one value>` with a value from the export (no `|`, no comma, not empty)"
-            )
+            errors.append(f"{rel}: `{key}:` must be one value from the export (no `|`, no comma, not empty)")
     return errors
 
 
