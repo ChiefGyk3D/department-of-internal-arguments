@@ -486,6 +486,40 @@ class LeadOwnership(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("also a role file", err)
 
+    def test_a_file_entry_at_the_path_does_not_make_a_block_owned_in_the_listing(self):
+        self.file.write_text(self.forged())
+        entry = {
+            "kind": "file",
+            "release": installer.version(),
+            "source": "public",
+            "body_sha256": installer.statestore.body_sha256(self.OLD_BODY.encode()),
+        }
+        with installer.statestore.Store(self.target, "project") as store:
+            store.save(installer.statestore.with_entry({}, "CLAUDE.md", entry))
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3)
+        self.assertRegex(out, r"unverified\s+0\.0\.1\s+public\s+CLAUDE\.md")
+
+    def test_a_lead_entry_holding_a_role_files_digest_does_not_make_that_file_owned(self):
+        rel = ".claude/agents/reviewer.md"
+        base = ["--target", str(self.target), "--adapter", "claude"]
+        self.assertEqual(run_main(*base, "--apply")[0], 0)
+        path = self.target / rel
+        path.write_text(path.read_text().replace(f"(release {installer.version()})", "(release 0.0.1)", 1))
+        state_fixture.record(self.target, rel, layout="project", roots=None)  # recorded as an older install
+        raw = path.read_bytes()
+        self.assertEqual(run_main(*base, "--update")[0], 0)  # owned: a file entry vouches for it
+        path.write_bytes(raw)
+        entries = state_fixture.entries_of(self.target, "project")
+        entries[rel]["kind"] = "lead"  # same digest, wrong kind
+        with installer.statestore.Store(self.target, "project") as store:
+            store.save(entries)
+        code, _o, err = run_main(*base, "--update", "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("unverified files refused", err)
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertRegex(run_main("--target", str(self.target), "--list-managed")[1], r"unverified\s+0\.0\.1")
+
     def test_a_pending_only_lead_entry_is_not_owned(self):
         self.file.write_text(self.forged())
         digest = installer.statestore.body_sha256(self.OLD_BODY.encode())
