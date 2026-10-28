@@ -31,8 +31,9 @@ unreadable, invalid, locked or in a forbidden place, nothing is written, --force
 --list-managed write nothing, not even the state directory. The state directory may not be inside, equal to or contain
 an install root (the directories the installer writes into: for --layout user the per-client directories such as
 ~/.claude, ~/.codex and ~/.agents), so ~/.local/state is fine with --layout user and --adapter codex on your home
-directory. A crash between the phases leaves the new files unverified. The lead block (--lead) is still decided by its
-own hash, as before.
+directory. A crash between the phases leaves the new files unverified. The lead block (--lead) follows the same rule
+through a state entry of kind "lead", keyed by the instruction file's relative path and holding the digest of the block
+body: a block whose begin line hashes its body but has no entry is "unverified" and handled like an unverified file.
 
 --overlay DIR is a private directory outside this repository (roles/, packs/; see scripts/overlay.py). An overlay
 entry with a public name is append-only (the public file unchanged, then a labeled additions section); a new name is
@@ -42,8 +43,9 @@ generator marker with the word "overlay" and the file's own name, never a path.
 --lead FILE (a path under the target, e.g. CLAUDE.md or AGENTS.md) installs templates/lead.md, which is not an agent
 file, into that instruction file as a marked block: a begin line carrying the release and the sha256 of the block body,
 the text, an end line. The file is created if absent; otherwise the block is appended and nothing else in the file is
-touched. A re-run with the same text is a no-op; --update replaces a block whose hash still matches; a block you edited
-is refused (--force-edited with --update discards your edits to the block only); a malformed block is refused.
+touched. A re-run with the same text is a no-op that needs no --update (--apply records it); --update replaces a block
+the state entry vouches for; a block with no entry (unverified) or one that differs from its entry (edited) is refused,
+and --force-edited with --update replaces the block only, never the text around it; a malformed block is refused.
 
 --list-managed is read-only: it lists files under the target that carry the marker with their release and whether
 they match this checkout (exit 0 when all are current, 3 otherwise), then a state: line. Without a usable state file
@@ -135,6 +137,26 @@ def lead_inspect(text):
     return state, m.group(1), start, stop
 
 
+def lead_digest(block):
+    """The state-store digest of a block's body: sha256 of the text between the two marker lines, with LF endings (so
+    an editor's CRLF conversion does not change it). `block` is the whole block, both marker lines included."""
+    lines = block.splitlines(keepends=True)
+    body = "".join(lines[1:-1]).replace("\r\n", "\n")
+    return statestore.body_sha256(body.encode("utf-8"))
+
+
+def _lead_owner(entries, rel, block):
+    """(ownership, entry) for a block whose marker is consistent: owned (a lead entry for this path accepts the body
+    digest) | edited (the entry holds a digest and the body differs) | unverified (no usable entry, or one of another
+    kind). `entries` None (no state file or none usable) owns nothing."""
+    entry = (entries or {}).get(rel)
+    if type(entry) is not dict or entry.get("kind") != "lead":
+        return "unverified", None
+    if statestore.verdict(entries, rel, lead_digest(block)) == "owned":
+        return "owned", entry
+    return ("edited" if "body_sha256" in entry else "unverified"), entry
+
+
 def _same_block(found, block):
     """True if the block found in a file is the one this release writes, ignoring CRLF and a missing last newline."""
     return found.replace("\r\n", "\n").rstrip("\n") == block.rstrip("\n")
@@ -147,11 +169,18 @@ def _lead_path(target, lead):
     return Path(target) / rel
 
 
-def _lead_item(target, lead, root, update, force_edited):
-    """The one plan row for the lead block: (source, dest, action, bytes of the whole file, sha of old file, False)."""
+def _lead_item(target, lead, root, update, force_edited, entries=None):
+    """The one plan row for the lead block: (source, dest, action, bytes of the whole file, sha of old file, False).
+
+    Ownership comes from the state entry for this file's relative path (kind lead, digest of the block body), never
+    from the begin line's own hash: a block that hashes correctly but has no entry is unverified."""
     dest = _lead_path(target, lead)
     ensure_safe(dest)
     assert_outside_repo(dest, root)
+    rel = str(dest.relative_to(target))
+    held = (entries or {}).get(rel)
+    if type(held) is dict and held.get("kind") != "lead":
+        raise ValueError(f"the ownership state records a different kind of entry for this path: {rel}")
     block = lead_block(root)
     src = Path(root) / "templates/lead.md"
     if not (dest.exists() or dest.is_symlink()):
@@ -180,7 +209,12 @@ def _lead_item(target, lead, root, update, force_edited):
             raise ValueError(f"malformed lead block; fix it by hand: {dest.relative_to(target)}")
         return src, dest, "edited", raw, seen, False
     if _same_block(text[start:stop], block):
-        return src, dest, "unchanged", raw, seen, False
+        return src, dest, "unchanged", raw, seen, False  # equal to this release's own text: recorded on --apply
+    owner, _entry = _lead_owner(entries, rel, text[start:stop])
+    if owner != "owned":
+        if force_edited and update:
+            return src, dest, "forced", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
+        return src, dest, owner, raw, seen, False
     if not update:
         raise ValueError(f"lead block differs from this release; use --update: {dest.relative_to(target)}")
     return src, dest, "update", (text[:start] + ours + text[stop:]).encode("utf-8"), seen, False
@@ -426,8 +460,9 @@ class _Plan(list):
     layout = None
     roots = None
     entries = None  # the state entries the plan was decided against; _apply refuses if they changed
-    rel_of = None  # destination Path -> relative path recorded in the state (the lead block has none)
+    rel_of = None  # destination Path -> relative path recorded in the state (the lead file included)
     release = None
+    lead = None  # (destination Path, digest of the block body this release writes) or None
 
 
 def _read_state(target, layout, roots):
@@ -444,6 +479,14 @@ def _read_state(target, layout, roots):
         raise ValueError(f"ownership state refused: {exc}{hint}") from None
 
 
+def _file_verdict(entries, rel, digest):
+    """owned | unverified for a role file: the entry must be of kind file (a lead record does not vouch for a file)."""
+    entry = (entries or {}).get(rel)
+    if type(entry) is dict and entry.get("kind") != "file":
+        return "unverified"
+    return statestore.verdict(entries, rel, digest)
+
+
 def _ownership(dest, rel, data, entries):
     """(state, bytes on disk) for an existing destination; the state decides what may be done with it.
 
@@ -455,13 +498,14 @@ def _ownership(dest, rel, data, entries):
         return "none", existing
     if existing == data:
         return "owned", existing  # verified against this checkout's own sources, not against the marker
-    if marker in ("owned", "legacy") and statestore.verdict(entries, rel, statestore.body_sha256(existing)) == "owned":
+    if marker in ("owned", "legacy") and _file_verdict(entries, rel, statestore.body_sha256(existing)) == "owned":
         return "owned", existing
     if marker == "legacy":
         return "legacy", existing
     if marker == "owned":
         entry = entries.get(rel)
-        return ("edited" if type(entry) is dict and "body_sha256" in entry else "unverified"), existing
+        recorded = type(entry) is dict and entry.get("kind") == "file" and "body_sha256" in entry
+        return ("edited" if recorded else "unverified"), existing
     return marker, existing  # edited | legacy-unverified
 
 
@@ -510,7 +554,17 @@ def _plan(
         items.append((src, dest, action, data, seen, origin == "overlay"))
         items.rel_of[dest] = rel
     if lead is not None:
-        items.append(_lead_item(target, lead, root, update, force_edited))
+        item = _lead_item(target, lead, root, update, force_edited, entries)
+        lead_rel = str(item[1].relative_to(target))
+        if lead_rel in {rel for _s, rel, _d, _o in rows}:
+            raise ValueError(f"--lead names a path that is also a role file: {lead_rel}")
+        try:
+            statestore.check_rel_path(lead_rel)
+        except statestore.StateError as exc:
+            raise ValueError(f"--lead path cannot be recorded in the ownership state: {exc}") from None
+        items.append(item)
+        items.rel_of[item[1]] = lead_rel
+        items.lead = (item[1], lead_digest(lead_block(root)))
     return items
 
 
@@ -687,8 +741,8 @@ def _gone(target, rel):
     return False
 
 
-def _entry_for(release, private, digest):
-    return {"kind": "file", "release": release, "source": "overlay" if private else "public", "body_sha256": digest}
+def _entry_for(release, private, digest, kind="file"):
+    return {"kind": kind, "release": release, "source": "overlay" if private else "public", "body_sha256": digest}
 
 
 def _apply(items, root=ROOT):
@@ -714,29 +768,39 @@ def _apply(items, root=ROOT):
         if entries != items.entries:
             raise ValueError("the ownership state changed since the plan was made; re-run")
         release, rel_of = items.release, items.rel_of
+        lead_dest, lead_sha = items.lead or (None, None)
+
+        def digest_of(dest, data):
+            """What the state records: the whole file for a role file, the block body for the lead block (the text
+            around the block is the user's and never enters the record)."""
+            return lead_sha if dest == lead_dest else statestore.body_sha256(data)
+
+        def kind_of(dest):
+            return "lead" if dest == lead_dest else "file"
+
         cur = {rel: e for rel, e in entries.items() if not _gone(items.target, rel)}
         pending, new, info = {}, {}, {}
         for _src, dest, action, data, _seen, private in items:
             rel = rel_of.get(dest)
             if rel is None or action == "unchanged":
                 continue
-            digest = statestore.body_sha256(data)
+            digest = digest_of(dest, data)
             info[rel] = "overlay" if private else "public"
             if rel in cur:
                 pending[rel] = digest
             else:
-                new[rel] = {"kind": "file", "release": release, "source": info[rel], "pending_sha256": digest}
+                new[rel] = {"kind": kind_of(dest), "release": release, "source": info[rel], "pending_sha256": digest}
         phase1 = statestore.with_pending(cur, pending, new=new)
         for _src, dest, action, data, _seen, private in items:
             rel = rel_of.get(dest)
             if rel is None or action != "unchanged":
                 continue
-            digest = statestore.body_sha256(data)
+            digest = digest_of(dest, data)
             # Record a file that already holds this release's bytes. That also finishes an update that a crash
             # interrupted after the write: there the entry still shows the old digest next to the pending one.
             held = phase1.get(rel)
             if type(held) is not dict or held.get("body_sha256") != digest:
-                phase1 = statestore.with_entry(phase1, rel, _entry_for(release, private, digest))
+                phase1 = statestore.with_entry(phase1, rel, _entry_for(release, private, digest, kind_of(dest)))
         on_disk = entries
         if phase1 != on_disk:
             store.save(phase1)
@@ -853,8 +917,8 @@ def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
         recorded = (entries or {}).get(rel)
         if marker in ("edited", "legacy-unverified"):
             status = marker
-        elif marker == "owned" and statestore.verdict(entries, rel, statestore.body_sha256(data)) != "owned":
-            has_digest = type(recorded) is dict and "body_sha256" in recorded
+        elif marker == "owned" and _file_verdict(entries, rel, statestore.body_sha256(data)) != "owned":
+            has_digest = type(recorded) is dict and recorded.get("kind") == "file" and "body_sha256" in recorded
             status = "edited" if has_digest else "unverified"
         elif source == "overlay" and ov is None:
             status = "unchecked"
@@ -866,13 +930,14 @@ def list_managed(target, layout="project", overlay=None, root=ROOT, lead=None):
             status = "differs" if release == ver else "stale"
         rows.append({"path": rel, "release": release, "source": source, "status": status})
     if lead is not None:  # an explicitly named file always gets a row, so it can never read as clean by omission
-        rows.append(_lead_row(target, lead, root))
+        rows.append(_lead_row(target, lead, root, entries))
     return rows
 
 
-def _lead_row(target, lead, root):
-    """The row for the file named by --lead: current | stale | differs | edited, or missing (no file, or no block in
-    it) | unsafe (a symlink, not a regular file, over 1 MiB, not UTF-8, unreadable). Anything but current exits 3."""
+def _lead_row(target, lead, root, entries=None):
+    """The row for the file named by --lead: current | stale | differs | edited | unverified (a consistent block with no
+    state entry, or no usable state), or missing (no file, or no block in it) | unsafe (a symlink, not a regular file,
+    over 1 MiB, not UTF-8, unreadable). Anything but current exits 3."""
     dest = _lead_path(target, lead)
     rel = str(dest.relative_to(target))
 
@@ -904,6 +969,9 @@ def _lead_row(target, lead, root):
         return row("missing")
     if state == "edited":
         return row("edited", release or "unknown")
+    owner, _entry = _lead_owner(entries, str(dest.relative_to(target)), text[start:stop])
+    if owner != "owned":
+        return row(owner, release)
     if _same_block(text[start:stop], lead_block(root)):
         return row("current", release)
     return row("stale" if release != version(root) else "differs", release)

@@ -80,3 +80,18 @@ def rewrite(target, rel, text, layout="user", roots=None):
 def entries_of(target, layout="user", roots=None):
     roots = [Path(target)] if roots is None else roots
     return state.load(target, layout, roots=roots)
+
+
+def record_lead(target, rel, body, layout="project", roots=None):
+    """Record a lead block as installed: kind lead, keyed by the instruction file's path, holding the digest of the
+    block body (LF endings). The test models an older install of that block."""
+    target = Path(target)
+    entry = {
+        "kind": "lead",
+        "release": _release(),
+        "source": "public",
+        "body_sha256": state.body_sha256(body.replace("\r\n", "\n").encode("utf-8")),
+    }
+    with state.Store(target, layout, roots=roots) as store:
+        entries = store.load() or {}
+        store.save(state.with_entry(entries, rel, entry))

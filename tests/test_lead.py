@@ -127,6 +127,7 @@ class LeadInstall(unittest.TestCase):
         begin = f"<!-- doia-lead:begin release 0.0.1 sha256:{installer.body_sha256(body)} -->\n"
         stale = "before\n" + begin + body + installer.LEAD_END + "\nafter\n"
         self.file.write_text(stale)
+        state_fixture.record_lead(self.target, "CLAUDE.md", body)  # an older install of this block
         code, _out, err = self.lead()
         self.assertEqual(code, 1)
         self.assertIn("lead block differs from this release; use --update", err)
@@ -299,6 +300,235 @@ class LeadInstall(unittest.TestCase):
         self.assertTrue(re.search(r"\n<!-- doia-lead:end -->\n$", block))
 
 
+class LeadOwnership(unittest.TestCase):
+    """Issue #41: the lead block is owned through the state file, never through its own begin-line hash."""
+
+    OLD_BODY = "# The lead\nold text\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.target = Path(self._tmp.name) / "proj"
+        self.target.mkdir()
+        self.file = self.target / "CLAUDE.md"
+
+    def forged(self, body=None, release="0.0.1", before="before\n", after="\nafter\n"):
+        """A block whose begin line hashes its body, in a file the installer never wrote."""
+        body = self.OLD_BODY if body is None else body
+        begin = f"<!-- doia-lead:begin release {release} sha256:{installer.body_sha256(body)} -->\n"
+        return before + begin + body + installer.LEAD_END + after
+
+    def lead(self, *extra, apply=True, layout="project"):
+        args = ["--target", str(self.target), "--adapter", "none", "--lead", "CLAUDE.md", "--layout", layout, *extra]
+        if apply:
+            args.append("--apply")
+        return run_main(*args)
+
+    def listed(self, layout="project"):
+        return run_main("--target", str(self.target), "--list-managed", "--lead", "CLAUDE.md", "--layout", layout)
+
+    def entries(self, layout="project"):
+        return state_fixture.entries_of(self.target, layout, roots=None)
+
+    def test_a_forged_block_is_refused_by_update_and_the_file_is_byte_identical(self):
+        forged = self.forged()
+        self.file.write_text(forged)
+        for extra in (("--update",), ()):
+            with self.subTest(extra):
+                code, _out, err = self.lead(*extra)
+                self.assertEqual(code, 1)
+                self.assertIn("unverified files refused", err)
+                self.assertEqual(self.file.read_bytes(), forged.encode())
+        self.assertIsNone(self.entries())  # a refused run records nothing
+
+    def test_a_forged_block_lists_as_unverified_and_exits_3(self):
+        self.file.write_text(self.forged())
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3, out)
+        self.assertRegex(out, r"unverified\s+0\.0\.1\s+public\s+CLAUDE\.md")
+
+    def test_a_forged_copy_of_this_releases_block_lists_as_unverified_until_applied(self):
+        self.file.write_text("top\n" + installer.lead_block())
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3, out)
+        self.assertRegex(out, r"unverified\s+\S+\s+public\s+CLAUDE\.md")
+        self.assertIn("state: ", out)
+
+    def test_force_edited_replaces_only_the_forged_block_and_records_it(self):
+        self.file.write_text(self.forged())
+        code, out, err = self.lead("--update", "--force-edited")
+        self.assertEqual(code, 0, err)
+        self.assertIn("forced", out)
+        text = self.file.read_text()
+        self.assertTrue(text.startswith("before\n<!-- doia-lead:begin release " + installer.version()))
+        self.assertTrue(text.endswith(installer.LEAD_END + "\nafter\n"))
+        self.assertNotIn("old text", text)
+        self.assertEqual(self.listed()[0], 0)
+        entry = self.entries()["CLAUDE.md"]
+        self.assertEqual(entry["kind"], "lead")
+        self.assertEqual(set(entry), {"kind", "release", "source", "body_sha256"})
+
+    def test_a_recorded_block_is_updated_and_the_entry_follows(self):
+        self.file.write_text(self.forged())
+        state_fixture.record_lead(self.target, "CLAUDE.md", self.OLD_BODY)
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3)
+        self.assertRegex(out, r"stale\s+0\.0\.1\s+public\s+CLAUDE\.md")
+        code, _out, err = self.lead("--update")
+        self.assertEqual(code, 0, err)
+        digest = installer.statestore.body_sha256(installer.lead_body().encode())
+        self.assertEqual(self.entries()["CLAUDE.md"]["body_sha256"], digest)
+        self.assertEqual(self.entries()["CLAUDE.md"]["release"], installer.version())
+        self.assertEqual(self.listed()[0], 0)
+
+    def test_a_block_swapped_for_another_self_consistent_one_is_edited_not_owned(self):
+        self.lead()
+        swapped = self.forged(body="# The lead\nsomeone else's text\n", release=installer.version())
+        self.file.write_text(swapped)  # the begin-line hash matches this body; the recorded digest does not
+        code, _out, err = self.lead("--update")
+        self.assertEqual(code, 1)
+        self.assertIn("edited files refused", err)
+        self.assertEqual(self.file.read_text(), swapped)
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3)
+        self.assertRegex(out, r"edited\s+\S+\s+public\s+CLAUDE\.md")
+        code, _out, err = self.lead("--update", "--force-edited")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.listed()[0], 0)
+
+    def test_rerun_of_this_releases_block_changes_nothing_and_is_recorded_on_apply(self):
+        original = "# Mine\n\n" + installer.lead_block() + "tail\n"
+        self.file.write_text(original)
+        code, out, err = self.lead(apply=False)  # no --update anywhere
+        self.assertEqual(code, 0, err)
+        self.assertIn("unchanged: CLAUDE.md", out)
+        self.assertIsNone(self.entries())  # a preview records nothing
+        code, out, err = self.lead()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.file.read_text(), original)
+        self.assertEqual(self.entries()["CLAUDE.md"]["kind"], "lead")
+        self.assertEqual(self.listed()[0], 0)
+
+    def test_the_entry_is_the_digest_of_the_lf_body_whatever_the_line_endings(self):
+        self.file.write_bytes(b"# Mine\r\n")
+        self.lead()
+        crlf = self.entries()["CLAUDE.md"]["body_sha256"]
+        self.assertEqual(crlf, installer.statestore.body_sha256(installer.lead_body().encode()))
+        self.assertEqual(self.listed()[0], 0)
+        raw = self.file.read_bytes()
+        code, out, _e = self.lead()
+        self.assertIn("unchanged: CLAUDE.md", out)
+        self.assertEqual(self.file.read_bytes(), raw)
+        # An editor that converts the whole file to LF keeps the block current.
+        self.file.write_bytes(raw.replace(b"\r\n", b"\n"))
+        self.assertEqual(self.listed()[0], 0)
+
+    def test_the_same_file_in_two_layouts_keeps_separate_entries(self):
+        self.assertEqual(self.lead(layout="project")[0], 0)
+        self.assertIsNotNone(self.entries("project"))
+        self.assertIsNone(self.entries("user"))
+        # Only the project layout recorded it, so the user layout does not own an older block in the same file.
+        self.file.write_text(self.forged())
+        state_fixture.record_lead(self.target, "CLAUDE.md", self.OLD_BODY, layout="project")
+        forged = self.file.read_bytes()
+        code, _out, err = self.lead("--update", layout="user")
+        self.assertEqual(code, 1)
+        self.assertIn("unverified files refused", err)
+        self.assertEqual(self.file.read_bytes(), forged)
+        self.assertRegex(self.listed("user")[1], r"unverified\s+0\.0\.1")
+        self.assertRegex(self.listed("project")[1], r"stale\s+0\.0\.1")
+        self.assertEqual(self.lead("--update", layout="project")[0], 0)
+        self.assertEqual(self.entries("project")["CLAUDE.md"]["release"], installer.version())
+        self.assertIsNone(self.entries("user"))
+
+    def test_the_text_around_the_block_is_never_touched_on_any_path(self):
+        before, after = "# Mine\r\nkeep\n\n", "trailing text\r\nno final newline"
+
+        def check(label, content, args, record_old=False, want=0):
+            self.file.write_bytes(content.encode())
+            if record_old:
+                state_fixture.record_lead(self.target, "CLAUDE.md", self.OLD_BODY)
+            code, _o, err = self.lead(*args)
+            self.assertEqual(code, want, (label, err))
+            return self.file.read_bytes()
+
+        forged = self.forged(before=before, after="\n" + after)
+        for label, args in (("unverified", ()), ("unverified update", ("--update",))):
+            with self.subTest(label):
+                self.assertEqual(check(label, forged, args, want=1), forged.encode())
+        for label, args, old in (("forced", ("--update", "--force-edited"), False), ("update", ("--update",), True)):
+            with self.subTest(label):
+                out = check(label, forged, args, record_old=old)
+                self.assertTrue(out.startswith(before.encode()), out)
+                self.assertTrue(out.endswith(installer.LEAD_END.encode() + b"\r\n" + after.encode()), out)  # CRLF file
+                self.assertNotIn(b"old text", out)
+        with self.subTest("unchanged"):
+            same = before + installer.lead_block().replace("\n", "\r\n") + after  # the block ends its own line
+            self.assertEqual(check("unchanged", same, ()), same.encode())
+        for tail in (b"", b"\n", b"x"):
+            with self.subTest(append=tail):
+                self.file.write_bytes(b"# Mine\n" + tail)
+                self.assertEqual(self.lead()[0], 0)
+                self.assertTrue(self.file.read_bytes().startswith(b"# Mine\n" + tail))
+
+    def test_an_entry_of_another_kind_at_the_path_is_not_a_lead_record(self):
+        self.file.write_text(self.forged())
+        state_fixture.record(self.target, "CLAUDE.md", layout="project", roots=None)  # kind file
+        raw = self.file.read_bytes()
+        code, _out, err = self.lead("--update", "--force-edited")
+        self.assertEqual(code, 1)
+        self.assertIn("different kind", err)
+        self.assertEqual(self.file.read_bytes(), raw)
+
+    def test_a_lead_entry_does_not_vouch_for_a_role_file_at_the_same_path(self):
+        rel = ".claude/agents/reviewer.md"
+        code, _o, err = run_main("--target", str(self.target), "--adapter", "claude", "--lead", rel)
+        self.assertEqual(code, 1)
+        self.assertIn("also a role file", err)
+
+    def test_a_pending_only_lead_entry_is_not_owned(self):
+        self.file.write_text(self.forged())
+        digest = installer.statestore.body_sha256(self.OLD_BODY.encode())
+        entry = {"kind": "lead", "release": installer.version(), "source": "public", "pending_sha256": digest}
+        with installer.statestore.Store(self.target, "project") as store:
+            store.save(installer.statestore.with_entry({}, "CLAUDE.md", entry))
+        self.assertEqual(self.lead("--update")[0], 1)
+        self.assertRegex(self.listed()[1], r"unverified\s+0\.0\.1")
+
+    def test_a_failed_apply_leaves_no_pending_digest_and_a_vanished_file_is_pruned(self):
+        self.assertEqual(self.lead()[0], 0)
+        self.assertIsNotNone(self.entries()["CLAUDE.md"])
+        self.file.unlink()
+        other = self.target / "AGENTS.md"
+        run_main("--target", str(self.target), "--adapter", "none", "--lead", "AGENTS.md", "--apply")
+        self.assertTrue(other.exists())
+        self.assertEqual(sorted(self.entries()), ["AGENTS.md"])
+        for entry in self.entries().values():
+            self.assertNotIn("pending_sha256", entry)
+
+    def test_an_unusable_state_makes_a_marked_block_unverified_and_refuses_writes(self):
+        self.assertEqual(self.lead()[0], 0)
+        path = installer.statestore.state_path(self.target, "project")
+        saved = Path(path).read_bytes()
+        self.addCleanup(Path(path).write_bytes, saved)
+        Path(path).write_text("not json")
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3)
+        self.assertRegex(out, r"unverified\s+\S+\s+public\s+CLAUDE\.md")
+        raw = self.file.read_bytes()
+        code, _o, err = self.lead("--update", "--force-edited")
+        self.assertEqual(code, 1)
+        self.assertIn("ownership state refused", err)
+        self.assertEqual(self.file.read_bytes(), raw)
+
+    def test_hand_edit_of_a_recorded_block_is_edited(self):
+        self.lead()
+        self.file.write_text(self.file.read_text().replace("You do not wait.", "You wait.", 1))
+        code, out, _e = self.listed()
+        self.assertEqual(code, 3)
+        self.assertRegex(out, r"edited\s+\S+\s+public\s+CLAUDE\.md")
+
+
 class LeadRace(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -358,7 +588,8 @@ class LeadRace(unittest.TestCase):
             return real_recheck(*a, **k)
 
         def rename(*a, **k):
-            events.append("rename")
+            if str(a[0]).endswith(".doia-tmp"):  # the state store renames its own temporary files too
+                events.append("rename")
             return real_rename(*a, **k)
 
         def seam(where, dest):
