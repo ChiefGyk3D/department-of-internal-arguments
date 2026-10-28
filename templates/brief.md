@@ -7,9 +7,16 @@ The `spend:` line stands alone at the start of its line and has one value, eithe
 `none - free-only` or `paid - approval in the human message at <time>, cap <n> USD`.
 A paid brief quotes the human's own message and its time; without that, write
 `none - free-only` and the agent makes no paid call.
+
+The `role:` and `model:` lines below are read by machines: each alone on its line at line start, lowercase key,
+exactly one value (one role name from roles/, and the alias or exact model id passed to the dispatch; no `|`, no
+comma). Replace the example values; never list alternatives there. The prose line further down keeps the reasons.
 -->
 
 # Work brief
+
+role: reviewer
+model: sonnet
 
 spend: none - free-only
 

@@ -1,4 +1,8 @@
 {
+  "brief_keys": [
+    "role",
+    "model"
+  ],
   "release": "0.4.0",
   "report_header": [
     "ROLE",

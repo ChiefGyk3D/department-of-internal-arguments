@@ -7,7 +7,7 @@ from pathlib import Path
 
 from benchmark import corpus_errors, load_corpus
 from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
-from export_models import EXPORT_PATH, ModelPinsError, read_pins
+from export_models import BRIEF_KEYS, EXPORT_PATH, ModelPinsError, read_pins
 from generate import ADDITIONS_HEADING, CODEX_WEB_SANDBOX, drift
 from lib import (
     CAPABILITY_ORDER,
@@ -352,6 +352,37 @@ def export_errors(root):
     return []
 
 
+def brief_errors(root):
+    """templates/brief.md carries exactly one `role:` and one `model:` line at line start, one plain value each, and
+    the values and key names agree with the export. Fail closed: any other lowercase `key:` line is a key the export
+    does not name."""
+    rel = "templates/brief.md"
+    try:
+        text = (Path(root) / rel).read_text(encoding="utf-8")
+        data = read_pins(Path(root) / EXPORT_PATH)
+    except (OSError, UnicodeDecodeError, ModelPinsError) as exc:
+        return [f"{rel}: cannot check the machine-readable lines: {type(exc).__name__}"]
+    body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    lines = body.split("\n")
+    errors = []
+    keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m]
+    if set(keys) != set(data["brief_keys"]):
+        errors.append(f"{rel}: its key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
+    pins = {t["model"] for t in data["tiers"].values()} | {t["family"] for t in data["tiers"].values()}
+    allowed = {"role": set(data["roles"]), "model": pins}
+    for key in BRIEF_KEYS:
+        mine = [ln for ln in lines if ln.startswith(f"{key}:")]
+        if len(mine) != 1:
+            errors.append(f"{rel}: needs exactly one `{key}:` line at line start, found {len(mine)}")
+            continue
+        value = mine[0][len(key) + 1 :]
+        if not value.startswith(" ") or value[1:] not in allowed[key]:
+            errors.append(
+                f"{rel}: `{key}:` must be `{key}: <one value>` with a value from the export (no `|`, no comma, not empty)"
+            )
+    return errors
+
+
 def validate(root=ROOT):
     root = Path(root)
     errors = []
@@ -466,6 +497,7 @@ def validate(root=ROOT):
         errors.extend(workflow_errors(root))
         errors.extend(evals_errors(root))
         errors.extend(export_errors(root))
+        errors.extend(brief_errors(root))
 
         # docs/ is mirrored to the wiki; the privacy sweep and link check below already walk it.
         bench = root / "evals/benchmark"
