@@ -2,9 +2,16 @@
 Template. Copy into the dispatch prompt (or a scratch file) for a role agent.
 Adapted from the starter package this repository grew from. Keep it free of
 hostnames, addresses and personal identifiers.
+
+The `spend:` line stands alone at the start of its line and has one value, either
+`none - free-only` or `paid - approval in the human message at <time>, cap <n> USD`.
+A paid brief quotes the human's own message and its time; without that, write
+`none - free-only` and the agent makes no paid call.
 -->
 
 # Work brief
+
+spend: none - free-only
 
 - Task / owner:
 - Outcome and who uses it:

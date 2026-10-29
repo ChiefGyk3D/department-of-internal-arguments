@@ -9,3 +9,6 @@ Approval is scoped authorization from the human, not an agent vote. Platform res
 - Missing approval blocks only the dependent action. Continue independent safe work.
 - A rejected command is not permission to reach the same action by another route.
 - Sharing restricted data with another runtime or provider needs the data owner's approval of the destination.
+- **Every paid action needs its own fresh, single-use approval** in the human's own message, for that job. A sub-agent cannot inherit it, it expires with the job, and one job never starts another paid job.
+- A quota and cost line (used, remaining, what this action costs) comes before any approval request; with no such line, there is no request.
+- Caps and counts are enforced in code, never counted by a model.
