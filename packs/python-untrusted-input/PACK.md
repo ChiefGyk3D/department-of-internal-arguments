@@ -71,7 +71,6 @@ Measured in the SAFO guard and approval reviews (2026-10); one line each, no byp
 3. **Regex and term shape limits.** Cap length, count and character set of user-supplied terms and patterns, and reject shapes the guard cannot judge. A shape limit keeps a check short; it does not prove the content safe, so say so.
 4. **Append-only logs are tamper-evident, not tamper-proof.** Hash-chain each record, append under a lock with `fsync`, and say plainly that someone who rewrites the whole file and its head can still forge it.
 5. **Test-only seams are not reachable from the CLI.** An injectable clock, path or transport must not be settable by an option or environment variable; keep it in the test module, and test that the CLI refuses it.
-6. **Hand verification inputs to a checker through sealed or immutable descriptors, not by pathname.** A path can be swapped between check and use. Pass a sealed in-memory file (`memfd` with seals) or an already-opened descriptor, and compare what the checker reports it verified against what you looked up. Where sealing is unavailable, refuse rather than fall back to a path.
 
 ## How to verify (commands)
 
