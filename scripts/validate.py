@@ -72,7 +72,50 @@ LEAD_RULES = {
     "approval token": "approval token",
     "public weakness": "unfixed weakness",
     "rejected option": "Re-suggest an option the human has rejected.",
+    "merge": "pinned to the head SHA",
+    "paid action": "single-use approval",
+    "data class": "## Routing by data class",
+    "researcher planned": "researcher (planned, not built)",
 }
+# One phrase per spend, routing and data-class rule in the policies (issue #66); a rule that silently disappears
+# from a policy must fail the gate. Keyed by (policy, rule name).
+POLICY_RULES = {
+    ("human-approvals", "paid single-use approval"): "fresh, single-use approval",
+    ("human-approvals", "not inheritable"): "A sub-agent cannot inherit it",
+    ("human-approvals", "no paid job starts a paid job"): "one job never starts another paid job",
+    ("human-approvals", "quota line before request"): "A quota and cost line",
+    ("human-approvals", "caps counted in code"): "enforced in code, never counted by a model",
+    ("model-routing", "unpaid tier public only"): "An unpaid tier gets public material only.",
+    ("model-routing", "429 is final"): "A 429 is final",
+    ("model-routing", "cyber-access tiers"): "only on the cyber-access tiers",
+    ("model-routing", "unpinned provider"): "takes its exact model id from the brief",
+    ("security-boundaries", "data class per destination"): "Check the data class against the destination",
+    ("security-boundaries", "OSINT scope"): "never private individuals",
+    ("security-boundaries", "no filter circumvention"): "Never circumvent a provider's safety filter",
+}
+# The brief's `spend:` line (issue #66): alone on its line at line start, one value, one of two forms. Same
+# `key: value` style as the other machine-read brief lines; a line in a code fence does not count.
+SPEND_FREE = "none - free-only"
+SPEND_PAID_RE = re.compile(r"paid - approval in the human message at [^,\s][ -~]*?, cap [0-9]+(?:\.[0-9]{1,2})? USD")
+
+
+def spend_line_errors(text):
+    """Problems with the `spend:` line of a brief (empty list when there is exactly one valid line)."""
+    lines, fenced = [], False
+    for line in text.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("spend:"):
+            lines.append(line)
+    if len(lines) != 1:
+        return [f"expected exactly one `spend:` line at line start, found {len(lines)}"]
+    value = lines[0][len("spend:") :].removeprefix(" ")
+    if value == SPEND_FREE or SPEND_PAID_RE.fullmatch(value):
+        return []
+    paid = "paid - approval in the human message at <time>, cap <n> USD"
+    return [f"`spend:` value {value!r} is neither {SPEND_FREE!r} nor {paid!r}"]
+
+
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
@@ -313,6 +356,9 @@ def validate(root=ROOT):
         for rule, phrase in LEAD_RULES.items():
             require(phrase in lead, f"templates/lead.md lacks the {rule} rule ({phrase!r})")
 
+        for err in spend_line_errors((root / "templates/brief.md").read_text(encoding="utf-8")):
+            errors.append(f"templates/brief.md: {err}")
+
         packs = load_packs(root)
         require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the seven packs")
         for p in packs:
@@ -321,6 +367,9 @@ def validate(root=ROOT):
         for pol in POLICIES:
             require((root / f"policies/{pol}.md").is_file(), f"missing policy {pol}")
         require({f.stem for f in (root / "policies").glob("*.md")} == set(POLICIES), "unexpected policy file")
+        for (pol, rule), phrase in POLICY_RULES.items():
+            ptext = (root / f"policies/{pol}.md").read_text(encoding="utf-8")
+            require(phrase in ptext, f"policies/{pol}.md lacks the {rule} rule ({phrase!r})")
 
         # Adapters: byte-for-byte regeneration, then the host-specific guarantees.
         errors.extend(drift(root))

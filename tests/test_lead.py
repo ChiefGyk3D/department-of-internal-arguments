@@ -45,7 +45,7 @@ class LeadText(unittest.TestCase):
 
     def test_the_real_validator_accepts_the_template(self):
         self.assertEqual(self.fixture_errors(lambda s: s), [])
-        self.assertEqual(len(validate_mod.LEAD_RULES), 9)
+        self.assertEqual(len(validate_mod.LEAD_RULES), 13)
 
     def test_the_real_validator_fails_when_any_rule_is_removed(self):
         for rule, phrase in validate_mod.LEAD_RULES.items():
