@@ -28,7 +28,7 @@ REQUIRED_PHRASES = {
     "own CPU limit": r"RLIMIT_CPU",
     "dies with parent": r"PR_SET_PDEATHSIG|dies with its parent",
     "no inherited secrets": r"no inherited secrets|allowlist the environment",
-    "isolated interpreter": r"`-I`",
+    "isolated interpreter": r"python3 -I",
     "one definition": r"one definition",
     "fail closed": r"fail closed",
     "regex shape": r"shape limit",
@@ -44,7 +44,7 @@ BRITISH = re.compile(r"\b(?:behaviour|colour|authoris\w*|defence|organis\w*|reco
 def missing(text):
     return sorted(
         [h for h in REQUIRED_HEADINGS if h not in text]
-        + [k for k, pat in REQUIRED_PHRASES.items() if not re.search(pat, text)]
+        + [k for k, pat in REQUIRED_PHRASES.items() if not re.search(pat, text, re.I)]
     )
 
 
@@ -56,7 +56,7 @@ class PythonUntrustedPack(unittest.TestCase):
         self.assertEqual(missing(self.text), [])
 
     def test_missing_check_bites(self):
-        self.assertTrue(missing(self.text.replace("fail closed", "fail open")))
+        self.assertTrue(missing(re.sub("(?i)fail closed", "fail open", self.text)))
         self.assertTrue(missing(self.text.replace("## Checklist: subprocesses", "## Other")))
 
     def test_size(self):
