@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from lib import PACK_NAMES, ROLE_NAMES  # noqa: E402  (path set up above)
 import evals_matrix as em  # noqa: E402
+from lib import PACK_NAMES, ROLE_NAMES  # noqa: E402  (path set up above)
 
 PACK = "cyber-tier-review"
 PACK_PATH = ROOT / "packs" / PACK / "PACK.md"
