@@ -20,7 +20,7 @@ Every dispatch carries a brief, written from [templates/brief.md](../templates/b
 
 ## The lead
 
-The lead is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead CLAUDE.md`; see [Install](install.md), including how to check that the session loaded it). It dispatches the four roles, reads their reports and decides; it does not write the code the agents are briefed for.
+The lead is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead CLAUDE.md`; see [Install](install.md), including how to check that the session loaded it). It dispatches the five roles, reads their reports and decides; it does not write the code the agents are briefed for.
 
 The orchestrator rules in it, with the reason for each (the template keeps them short because it is injected into a session):
 
@@ -33,10 +33,10 @@ The orchestrator rules in it, with the reason for each (the template keeps them 
 - Working directory. A worktree agent starts wherever the session's shell is. Run `cd <the issue's repository>` in the same command as the dispatch, or the agent lands in the wrong repository.
 - Merge and release. Merge only through the tested watcher, pinned to the head SHA, with `CI green` required and every check finished; check the PR is still open before pushing to it; every PR links its issue. A hand-rolled loop can merge on a stale or partial result.
 - Paid actions and data class. Each paid action has its own fresh, single-use approval from the human, shown after a quota and cost line and recorded in the brief's `spend:` line; caps are counted in code and a 429 ends the job. An unpaid tier may train on prompts and let humans read them, so it gets public material only; security and adversarial work goes only to the cyber-access tiers.
-- The researcher role is planned and not built (design review on issue #65); the lead does not dispatch it.
+- The researcher answers one question from the web or from supplied material and never changes the repository. The brief states the question, the data class of anything it may send and the destination tier; the report separates VERIFIED claims (URL and date read) from INFERRED ones, lists conflicts and says what was sent where.
 - Never: use an approval token meant for the human (from a hook, gate or prompt) unless the human's own message supplies it, quoted with its time; write an unfixed weakness into a public issue, pull request or comment; re-suggest an option the human rejected.
 
-- Name the role by what the work is: a plan whose code is complete goes to the transcriber; everything else that changes files goes to the implementer; a finished task goes to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also goes to the adversarial reviewer, after the reviewer, never instead of it.
+- Name the role by what the work is: a plan whose code is complete goes to the transcriber; everything else that changes files goes to the implementer; a finished task goes to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also goes to the adversarial reviewer, after the reviewer, never instead of it; a question that needs the web goes to the researcher.
 - Name packs by the domain the diff touches. A pack named in a brief is not proof it was loaded; read `PACKS LOADED`.
 - Read the report header first: `GATE` needs an exit code you believe, `TREE` must be clean for a reviewer, `MODEL` must match the dispatch. `NOT VERIFIED` is a list the lead now owns. `LOCAL-LLM` must say `n/a - <reason>` or name the exact model that answered, what its draft was checked against and the discrepancy count; a draft nobody checked is not used. The measured failure behind this is about gemma4:12b only (2 of 5 triage runs returned unrelated text on 2026-10-26; the attribution is inferred because the runs did not log the model).
 - Severity is one scale: blocking, important, minor. After two failed rounds on the same finding class, stop and recommend a different model.

@@ -135,6 +135,13 @@ def codex_notes(role):
         "`MODEL:` line of the report is the exact model id the session reports, never a family name.",
         "- read, search: honored through Codex's own file and search tools, inside the inherited sandbox.",
     ]
+    if "web" in caps:
+        lines.append(
+            "- web: this role fetches and searches the web through whatever web tools the Codex session has "
+            "(search and fetch depend on the session's configuration, which this file cannot set). With none, "
+            "you have no tools for the web: say so, answer only from material the brief supplies, and label "
+            "every claim INFERRED or NOT FOUND."
+        )
     if "edit" in caps:
         lines.append(
             "- edit: honored, limited by the inherited sandbox (`workspace-write` allows edits in the workspace)."

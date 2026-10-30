@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICIES = ("security-boundaries", "human-approvals", "quality-gates", "model-routing")
-ROLE_NAMES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber")
+ROLE_NAMES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber", "researcher")
 PACK_NAMES = (
     "python-untrusted-input",
     "gha-security-dast",
@@ -33,13 +33,17 @@ TIER_MODEL = {"standard": "claude-sonnet-5-5", "cheap": "claude-haiku-5-5"}
 CLAUDE_TOOLS = {
     "read": ("Read",),
     "search": ("Grep", "Glob"),
+    "web": ("WebFetch", "WebSearch"),
     "edit": ("Edit", "Write"),
     "shell": ("Bash",),
     "skills": ("Skill",),
 }
 # UNVERIFIED against a Copilot run (none logged yet); see README "What is measured".
-COPILOT_TOOLS = {"read": "read", "search": "search", "edit": "edit", "shell": "execute"}
-CAPABILITY_ORDER = ("read", "search", "edit", "shell", "skills")
+# `web` is the provider-neutral fetch-and-search capability: WebFetch and WebSearch on Claude Code, the `web` tool alias
+# on Copilot (UNVERIFIED, same reason). Codex has no per-tool allow list (see generate.codex_notes); a host or an
+# API-only provider with no web tool gives the role no tools at all.
+COPILOT_TOOLS = {"read": "read", "search": "search", "web": "web", "edit": "edit", "shell": "execute"}
+CAPABILITY_ORDER = ("read", "search", "web", "edit", "shell", "skills")
 
 # Codex reads custom agents from .codex/agents/*.toml and skills from .agents/skills/<name>/SKILL.md (OpenAI Codex
 # documentation, retrieved 2026-10-26; see docs/install.md). Nothing here has been run in Codex yet.

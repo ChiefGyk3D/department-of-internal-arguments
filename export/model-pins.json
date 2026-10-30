@@ -17,6 +17,7 @@
   "roles": {
     "adversarial-reviewer": "standard",
     "implementer": "standard",
+    "researcher": "standard",
     "reviewer": "standard",
     "transcriber": "cheap"
   },
@@ -35,6 +36,7 @@
       "roles": [
         "adversarial-reviewer",
         "implementer",
+        "researcher",
         "reviewer"
       ]
     }

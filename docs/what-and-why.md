@@ -2,11 +2,11 @@
 
 I started from a ChatGPT-made starter with twelve personas (chief of staff, QA, security architect, and so on). Some of it was good machinery and I kept that: the installer, the policies, the behavioral exercises. But I was already running a smaller design that I had measured, three process roles plus domain packs chosen per dispatch, and twelve personas change too many variables at once to ever tell which one helped. If a review gets better, I want to know whether it was the role, the pack, or the model, and I cannot know that when the persona list is the thing that changed.
 
-So there are four roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And seven packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
+So there are five roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And seven packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
 
 ## The fifth persona
 
-The fifth persona is the one dispatching the other four. It is not an agent file, because an agent that can dispatch agents is exactly what the validator forbids; it is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead`; nothing loads it by itself). It says how to brief, how to read a report, when the adversarial pass is mandatory, when to stop a fix loop, and that pushes and approvals never happen below it. See [Writing a brief](writing-a-brief.md).
+The sixth persona is the one dispatching the other five. It is not an agent file, because an agent that can dispatch agents is exactly what the validator forbids; it is [templates/lead.md](../templates/lead.md), installed into the controller session's instructions (`install.py --lead`; nothing loads it by itself). It says how to brief, how to read a report, when the adversarial pass is mandatory, when to stop a fix loop, and that pushes and approvals never happen below it. See [Writing a brief](writing-a-brief.md).
 
 ## One report header, one severity scale
 
