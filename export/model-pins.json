@@ -21,6 +21,7 @@
   "roles": {
     "adversarial-reviewer": "standard",
     "cloud-engineer": "standard",
+    "devops-engineer": "standard",
     "implementer": "standard",
     "researcher": "standard",
     "reviewer": "standard",
@@ -41,6 +42,7 @@
       "roles": [
         "adversarial-reviewer",
         "cloud-engineer",
+        "devops-engineer",
         "implementer",
         "researcher",
         "reviewer"
