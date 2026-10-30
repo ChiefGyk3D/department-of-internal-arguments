@@ -1,4 +1,4 @@
-"""The devops-engineer role (issue #87, under #78): GYST callers, head-pinned reads, no foreground waits, no loosening."""
+"""The devops-engineer role (issue #87, under #78): GYST callers, head-pinned reads, no foreground waits."""
 
 import json
 import sys
@@ -135,7 +135,9 @@ class ValidatorBites(unittest.TestCase):
     def test_web_or_edit_fails(self):
         for extra in ("web", "edit"):
             r = dict(devops_engineer(), tools=[*devops_engineer()["tools"], extra])
-            self.assertTrue(any("devops-engineer" in e or "capability" in e for e in validate_mod.role_errors(r)), extra)
+            self.assertTrue(
+                any("devops-engineer" in e or "capability" in e for e in validate_mod.role_errors(r)), extra
+            )
 
     def test_without_shell_fails(self):
         r = dict(devops_engineer(), tools=["read", "search", "skills"])
