@@ -1,6 +1,7 @@
 """The cyber-tier-review pack (issue #58): wiring into the personas, presence in the generated output, evidence
 labels on every CLI claim, and a sweep that no maintainer-specific value ships in it."""
 
+import json
 import re
 import sys
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import evals_matrix as em  # noqa: E402
 from lib import PACK_NAMES, ROLE_NAMES  # noqa: E402  (path set up above)
 
 PACK = "cyber-tier-review"
@@ -163,3 +165,46 @@ class PrivacySweep(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvalCase(unittest.TestCase):
+    """Issue #71: one mechanical behavioral case names the pack (the registry allows it; no model call is made)."""
+
+    def cases(self):
+        return em.load_registry(ROOT / "evals/cases.json")
+
+    def named(self):
+        return [c for c in self.cases() if PACK in c["packs"]]
+
+    def test_exactly_one_mechanical_case_names_the_pack(self):
+        picked = self.named()
+        self.assertEqual([c["id"] for c in picked], [31])
+        case = picked[0]
+        self.assertEqual(case["grading"], "mechanical")
+        self.assertEqual(case["roles"], ["adversarial-reviewer"])
+        self.assertIn(PACK, case["subject"])
+        self.assertEqual(case["cost_class"], "fixture")
+
+    def test_case_covers_every_pack_behavior_with_a_negative_condition(self):
+        case = self.named()[0]
+        expect = case["expect"].lower()
+        reason = case["grading_reason"].lower()
+        for phrase in ("high-trust tier", "same prompt", "never reword", "never skip", "held", "placeholder"):
+            self.assertIn(phrase, expect, phrase)
+        for phrase in ("stub call log", "fails the case", "no call on the default", "byte", "placeholder"):
+            self.assertIn(phrase, reason, phrase)
+        self.assertIn("not set", case["input"].lower() + expect)
+
+    def test_case_text_carries_no_tier_model_flag_value_or_identifier(self):
+        case = self.named()[0]
+        text = json.dumps(case).lower()
+        for value in ("daybreak", "gpt-", "access_programs", "cyber-access-program"):
+            self.assertNotIn(value, text, value)
+        self.assertEqual(em.identifier_problems(case["input"] + case["expect"] + case["grading_reason"]), [])
+        planted = json.dumps(dict(case, expect=case["expect"] + " use daybreak_blue")).lower()
+        self.assertIn("daybreak", planted)  # a planted tier value is what the loop above rejects
+
+    def test_the_guard_bites_when_the_case_is_missing(self):
+        stripped = [dict(c, packs=[]) if c["id"] == 31 else c for c in self.cases()]
+        self.assertEqual([c for c in stripped if PACK in c["packs"]], [])  # the selector finds nothing without it
+        self.assertTrue(self.named())
