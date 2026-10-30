@@ -355,7 +355,7 @@ def export_errors(root):
 def brief_errors(root):
     """templates/brief.md carries exactly one `role:` and one `model:` line at line start, one plain value each, and
     the values and key names agree with the export. Fail closed: any other lowercase `key:` line is a key the export
-    does not name."""
+    does not name, except `spend:`, which is its own policy line checked by spend_line_errors."""
     rel = "templates/brief.md"
     try:
         text = (Path(root) / rel).read_text(encoding="utf-8")
@@ -365,7 +365,7 @@ def brief_errors(root):
     body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     lines = body.split("\n")
     errors = []
-    keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m]
+    keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m and m.group(1) != "spend"]
     if set(keys) != set(data["brief_keys"]):
         errors.append(f"{rel}: key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
     pins = {t["model"] for t in data["tiers"].values()} | {t["family"] for t in data["tiers"].values()}

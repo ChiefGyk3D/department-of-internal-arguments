@@ -131,7 +131,8 @@ class TemplateLines(unittest.TestCase):
     def test_export_brief_keys_equal_template_keys_both_directions(self):
         data = em.read_pins(ROOT / em.EXPORT_PATH)
         template_keys = {ln.split(":")[0] for ln in self.text.split("\n") if LOWER_KEY_LINE.match(ln)}
-        self.assertEqual(template_keys, set(data["brief_keys"]))
+        # `spend:` is a separate policy line (issue #66) with its own validator; it is not a machine-read brief key.
+        self.assertEqual(template_keys - {"spend"}, set(data["brief_keys"]))
         self.assertEqual(data["brief_keys"], ["role", "model"])
         self.assertEqual(data["brief_keys"], list(em.BRIEF_KEYS))
 
