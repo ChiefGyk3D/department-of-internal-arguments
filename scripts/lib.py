@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICIES = ("security-boundaries", "human-approvals", "quality-gates", "model-routing")
-ROLE_NAMES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber", "researcher")
+ROLE_NAMES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber", "researcher", "cloud-engineer")
 PACK_NAMES = (
     "python-untrusted-input",
     "gha-security-dast",

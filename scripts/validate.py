@@ -29,7 +29,13 @@ from lib import (
 
 EDITORS = {"implementer", "transcriber"}  # the only roles that may carry the edit capability
 WEB_ROLES = {"researcher"}  # the only roles that may carry the web capability (fetch and search)
-RUNNERS = {"implementer", "reviewer", "adversarial-reviewer", "transcriber"}  # all must be able to run commands
+RUNNERS = {
+    "implementer",
+    "reviewer",
+    "adversarial-reviewer",
+    "transcriber",
+    "cloud-engineer",
+}  # all must be able to run commands
 
 # Built from pieces so this file does not trip the sweep it implements. Word-bounded so a
 # commit SHA or a four-part version string cannot trip it.
@@ -62,6 +68,37 @@ RESEARCHER_RULES = {
     "no private individuals": "Never research private individuals.",
 }
 RESEARCHER_SECTIONS = ("QUESTION:", "ANSWER:", "CLAIMS:", "CONFLICTS:", "DATA SENT:", "NOT FOUND:", "OPEN:")
+# The cloud-engineer's rules and report sections (issue #86); a rule that silently disappears from the role must fail
+# the gate. Phrases are exact text from roles/cloud-engineer.md.
+CLOUD_ENGINEER_RULES = {
+    "read-only by default": "**Read-only by default.**",
+    "named task grants write": "A brief that names no write grants none.",
+    "never apply to a live system": "**Never apply to a live system.**",
+    "plan before apply": "Plan before apply.",
+    "blast radius named": "Name the blast radius for every change",
+    "rollback named": "Name the rollback for every change",
+    "names only": "**Names only.**",
+    "whole job access": "Plan the whole job's access before the first call.",
+    "no broader fallback": "never offer a broader grant as a fallback",
+    "no credential reuse": "never search a secret store for a credential to reuse",
+    "done means observed": "Done means observed.",
+    "sources not memory": "Sources, not memory.",
+    "denial is not permission": "A denied command or hook is not permission",
+    "billable is paid": "Creating a billable resource is a paid action",
+    "no edit hands code off": "You have no edit capability.",
+    "will not do": "## What you will not do",
+}
+CLOUD_ENGINEER_SECTIONS = (
+    "TASK:",
+    "ACCESS:",
+    "LIVE CHANGES:",
+    "PLAN:",
+    "BLAST RADIUS:",
+    "ROLLBACK:",
+    "SECRETS:",
+    "HANDOFFS:",
+    "OPEN:",
+)
 REPORT_FIELDS = (
     "ROLE:",
     "MODEL:",
@@ -247,6 +284,16 @@ def role_errors(r):
             require(phrase in r["body"], f"researcher lacks the {rule} rule ({phrase!r})")
         for section in RESEARCHER_SECTIONS:
             require(section in r["body"], f"researcher report lacks {section}")
+    if n == "cloud-engineer":
+        require(r.get("tier") == "standard", "cloud-engineer must be tier standard")
+        require(
+            not {"edit", "web"} & set(tools or []),
+            "cloud-engineer is read-only on the repository: no edit or web capability",
+        )
+        for rule, phrase in CLOUD_ENGINEER_RULES.items():
+            require(phrase in r["body"], f"cloud-engineer lacks the {rule} rule ({phrase!r})")
+        for section in CLOUD_ENGINEER_SECTIONS:
+            require(section in r["body"], f"cloud-engineer report lacks {section}")
     return errors
 
 
@@ -391,7 +438,7 @@ def validate(root=ROOT):
 
     try:
         roles = load_roles(root)
-        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the five roles")
+        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the six roles")
         for r in roles:
             errors.extend(role_errors(r))
         require({r["name"]: r["tier"] for r in roles}.get("transcriber") == "cheap", "transcriber must be tier cheap")

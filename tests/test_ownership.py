@@ -58,7 +58,7 @@ def run_main(*args):
 class MarkerHash(unittest.TestCase):
     def test_every_generated_file_carries_a_matching_body_hash(self):
         files = [p for base in (".claude", ".github/agents") for p in (ROOT / base).rglob("*.md")]
-        self.assertEqual(len(files), 18)
+        self.assertEqual(len(files), 20)
         for p in files:
             text = p.read_text()
             m, body = lib.split_marker(text)
@@ -160,7 +160,8 @@ class EditedFiles(unittest.TestCase):
             self.assertEqual(actions["reviewer.md"], "update")
             self.assertEqual(actions["implementer.md"], "unchanged")
             (Path(d) / "agents/implementer.md").write_text("x\n" + agent.read_text())
-            self.assertEqual(installer._plan(d, "claude", update=True, layout="user")[1][2], "edited")
+            edited = {p[1].name: p[2] for p in installer._plan(d, "claude", update=True, layout="user")}
+            self.assertEqual(edited["implementer.md"], "edited")
 
     def test_unchanged_files_are_not_rewritten(self):
         with tempfile.TemporaryDirectory() as d:
