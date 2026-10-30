@@ -58,7 +58,7 @@ def run_main(*args):
 class MarkerHash(unittest.TestCase):
     def test_every_generated_file_carries_a_matching_body_hash(self):
         files = [p for base in (".claude", ".github/agents") for p in (ROOT / base).rglob("*.md")]
-        self.assertEqual(len(files), 15)
+        self.assertEqual(len(files), 17)
         for p in files:
             text = p.read_text()
             m, body = lib.split_marker(text)
