@@ -81,7 +81,7 @@ class GystSection(unittest.TestCase):
         body = section(self.text)
         cut = re.sub(r"at least 1 s", "later", body)
         self.assertEqual(missing(f"{HEADING}\n{cut}"), ["writes serialized at least 1 s apart"])
-        self.assertIsNotNone(PRIVATE.search("see /ho" "me/someone/x"))
+        self.assertIsNotNone(PRIVATE.search("see /home/someone/x"))
 
 
 if __name__ == "__main__":
