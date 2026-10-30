@@ -18,6 +18,12 @@
 - GitHub API limits: a secondary rate limit rejects bursts while the hourly quota still shows headroom; serialize writes at least 1 s apart, never list a whole board per card, read through REST, honor `retry-after`. Cites GitHub's REST docs pages (read 2026-10-30) and SAFO issue 204.
 - Every rule names its source file and heading in the pack. `tests/test_gha_pack.py` pins the section, its rules, its sources and its privacy sweep, with a negative case. Generated skill files regenerated.
 
+`python-untrusted-input` pack refreshed (issue #69, item 5 of the design review on #65). Pack text only; no other pack, role or policy changed.
+
+- `packs/python-untrusted-input/PACK.md` (updated 2026-10-29, 6.2 KB to 11.2 KB): four new sections. Types, text and regexes (exact `type(x) is` checks, never `str()` or `repr()` on a foreign object, NFC and `casefold` collisions, invisible characters, regex backtracking caps). Archives and output caps (hand-written member extraction, caps everywhere). Subprocesses (argv not shell, process-group kill, worker with its own `RLIMIT_CPU` that dies with its parent, bounded output, allowlisted environment, `python3 -I`). Guards, parsers and logs (one shared definition, fail closed on timeout, shape limits, tamper-evident append-only logs, no test-only seam reachable from the CLI). Two new "How to verify" probes. Each lesson is one generic line with where it was measured; no exploit detail.
+- Regenerated: `.claude/skills/pack-python-untrusted-input/SKILL.md` and `.agents/skills/pack-python-untrusted-input/SKILL.md`.
+- `tests/test_python_untrusted_pack.py`: the four sections and one phrase per lesson exist (with a case that proves the check bites), a size ceiling of 14,000 bytes, no private values or British spelling, the generated skill carries the new sections.
+
 Spend and data-class policy for paid and unpaid providers (issue #66, items 1 and 2 of the design review on #65). Provider-neutral: an "unpaid tier" and a "paid tier", no vendor-named policy, pack or role. The researcher role and the unpaid-tier pack are not part of this change.
 
 - `policies/human-approvals.md`: every paid action needs its own fresh, single-use approval, not inheritable by a sub-agent and expiring with the job; one job never starts another paid job; a quota and cost line comes before any approval request; caps are counted in code, never by a model.
