@@ -34,6 +34,7 @@ REQUIRED_PHRASES = {
     "regex shape": r"shape limit",
     "tamper evident": r"tamper-evident",
     "test seam": r"test-only seam",
+    "sealed descriptor": r"sealed|immutable descriptor",
     "casefold": r"casefold",
 }
 PRIVATE = re.compile(r"/ho" r"me/\w+|\b\d{1,3}(?:\.\d{1,3}){3}\b|chiefgyk3d|renegade-penguin", re.I)
