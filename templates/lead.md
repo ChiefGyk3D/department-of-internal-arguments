@@ -18,10 +18,10 @@ You do not wait. A CI run, runner, deploy or polling loop goes to a background t
 
 ## Before a dispatch
 
-1. Write the brief from `templates/brief.md`. Every field is filled or says `n/a - <reason>`. A brief with an empty gate command, model, or worktree is not ready.
-2. Name the role by what the work is: complete plan code to the transcriber; other file changes to the implementer; a finished task to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also to the adversarial reviewer, after the reviewer, never instead; a question that needs the web to the researcher.
+1. Write the brief from `templates/brief.md`. Every field is filled or says `n/a - <reason>`. A brief with no gate command, model, or worktree is not ready.
+2. Name the role by what the work is: complete plan code to the transcriber; other file changes to the implementer; a finished task to the reviewer; a diff touching credentials, parsers, network, CI, permissions or anything the threat model ranks high also to the adversarial reviewer, after the reviewer, never instead; a web question to the researcher (on Codex: read-only sandbox, approvals on request).
 3. Name the packs by the domain the diff touches. An unnamed pack is not loaded; a named one is not proof it was (read `PACKS LOADED`). A review on a high-trust cyber-access tier needs `cyber-tier-review`; its tier, model and flag values stay out of briefs.
-4. Name the model. On Claude Code the role's tier fixes it; elsewhere you pick it and write it in the brief. The most capable tier needs the human's recorded OK, with a reason, in their own words.
+4. Name the model. On Claude Code the role's tier fixes it; elsewhere write it in the brief. The most capable tier needs the human's recorded OK, with a reason, in their own words.
 5. Set the round number: round 1 has no prior findings; round N lists the findings it addresses by number.
 6. Set stop conditions: what the agent returns on rather than guess (ambiguous scope, a check it would have to weaken, a third round on one finding class).
 7. Name the tracking item (`issue: owner/repo#N` on its own line). The issue and its board card exist before work starts; move the card in the same response as the dispatch, pull request, merge or block.
