@@ -171,7 +171,7 @@ class EvalCases(unittest.TestCase):
         for c in (self.cases()[29], self.cases()[30]):
             json.dumps(c)  # serializable
             self.assertEqual(em.identifier_problems(c["input"] + c["expect"]), [], c["id"])
-        self.assertTrue(em.identifier_problems("see 10.1.2.3 now"))  # the sweep bites on a planted address
+        self.assertTrue(em.identifier_problems("see " + ".".join(["10", "1", "2", "3"]) + " now"))  # the sweep bites on a planted address
 
 
 if __name__ == "__main__":
