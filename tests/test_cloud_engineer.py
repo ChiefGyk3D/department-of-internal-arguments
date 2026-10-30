@@ -120,7 +120,7 @@ class ValidatorBites(unittest.TestCase):
 
     def test_without_shell_fails(self):
         r = dict(cloud_engineer(), tools=["read", "search", "skills"])
-        self.assertTrue(any("shell" in e for e in validate_mod.role_errors(r)))
+        self.assertTrue(any("run commands" in e for e in validate_mod.role_errors(r)))
 
     def test_must_be_standard(self):
         for tier in ("cheap", "opus", "inherit"):
