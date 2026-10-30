@@ -77,7 +77,9 @@ class Content(unittest.TestCase):
         self.assertEqual(data["tiers"]["standard"]["family"], "sonnet")
         self.assertEqual(data["tiers"]["cheap"]["family"], "haiku")
         self.assertEqual(data["tiers"]["cheap"]["roles"], ["transcriber"])
-        self.assertEqual(data["tiers"]["standard"]["roles"], ["adversarial-reviewer", "implementer", "reviewer"])
+        self.assertEqual(
+            data["tiers"]["standard"]["roles"], ["adversarial-reviewer", "implementer", "researcher", "reviewer"]
+        )
         self.assertEqual(data["roles"]["transcriber"], "cheap")
 
     def test_report_header_order(self):

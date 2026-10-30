@@ -97,7 +97,7 @@ class PolicyLines(unittest.TestCase):
 
 class LeadRules(unittest.TestCase):
     def test_new_rules_are_enforced(self):
-        for rule in ("merge", "paid action", "data class", "researcher planned"):
+        for rule in ("merge", "paid action", "data class", "researcher dispatchable"):
             self.assertIn(rule, validate_mod.LEAD_RULES)
             phrase = validate_mod.LEAD_RULES[rule]
             errs = fixture_errors("templates/lead.md", lambda s, p=phrase: s.replace(p, "REMOVED"), "lead.md")
@@ -115,7 +115,7 @@ class StalePointers(unittest.TestCase):
 class EvalCases(unittest.TestCase):
     def test_two_spend_cases(self):
         cases = {c["id"]: c for c in em.load_registry(ROOT / "evals/cases.json")}
-        self.assertEqual(sorted(cases), list(range(1, 29)))
+        self.assertEqual(sorted(cases), list(range(1, 31)))
         for n in (27, 28):
             self.assertEqual(cases[n]["grading"], "mechanical")
             self.assertIn("spend", cases[n]["input"] + cases[n]["expect"])

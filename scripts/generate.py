@@ -110,6 +110,16 @@ def render_copilot_agent(role, policies, ver, source=None, additions=None):
 
 
 CODEX_NOTES_HEADING = "## Codex capability notes"
+# A role that reads untrusted web content but has no edit or shell capability is only told so on Codex, which cannot
+# remove either from a custom agent. The file therefore names the sandbox the dispatcher must run it under. The agent
+# cannot enforce this on itself: the lead sets the sandbox, and the agent stops if the session shows otherwise.
+CODEX_WEB_SANDBOX = (
+    "Required sandbox: read-only, with approvals on request. This role reads untrusted web content, and Codex cannot "
+    "remove edit or shell from a custom agent, so the dispatcher must start it under a read-only sandbox with "
+    "approvals on request. If the session shows a writable sandbox or approvals off, make no web request, change "
+    "nothing and report that under OPEN. If a fetch cannot run under the read-only sandbox, report that under OPEN; "
+    "never ask to widen the sandbox. UNVERIFIED: this has not been run in Codex."
+)
 TOML_LITERAL_END = "'''"
 CODEX_KEYS = {"name", "description", "developer_instructions"}
 
@@ -135,6 +145,14 @@ def codex_notes(role):
         "`MODEL:` line of the report is the exact model id the session reports, never a family name.",
         "- read, search: honored through Codex's own file and search tools, inside the inherited sandbox.",
     ]
+    if "web" in caps:
+        lines.append("- " + CODEX_WEB_SANDBOX)
+        lines.append(
+            "- web: this role fetches and searches the web through whatever web tools the Codex session has "
+            "(search and fetch depend on the session's configuration, which this file cannot set). With none, "
+            "you have no tools for the web: say so, answer only from material the brief supplies, and label "
+            "every claim INFERRED or NOT FOUND."
+        )
     if "edit" in caps:
         lines.append(
             "- edit: honored, limited by the inherited sandbox (`workspace-write` allows edits in the workspace)."
@@ -148,6 +166,12 @@ def codex_notes(role):
         )
     if "shell" in caps:
         lines.append("- shell: honored through Codex's shell tool, inside the inherited sandbox and approval policy.")
+    if "shell" not in caps:
+        lines.append(
+            "- shell: this role has no shell capability, and Codex cannot remove it from a custom agent. "
+            "The rule that you never run commands is therefore an instruction only; run none, and report any "
+            "command you were unable to avoid."
+        )
     if "skills" in caps:
         lines.append(
             "- skills: the domain packs are Codex skills named `pack-<name>`; a brief that names a pack loads it by "
