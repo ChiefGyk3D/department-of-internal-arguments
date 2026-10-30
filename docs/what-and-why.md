@@ -2,7 +2,7 @@
 
 I started from a ChatGPT-made starter with twelve personas (chief of staff, QA, security architect, and so on). Some of it was good machinery and I kept that: the installer, the policies, the behavioral exercises. But I was already running a smaller design that I had measured, three process roles plus domain packs chosen per dispatch, and twelve personas change too many variables at once to ever tell which one helped. If a review gets better, I want to know whether it was the role, the pack, or the model, and I cannot know that when the persona list is the thing that changed.
 
-So there are five roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And seven packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
+So there are six roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And seven packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
 
 ## The fifth persona
 
