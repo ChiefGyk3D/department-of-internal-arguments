@@ -35,6 +35,7 @@ RUNNERS = {
     "adversarial-reviewer",
     "transcriber",
     "cloud-engineer",
+    "devops-engineer",
 }  # all must be able to run commands
 
 # Built from pieces so this file does not trip the sweep it implements. Word-bounded so a
@@ -95,6 +96,43 @@ CLOUD_ENGINEER_SECTIONS = (
     "PLAN:",
     "BLAST RADIUS:",
     "ROLLBACK:",
+    "SECRETS:",
+    "HANDOFFS:",
+    "OPEN:",
+)
+# The devops-engineer's rules and report sections (issue #87); a rule that silently disappears from the role must
+# fail the gate. Phrases are exact text from roles/devops-engineer.md.
+DEVOPS_ENGINEER_RULES = {
+    "start from a GYST caller": "Start from a GYST caller:",
+    "pin by commit": "Pin by commit.",
+    "one commit for all callers": "all callers in a repository share one commit",
+    "gate named CI green": "Name the gate `CI green`.",
+    "repo-specific jobs local": "Keep only repo-specific jobs local.",
+    "consolidate into GYST": "Consolidate into GYST anything two repositories would both need",
+    "REST API head-pinned": "Read CI results through the REST API, pinned to the head.",
+    "head-pinned watcher": "one head-pinned watcher",
+    "no foreground wait": "Never wait in the foreground.",
+    "no loosening": "Never loosen a check or raise a time bound to make a test pass.",
+    "ratio test": "ratio test",
+    "re-run only where approved": "Re-run only where approved.",
+    "secrets out of workflows": "Secrets stay out of workflows.",
+    "OIDC": "with OIDC (short-lived tokens)",
+    "no merge without the human": "**Never merge without the human's own word.**",
+    "no tag unless asked": "Create no release tag unless the brief asks for it",
+    "administrator for protection": "only through the administrator",
+    "adversarial review handoff": "it goes to the `adversarial-reviewer`",
+    "sources not memory": "Sources, not memory.",
+    "denial is not permission": "A denied command or hook is not permission",
+    "no edit hands code off": "You have no edit capability.",
+    "will not do": "## What you will not do",
+    "no force push": "force push",
+}
+DEVOPS_ENGINEER_SECTIONS = (
+    "TASK:",
+    "CI STATE:",
+    "PROPOSED CHANGES:",
+    "RERUNS:",
+    "WAITS:",
     "SECRETS:",
     "HANDOFFS:",
     "OPEN:",
@@ -294,6 +332,16 @@ def role_errors(r):
             require(phrase in r["body"], f"cloud-engineer lacks the {rule} rule ({phrase!r})")
         for section in CLOUD_ENGINEER_SECTIONS:
             require(section in r["body"], f"cloud-engineer report lacks {section}")
+    if n == "devops-engineer":
+        require(r.get("tier") == "standard", "devops-engineer must be tier standard")
+        require(
+            not {"edit", "web"} & set(tools or []),
+            "devops-engineer is read-only on the repository: no edit or web capability",
+        )
+        for rule, phrase in DEVOPS_ENGINEER_RULES.items():
+            require(phrase in r["body"], f"devops-engineer lacks the {rule} rule ({phrase!r})")
+        for section in DEVOPS_ENGINEER_SECTIONS:
+            require(section in r["body"], f"devops-engineer report lacks {section}")
     return errors
 
 
@@ -438,7 +486,7 @@ def validate(root=ROOT):
 
     try:
         roles = load_roles(root)
-        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the six roles")
+        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the seven roles")
         for r in roles:
             errors.extend(role_errors(r))
         require({r["name"]: r["tier"] for r in roles}.get("transcriber") == "cheap", "transcriber must be tier cheap")
