@@ -20,6 +20,7 @@ PACK_NAMES = (
     "linux-platform",
     "local-llm-routing",
     "cyber-tier-review",
+    "opentofu-spacelift",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 
