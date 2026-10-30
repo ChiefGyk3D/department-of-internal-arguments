@@ -1,7 +1,7 @@
 ---
 name: "gha-security-dast"
 description: "Checklist and measured gotchas for reviewing or writing GitHub Actions workflows (SHA pinning, least-privilege permissions, caller/reusable-workflow permission matching, expression injection, pull_request_target, egress block mode, branch-protection force-push bypass) and OWASP ZAP / DAST automation (context XML parsing, Java regex scope, loopback scope, sign-in proof, report redaction, digest binding). Load for .github/workflows changes, reusable-workflow callers, security scan jobs, or ZAP configuration. Not for general CI speed or caching questions."
-updated: "2026-10-08"
+updated: "2026-10-30"
 ---
 
 # Pack: GitHub Actions security and ZAP/DAST
@@ -33,6 +33,19 @@ A workflow file is code that runs with credentials. Most defects below were not 
 6. **Redaction.** Credentials and tokens must be scrubbed before reports, SARIF, or logs are written or uploaded, including values echoed back in request/response evidence.
 7. **Digest binding.** The ZAP image used for the scan is pinned by digest and the scanned artifact is tied to the verified build; see workflow item 9.
 
+## GYST callers and release
+
+Rules for a repo whose CI calls the shared reusable workflows of git-your-ship-together (GYST). Each ends with where it was measured: GYST files are in that repo, SAFO files are in scrum-around-and-find-out. A line marked INFERRED was not reproduced.
+
+1. **One commit for every caller.** All calls of the shared workflows in a repo name the same commit, each with a version comment (`@<40-hex> # vX.Y.Z`); a test or doc that names the old pin moves with them. (Source: GYST `docs/wiki/Releases-and-supply-chain.md`, "Pins by commit SHA"; this repo's `CLAUDE.md`, last bullet.)
+2. **Re-pin every caller when GYST bumps.** A change in GYST reaches a caller only when that caller re-pins, so a bump is not done until every caller of every shared workflow moved to the new commit. zizmor fails a comment that names a tag which does not exist. (Source: GYST `CHANGELOG.md` intro; `docs/wiki/Contributing-and-developing.md`, "Fetch first".)
+3. **The gate is named `CI green`.** Each shared CI workflow ends in a job `CI green` that needs every other job and fails if any failed; the required check is `<caller job> / CI green`, one per language. (Source: GYST `BASELINE.md` section 2; `docs/DESIGN.md`, "CI".)
+4. **Branch protection before the first merge, and read the required check from it.** Do not assume the name: `gh api repos/OWNER/REPO/branches/main/protection -q '.required_status_checks.checks[].context'` and compare to the caller. A caller that lacks a permission the callee declares ends in `startup_failure` with no check run, so the required check never appears and a merge goes through (see workflow item 3). (Source: GYST `docs/wiki/Getting-started.md`, "`id-token: write`", measured 2026-10-03; the command was run read-only on 2026-10-30. The "before the first merge" timing is a stated requirement in issue #70, not a measurement.)
+5. **A conflicting PR gets no checks.** It has no merge ref, so no `pull_request` run starts and closing and reopening does nothing. When no checks are reported, read `mergeable` first: `gh api repos/OWNER/REPO/pulls/N -q .mergeable`. (Source: SAFO `docs/lessons.md`, "A pull request with a merge conflict gets no checks at all", GYST issue 114. A `null` result while GitHub computes it is INFERRED; read again.)
+6. **Orphaned CodeQL categories.** GitHub closes an alert only when a later analysis of the same category and ref omits it. After a workflow is retired its categories (`/language:python`) are never analyzed again, so their alerts stay open (25 of 29 on one repo, 2026-10-04). List open alerts' `analysis_key`, find keys of workflows that no longer exist, then delete that category's last analysis on the default branch through the code-scanning DELETE endpoint (exact call in the source page, which needs `?confirm_delete`). Trust the PR check summary ("1 configuration not found"), not the analysis list. (Source: GYST `docs/wiki/Security-scanning-explained.md`, "Where results land".)
+7. **Merge through one tested watcher.** It pins the head SHA and requires the `CI green` check run to exist; a hand-rolled merge-state loop passes on a stale or missing run (five stale watcher reports on 2026-10-25). (Source: SAFO `docs/done-means-verified.md`, "The rule in four parts" and "Why: 2026-10-25".)
+8. **GitHub API limits.** A secondary rate limit rejects bursts while the hourly quota still shows headroom: on 2026-10-29 GraphQL "rate limit exceeded" errors arrived with about 3600 of 5000 points left, after a burst of per-card board listings, issue and PR reads, and a per-dispatch lookup (SAFO issue 204). So: serialize requests; wait at least 1 s between writes (POST, PATCH, PUT, DELETE); never list a whole board per card (list once, keep the ids); read through REST rather than `gh issue view` / `gh pr` / `gh project`; on 403 or 429 honor `retry-after`, else wait for `x-ratelimit-reset` when `x-ratelimit-remaining` is 0, else at least a minute; report a limit as "rate limited, retry after T", never as "does not exist" (SAFO issue 204 asks for this). The docs cap concurrency at 100 requests, shared by REST and GraphQL, and say to prefer webhooks to polling. (Source: docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api and .../rate-limits-for-the-rest-api, both read 2026-10-30 with curl, text extracted; SAFO issue 204 body. Which SAFO calls caused the burst is the issue author's account, not reproduced here.)
+
 ## How to verify (commands)
 
 - Pins: `grep -rnE 'uses: .+@' .github/workflows | grep -vE '@[0-9a-f]{40}( |$)'` lists every non-SHA reference (some local `./` actions are expected). Missing version comments: `grep -rnE '@[0-9a-f]{40}\s*$' .github/workflows`.
@@ -42,6 +55,7 @@ A workflow file is code that runs with credentials. Most defects below were not 
 - Opt-outs added in a diff: `git diff <base>... | grep -nE '^\+.*(continue-on-error: *true|require-non-root: *false|nosemgrep|\|\| *true)'`.
 - Pin-guard test bites: temporarily change one pin to `@main` in a scratch copy and run the test; it must fail.
 - Regex scope: write a small Java snippet (`jshell` or a one-file class) that runs `Pattern.compile(regex).matcher(candidate).matches()` over a hostile list.
+- GYST callers: every `uses:` of the shared workflows shows one commit (`grep -rhoE 'git-your-ship-together/\S+@[0-9a-f]{40}' .github/workflows | sed 's/.*@//' | sort -u` prints one line). Required check: the `gh api` command in GYST item 4. Mergeable: item 5.
 - Force-push bypass: `gh api graphql -f query='...'` as above (UNVERIFIED query text; check the schema with `gh api graphql` introspection if it errors).
 
 ## Reviewer reminders
