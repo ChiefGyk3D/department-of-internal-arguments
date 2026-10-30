@@ -21,6 +21,7 @@ PACK_NAMES = (
     "local-llm-routing",
     "cyber-tier-review",
     "opentofu-spacelift",
+    "twingate-doppler",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 
