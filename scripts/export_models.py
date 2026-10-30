@@ -4,7 +4,8 @@
     python3 scripts/export_models.py --check    exit 1 if the committed file differs from what the sources produce
 
 The sources are TIER_MODEL in scripts/lib.py, the tier of each role in roles/*.md, VERSION and
-fragments/report-header.md. Other repositories read the file at a pinned commit with `read_pins`, which is strict:
+fragments/report-header.md, plus BRIEF_KEYS below (the key names of the brief template's machine-readable lines).
+Other repositories read the file at a pinned commit with `read_pins`, which is strict:
 unknown keys, wrong types, duplicate keys, non-canonical bytes and any model id that is not an exact pin are errors.
 Fail closed: any problem exits 1 and nothing is written (the file is built in memory, written to a temp file in the
 same directory, then renamed)."""
@@ -30,7 +31,10 @@ VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 FIELD_RE = re.compile(r"[A-Z][A-Z-]*(?: [A-Z][A-Z-]*)*")
 # A header field name starts a line or follows three spaces or a semicolon; it is followed by a colon.
 HEADER_FIELD_RE = re.compile(r"(?:^|   |; )([A-Z][A-Z-]*(?: [A-Z][A-Z-]*)*):")
-TOP_KEYS = {"schema", "release", "tiers", "roles", "report_header"}
+# The keys the brief template carries as `key: value` lines at the top of its body (templates/brief.md). validate.py
+# checks the template against this tuple and against the export.
+BRIEF_KEYS = ("role", "model")
+TOP_KEYS = {"schema", "release", "tiers", "roles", "report_header", "brief_keys"}
 TIER_KEYS = {"model", "family", "roles"}
 
 
@@ -107,6 +111,7 @@ def build(root=ROOT, tier_model=None, version_text=None):
         "tiers": tiers,
         "roles": by_role,
         "report_header": report_header_fields(header),
+        "brief_keys": list(BRIEF_KEYS),
     }
 
 
@@ -169,6 +174,8 @@ def validate_data(data):
         or len(set(header)) != len(header)
     ):
         raise ModelPinsError("report_header must be a non-empty list of distinct upper-case field names")
+    if data["brief_keys"] != list(BRIEF_KEYS):
+        raise ModelPinsError(f"brief_keys must be exactly {list(BRIEF_KEYS)}")
     return data
 
 

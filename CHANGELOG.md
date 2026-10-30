@@ -36,6 +36,14 @@ Spend and data-class policy for paid and unpaid providers (issue #66, items 1 an
 - Stale pointers: `docs/roles.md` and the 0.4.0 note below no longer say the researcher waits for issue #20 (closed).
 - Tests: `tests/test_spend_policy.py` (parser accept and reject table, template and validator bite tests, one removal test per policy rule and lead rule, the eval cases, the stale pointers); the two pinned eval counts move from 26 to 28.
 
+Brief template gets machine-readable `role:` and `model:` lines (issue #55, unit 3 of the single-source epic).
+
+- `templates/brief.md` opens its body with `role: reviewer` and `model: sonnet`, each alone on its line at line start, one value. The prose line stays for the reasons. `templates/lead.md` and `docs/writing-a-brief.md` say what the lines hold.
+- `export/model-pins.json` gains `brief_keys` (`["role", "model"]`), generated from `BRIEF_KEYS` in `scripts/export_models.py`; the strict reader refuses any other value. The schema number stays 1 (additive key); a consumer that checks for exact keys must accept the new one.
+- `scripts/validate.py` fails when the template has a missing, duplicated, empty, indented or alternative-listing line, a `role` that is not an exported role, a `model` that is not an exported alias (tier family) or exact id, or key lines that differ from `brief_keys`.
+- `tests/test_brief_keys.py`: a reference parser (the contract for a consumer, not shipped) that accepts the filled template and rejects duplicates, `|` or comma values, empty values, keys in code fences or indented, and CRLF, zero-width and bidi variants; drift tests in both directions between template, export and `BRIEF_KEYS`.
+- Limit: the lines are the lead's own word; nothing here shows the named model ran.
+
 `cyber-tier-review` pack: reviewing on a vendor's high-trust cyber-access tier (issue #58). Generic guidance from a maintainer's field notes; no account, enrollment, host or session counts.
 
 - `packs/cyber-tier-review/PACK.md` (the seventh pack): use the tier model for security and adversarial reviews, never the default; a "flagged for possible cybersecurity risk" cutoff means fix the tier and rerun, never reword the prompt, never skip the review; the Codex CLI command shape (`-m`, `-s read-only`, `--skip-git-repo-check`, `--cyber-access-program` from 0.164.0, `< /dev/null`, not supported with `exec review`); the hardware-key error (it arrives after the model ran, `codex login status` and a trivial call prove nothing, the runner reports the exact text and time and stops, re-authenticate, kill stale CLI-side processes by PID); single-flight runs, the prompt shape that passes, a 3-4 round budget, and a review that cannot show its answer is held, not clean. Every CLI and vendor claim is labeled VERIFIED (page or command, read 2026-10-26) or INFERRED in an evidence table; the hardware-key and cutoff wording are INFERRED because no vendor page read that day carries them.

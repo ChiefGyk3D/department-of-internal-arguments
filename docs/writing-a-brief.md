@@ -4,6 +4,17 @@ Every dispatch carries a brief, written from [templates/brief.md](../templates/b
 
 ## The fields
 
+Two plain lines open the brief body, each alone on its line, lowercase key, one value. They are the only part of the brief a program reads:
+
+```
+role: reviewer
+model: sonnet
+```
+
+- `role` is one role name from the export's `roles` (`adversarial-reviewer`, `implementer`, `researcher`, `reviewer` or `transcriber`), never the list.
+- `model` is the alias or exact id the lead passed to the dispatch; on a host that takes no model it is the exact id the human picked. The old prose line (next list) keeps the reasons.
+- A brief with a missing, duplicated, empty or ambiguous line (a `|` or a comma, a key indented or inside a code fence, a CRLF or zero-width character) is incomplete. `scripts/validate.py` enforces this on the template, with the values checked against `export/model-pins.json` (which names the keys in `brief_keys`); a reader such as SAFO's compare mode treats the same shapes as UNKNOWN. The lines show that the brief and a report agree, not that the model ran.
+
 - `spend:`, on its own line at the start of a line, with one value: `none - free-only`, or `paid - approval in the human message at <time>, cap <n> USD`. The paid form names the human's own message and its time; a paid action has its own fresh, single-use approval that a sub-agent cannot inherit and that ends with the job (see [Policies](policies.md)). A brief that needs a paid call and carries no such approval says `none - free-only`, and the agent makes no paid call. The validator checks the template's line; the cap is counted in code, not by the agent.
 - Task and owner; outcome and who uses it; scope and non-goals.
 - Acceptance criteria, with observable examples.
