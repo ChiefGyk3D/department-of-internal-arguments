@@ -53,7 +53,7 @@ RULES = {
     "deny rules win": r"deny.{0,60}precedence|precedence.{0,60}deny",
     "doctl cannot set rule action": r"doctl.{0,80}action",
     "firewalls cover VPC traffic too": r"public and (?:VPC|private)",
-    "no cloud firewall on load balancers": r"cannot apply cloud firewalls to load balancers|firewall.{0,40}load balancers?",
+    "no cloud firewall on load balancers": r"cannot be applied to load balancers|firewall.{0,40}load balancers?",
     "VPC ranges cannot overlap": r"cannot overlap|may not overlap",
     "region default VPC": r"default VPC",
     "VPC cannot span regions": r"span",
