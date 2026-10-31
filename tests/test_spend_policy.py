@@ -115,7 +115,7 @@ class StalePointers(unittest.TestCase):
 class EvalCases(unittest.TestCase):
     def test_two_spend_cases(self):
         cases = {c["id"]: c for c in em.load_registry(ROOT / "evals/cases.json")}
-        self.assertEqual(sorted(cases), list(range(1, 36)))
+        self.assertEqual(sorted(cases), list(range(1, 38)))
         for n in (27, 28):
             self.assertEqual(cases[n]["grading"], "mechanical")
             self.assertIn("spend", cases[n]["input"] + cases[n]["expect"])
