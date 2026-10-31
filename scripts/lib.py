@@ -30,6 +30,7 @@ PACK_NAMES = (
     "cyber-tier-review",
     "opentofu-spacelift",
     "twingate-doppler",
+    "aws",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 

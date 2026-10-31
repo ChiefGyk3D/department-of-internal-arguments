@@ -518,7 +518,7 @@ def validate(root=ROOT):
         )
 
         packs = load_packs(root)
-        require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the nine packs")
+        require({p["dir"] for p in packs} == set(PACK_NAMES), "packs/ must hold exactly the ten packs")
         for p in packs:
             errors.extend(pack_errors(p))
 
