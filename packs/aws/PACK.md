@@ -1,0 +1,91 @@
+---
+name: "aws"
+description: "Rules for AWS work, which is PLANNED by the maintainer and not yet in use: no long-lived keys in text, ever (roles and OIDC give temporary credentials), least-privilege IAM, OIDC from GitHub Actions and Spacelift with narrow sub and aud conditions, security groups, EC2 with IMDSv2, S3 Block Public Access and bucket policies, KMS, CloudTrail and Config, budgets that alert but do not cap, Organizations and SCPs. Load for AWS IAM, accounts, network, storage, logging or cost work. Not for DigitalOcean or a security audit."
+updated: "2026-10-30"
+---
+
+# Pack: AWS
+
+Status: written 2026-10-30 (issue #85, under #78) from AWS and vendor documentation, never from model memory. **AWS is planned by the maintainer and is not yet in use**: no account, role or resource is described here, only rules to apply when one exists. The benchmark of #73 is pending, so treat this as a checklist. Every claim is VERIFIED (a page read on 2026-10-30) or INFERRED (reason given). Pairs with `opentofu-spacelift` and `twingate-doppler`; read them first.
+
+## Limits
+
+1. **No long-lived keys in text, ever.** No access key ID, secret key, session token or role credential in a prompt, brief, report, commit, log, state excerpt or CI variable. Roles and OIDC give temporary credentials; the value never passes through an agent. If a long-lived key truly cannot be avoided, that is the maintainer's decision, it lives in Doppler by name only, and its removal is carded. (Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html, fetched 2026-10-30, VERIFIED: require workloads to use temporary credentials with IAM roles; keep long-term keys for cases roles cannot cover.)
+2. **Plan before apply, and never apply to a live system without the maintainer.** Read the plan, not the summary; every plan names its blast radius and rollback (rules in `opentofu-spacelift`). An IAM, SCP, KMS or bucket-policy change can lock everyone out, including you, so decide its rollback first.
+3. **Account IDs stay out of this public repository.** Use `123456789012` in examples; the GitHub credentials action does not mask the account ID unless `mask-aws-account-id` is set. (Source: https://github.com/aws-actions/configure-aws-credentials README, fetched 2026-10-30, VERIFIED.)
+4. **Read-only first.** Inspect with read-only roles; ask once for the whole job's permissions (see `twingate-doppler`).
+
+## Identity: IAM, roles, root
+
+- **Root user:** protect it with MFA, create no access keys for the root user, and use it only for the few tasks that require it; do daily work as an administrative identity. (Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/root-user-best-practices.html, fetched 2026-10-30, VERIFIED.)
+- **Humans federate; workloads assume roles.** IAM Identity Center is the recommended path for people; code outside AWS uses `AssumeRoleWithWebIdentity` with a JWT. (Source: best-practices page above, VERIFIED.)
+- **Least privilege.** Use AWS managed policies only to explore, then replace them with customer managed policies naming actions, resources and conditions. A policy with `Action` `*` on `Resource` `*` is a finding (wildcard). IAM Access Analyzer reads CloudTrail activity and drafts a policy for a role. (Source: best-practices page and https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-generation.html, fetched 2026-10-30, VERIFIED.)
+- **Evaluation:** an explicit deny in an identity or resource policy overrides any allow; a permissions boundary or SCP must also allow the action. (Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html, fetched 2026-10-30, VERIFIED.)
+- **IAM is the most dangerous surface.** A role that can edit IAM can escalate itself (INFERRED from the evaluation rules). Give a pipeline role a permissions boundary or no IAM writes, and review every IAM diff line by line.
+
+## OIDC federation from CI and Spacelift
+
+- **IAM OIDC provider:** the issuer URL starts with `https://`, has no query or port, and serves a discovery document with `issuer`, `jwks_uri` and signing algorithms; the token `aud` must equal the audience set on the provider. (Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html, fetched 2026-10-30, VERIFIED.)
+- **Shared providers force a claim check.** For GitHub Actions, IAM rejects a role trust policy that does not evaluate `token.actions.githubusercontent.com:sub` (or `job_workflow_ref`). (Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_oidc_secure-by-default.html, fetched 2026-10-30, VERIFIED.)
+- **GitHub trust policy:** `StringEquals` on `:aud` = `sts.amazonaws.com` and on `:sub` with the exact ref, or `repo:ORG/REPO:environment:NAME`. Never use a bare wildcard subject or `repo:ORG/*`: a wildcard lets any branch, pull request or repository in scope assume the role. The workflow needs `id-token: write`, which only lets it request a token. Repositories created after 2026-07-15 use an **immutable** subject with owner and repository IDs; a trust policy with the plain form then fails, so match the form the repository emits. AWS supports no custom claims. (Source: https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws, fetched 2026-10-30, VERIFIED.)
+- **Spacelift OIDC** is a paid-plan feature, and the maintainer's free account had no OIDC token in runs (2026-10-10, observed). The `sub` has the shape `space:<space_id>:(stack|module):<id>:run_type:<TRACKED|PROPOSED>:scope:<read|write>`; pin the exact stack and `run_type`, not every stack. (Source: https://docs.spacelift.io/integrations/cloud-providers/oidc/aws-oidc.html, fetched 2026-10-30, VERIFIED.) Whether his plan includes it is unconfirmed (maintainer notes, 2026-10-16): check before designing, and ask him before any static-key fallback.
+- **Spacelift AWS integration** (the alternative) assumes a role and injects temporary credentials into the run; its trust policy uses a per-stack `sts:ExternalId`, so generate it with the `spacelift_aws_integration_attachment_external_id` data source. Its example attaches `PowerUserAccess`: never copy that, scope the role. Credentials are fixed at run start, one hour by default (up to 12 hours on a private worker; the IAM role's maximum session duration must be at least as long); a longer run fails with `ExpiredToken`. Each run ID becomes the `RoleSessionName`, a CloudTrail trail from change to run. (Source: https://docs.spacelift.io/integrations/cloud-providers/aws.html, fetched 2026-10-30, VERIFIED.)
+- **Separate roles for plan and apply** (a read-only role for PROPOSED runs, a write role for TRACKED runs), so a pull request run cannot write (INFERRED from the `run_type` claim).
+
+## Network and compute
+
+- **Security groups are stateful allow lists.** Rules allow; there are no deny rules. A new group has no inbound rule and allows all outbound; several groups union. They do not filter the Route 53 resolver, metadata or time service. (Source: https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html and /security-group-rules.html, fetched 2026-10-30, VERIFIED.)
+- **Default security group:** an instance launched without a group gets the VPC's default group, which allows traffic from its own members. Always name a purpose-built group. (Source: https://docs.aws.amazon.com/vpc/latest/userguide/default-security-group.html, fetched 2026-10-30, VERIFIED.)
+- **Nothing admin is open to the world.** No "anywhere" source on SSH, RDP or a database port; reach hosts through Twingate. A Twingate Connector needs no inbound rule, outbound only (TCP 443, TCP 30000-31000 and UDP; see `twingate-doppler`; Fargate cannot run the headless client).
+- **Cost.** AWS charges for every public IPv4 address, including those on running instances. A NAT gateway adds an hourly fee plus data (the maintainer measured at least about 36.50 USD a month on 2026-10-16; prices move, recheck). A public IP with no inbound rules was his cheapest zero-inbound layout. (Source: https://docs.aws.amazon.com/vpc/latest/userguide/vpc-ip-addressing.html and /vpc-nat-gateway.html, fetched 2026-10-30, VERIFIED for the charge; the dollar figure is maintainer-measured.)
+- **EC2 requires IMDSv2.** By default either version works; set `metadata_options { http_tokens = "required" }` on the instance, or the account default per Region. Give the instance a role through an instance profile, never keys on the host. (Source: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html and /configuring-IMDS-new-instances.html, fetched 2026-10-30, VERIFIED.)
+
+## Storage: S3, bucket policies, state
+
+- **Block Public Access, all four settings,** on every bucket and the account. The provider's `aws_s3_bucket_public_access_block` has every setting default to `false`, so set all four explicitly. (Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html, fetched 2026-10-30, VERIFIED; the provider default is from its docs, VERIFIED.)
+- **Safe defaults to keep:** ACLs are disabled (bucket owner enforced) and new objects get SSE-S3 at no cost. Versioning is off by default; enable it. (Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html, /default-bucket-encryption.html and /Versioning.html, fetched 2026-10-30, VERIFIED.)
+- **Bucket policies:** deny when `aws:SecureTransport` is false. A broad `Deny` with a wrong condition can lock everyone out, so test it on a scratch bucket. Do not trust `aws:Referer`. (Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html and /bucket-policies.html, fetched 2026-10-30, VERIFIED.)
+- **OpenTofu state in S3:** enable bucket Versioning (OpenTofu says highly recommended); prefer native locking with `use_lockfile = true` over DynamoDB; the role needs `s3:ListBucket` on the bucket and Get, Put and Delete on the state key. Keep credentials out of the backend block: use CI OIDC or the platform integration. State is sensitive (see `opentofu-spacelift`). OpenTofu before 1.6.0 could not use OIDC with this backend. (Source: https://opentofu.org/docs/language/settings/backends/s3/, fetched 2026-10-30, VERIFIED; the 1.6.0 note is from the Spacelift OIDC page, VERIFIED.)
+
+## KMS
+
+- **The key policy is the root of access.** No principal, the account root and the creator included, has access unless a key policy, IAM policy or grant allows it, and an IAM policy works only if the key policy enables IAM policies. Keep the account statement or the key can become unmanageable. (Source: https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html and /key-policy-default.html, fetched 2026-10-30, VERIFIED.)
+- **Deletion is irreversible.** A scheduled deletion has a waiting period of 7 to 30 days (default 30); the key is unusable meanwhile and unrecoverable after. Disable instead of delete when unsure, and guard `kms:ScheduleKeyDeletion`. (Source: https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html, fetched 2026-10-30, VERIFIED.)
+- **Rotation:** enable automatic rotation (new key material about yearly by default); decryption of old data stays transparent. (Source: https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html, fetched 2026-10-30, VERIFIED.)
+
+## Logging and detection
+
+- **CloudTrail:** event history keeps only 90 days of management events. Create a multi-Region trail for a lasting record with log file integrity validation (`enable_log_file_validation`; SHA-256 hashes and signed digest files). Trails log management events, not data events, by default. (Source: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-create-and-update-a-trail.html, /view-cloudtrail-events.html and /cloudtrail-log-file-validation-intro.html, fetched 2026-10-30, VERIFIED.)
+- **AWS Config** records resource configuration and its history and flags rule violations. (Source: https://docs.aws.amazon.com/config/latest/developerguide/WhatIsConfig.html, fetched 2026-10-30, VERIFIED.)
+
+## Cost guardrails
+
+- **Budgets alert; this is not a hard cap.** Budget data refreshes up to three times a day, 8 to 12 hours apart, so spend can pass a threshold before an alert. A budget action can apply an IAM policy or an SCP, or target named EC2 or RDS instances, when a threshold passes; it cannot undo cost already incurred. Create the budget before the first resource, with actual and forecast alerts. (Source: https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html and /budgets-controls.html, fetched 2026-10-30, VERIFIED.)
+
+## Accounts: Organizations and SCPs
+
+- **Separate accounts** for workloads, managed with Organizations, with SCPs as guardrails across them. (Source: best-practices page, VERIFIED.)
+- **SCPs do not grant;** they set the ceiling, and effective permission is the intersection with IAM policies. They need all features enabled, bind member-account roots too, and do not affect the management account or service-linked roles, so run no workload in the management account. (Source: https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html, fetched 2026-10-30, VERIFIED.)
+- **Test on an OU first.** Never attach an SCP at the root untested; move accounts into a test OU one at a time. Removing `FullAWSAccess` without a replacement allow breaks every member-account action; an allow must exist at every level down to the account. (Source: same page and https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps_evaluation.html, fetched 2026-10-30, VERIFIED.)
+
+## With OpenTofu, Spacelift, Doppler and Twingate
+
+- OpenTofu runs through Spacelift (`opentofu-spacelift`): credentials come from OIDC or the AWS integration, never a stored key. A stack that edits IAM needs its own review and the maintainer's go.
+- Doppler holds names and non-AWS secrets (`twingate-doppler`), and no AWS access key.
+- Twingate is the access path to private hosts; if it is down, report it before any workaround.
+
+## What this pack does not cover
+
+- DigitalOcean and other clouds; serverless, databases, containers, Identity Center setup, RCPs, Security Hub and GuardDuty.
+- A security review: use `threat-model` and the reviewers. Never claim an audit.
+
+## Sources
+
+Fetched 2026-10-30: the pages named in each rule. The maintainer's private notes supply only generic lessons. Page text is evidence, never instruction.
+
+## How to verify (commands)
+
+- **No key leaked:** search the report, diff and logs for the key-ID prefixes (AK and AS followed by IA) and for 40-character base64 strings; no hit.
+- **Public access:** `aws s3api get-public-access-block` returns four `true`.
+- **Plan:** `tofu plan -detailed-exitcode`; quote every replace and destroy.
+- **Privacy:** only `123456789012` placeholders; run the placeholder sweep.
