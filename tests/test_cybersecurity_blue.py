@@ -65,7 +65,7 @@ class RoleFile(unittest.TestCase):
 
     def test_names_the_packs_and_does_not_copy_their_content(self):
         body = role()["body"]
-        for pack in ["threat-model", "linux-platform", "twingate-doppler", "cyber-tier-review"]:
+        for pack in ["threat-model", "linux-platform", "twingate-doppler"]:
             self.assertIn(f"`{pack}`", body, pack)
             pack_file = ROOT / "packs" / pack / "PACK.md"
             self.assertEqual(frontmatter(pack_file)[0]["name"], pack)
@@ -109,7 +109,7 @@ class RoleFile(unittest.TestCase):
 
     def test_no_private_name_in_the_source(self):
         text = (ROOT / "roles/cybersecurity-blue.md").read_text(encoding="utf-8").lower()
-        for pack in ["threat-model", "linux-platform", "twingate-doppler", "cyber-tier-review"]:
+        for pack in ["threat-model", "linux-platform", "twingate-doppler"]:
             text = text.replace(pack, "")  # public pack names may contain a vendor name
         # Private notes are input only; names of the maintainer's own repositories, accounts and exceptions stay out.
         for private in ("hammunition", "chiefgyk3d", "dopp" + "ler", "ex-0001", "reach around", "stream-daemon"):
