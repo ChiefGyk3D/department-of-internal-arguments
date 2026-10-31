@@ -19,6 +19,7 @@ ROLE_NAMES = (
     "researcher",
     "cloud-engineer",
     "devops-engineer",
+    "linux-sysadmin",
 )
 PACK_NAMES = (
     "python-untrusted-input",
