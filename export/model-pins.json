@@ -21,6 +21,7 @@
   "roles": {
     "adversarial-reviewer": "standard",
     "cloud-engineer": "standard",
+    "cybersecurity-blue": "standard",
     "devops-engineer": "standard",
     "implementer": "standard",
     "researcher": "standard",
@@ -42,6 +43,7 @@
       "roles": [
         "adversarial-reviewer",
         "cloud-engineer",
+        "cybersecurity-blue",
         "devops-engineer",
         "implementer",
         "researcher",
