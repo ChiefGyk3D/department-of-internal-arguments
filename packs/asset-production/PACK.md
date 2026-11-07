@@ -16,7 +16,7 @@ Status: owner-set checks, written 2026-11-07. Each rule is a measurable check. E
    - Quiet zone >= 4 modules on every side.
    - **Decode round-trip:** `zbarimg --raw <file>` prints a string equal to the intended canonical URL, byte for byte. A code that decodes to something else, or to nothing, fails.
    - The URL is the canonical destination. No third-party shortener or redirecting wrapper (a shortener can be re-pointed or retired, and it hides the destination).
-3. **SVG hygiene:** no `<script>`, no event-handler attributes, no external references (`href` or `xlink:href` to another origin, `@import`, remote `url(...)`), a `viewBox` present, and `svgo` runs clean (no further changes proposed). Greps: `grep -nEi '<script|on[a-z]+=|https?://' file.svg` (the XML namespace line is the one allowed hit) and `grep -L viewBox file.svg`.
+3. **SVG hygiene:** no `<script>`, no event-handler attributes, no external references (`href` or `xlink:href` to another origin, `@import`, remote `url(...)`), a `viewBox` present, and `svgo` runs clean (no further changes proposed). Greps: `grep -nEi '<script|[[:space:]]on[a-z]+=|(https?:)?//[a-z0-9]|@import|url\([[:space:]]*["'"'"']?[^#"'"'"')[:space:]]' file.svg` (this covers http, protocol-relative `//host`, CSS `@import` and remote `url(...)`; the XML namespace line is the one allowed hit, and `url(#id)` is local) and `grep -L viewBox file.svg`. Where a parser is available, prefer it over grep.
 4. **Raster size table** (a missing size is a finding):
 
    | Use | Size |
@@ -29,7 +29,7 @@ Status: owner-set checks, written 2026-11-07. Each rule is a measurable check. E
 
    Check the pixel size of the real file (`identify -format '%wx%h' file.png`), not the file name.
 5. **Mascot clear-space and minimum size are numbers in a brand file** (for example `brand/BRAND.md`): clear-space in pixels or as a fraction of the mark's height, minimum rendered size in pixels. A dimension check compares each placed instance against those numbers. No numbers on file is a finding; do not invent them.
-6. **Strip EXIF and GPS** from every shipped raster: `exiftool -all= file` and confirm with `exiftool -gps:all -s file` printing nothing. Check the shipped copy, not the source.
+6. **Strip EXIF and GPS** from every shipped raster: `exiftool -all= -overwrite_original file` (without `-overwrite_original`, exiftool keeps the unstripped `file_original` beside it; or write to a separate destination with `-o`) and confirm with `exiftool -gps:all -s file` printing nothing. Check the shipped copy, not the source, and confirm `find <asset dir> -name '*_original'` prints nothing so no backup ships.
 7. **Third-party icons and fonts:** the license must be on an owner-kept allow list (file in the repository, one license per line), and the attribution the license requires is present where it requires it. A license not on the list is escalated, not decided here.
 8. **Print and merch art:** 300 DPI at final size, bleed as the printer specifies (get the number from the printer's current spec sheet, record its source), and transparent PNG or vector. Report the measured DPI and pixel size against the final physical size.
 

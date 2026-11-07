@@ -2,7 +2,9 @@
 right, the generated skills exist, the packs hold no private value, and the guard bites."""
 
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -122,8 +124,73 @@ class WebAssetCopyPacks(unittest.TestCase):
 
     def test_copy_review_is_marked_pilot_and_embeds_no_voice_rules(self):
         text = self.text("copy-review")
-        self.assertIn("Pilot pack, no item measured", text.split("---", 2)[1])
+        front, body = text.split("---\n", 2)[1:]
+        self.assertIn("Pilot pack, no item measured", front)
+        self.assertRegex(body, r"Status: pilot pack.{0,80}No item here was measured")
         self.assertNotRegex(text, r"(?i)\bsample\b.{0,40}voice|voice rules?:")
+
+    def test_secret_scan_prints_location_and_kind_only(self):
+        text = self.text("copy-review")
+        self.assertIn("grep -HnEio", text)
+        self.assertNotIn("grep -nEi", text)
+        self.assertIn("--redact", text)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "notes.txt"
+            f.write_text("run it with API_KEY=" + "PLANTEDVALUE123\n", encoding="utf-8")
+            cmd = re.search(r"`(grep -HnEio [^`]+?) <files>`", text).group(1)
+            out = subprocess.run(cmd + f" {f}", shell=True, capture_output=True, text=True).stdout
+        self.assertIn(":1:", out)
+        self.assertNotIn("PLANTEDVALUE123", out)
+
+    def test_url_check_uses_get(self):
+        text = self.text("copy-review")
+        self.assertNotIn("curl -sIL", text)
+        self.assertRegex(text, r"curl -sL --max-redirs 2")
+
+    def test_exiftool_leaves_no_original_backup(self):
+        text = self.text("asset-production")
+        self.assertIn("-overwrite_original", text)
+        self.assertIn("_original", text)
+
+    def test_svg_check_covers_protocol_relative_css_url_and_import(self):
+        text = self.text("asset-production")
+        cmd = re.search(r"`(grep -nEi '[^`]+?) file\.svg`", text).group(1)
+        for bad in (
+            '<image href="//cdn.example.test/a.png"/>',
+            "<style>@import 'a.css';</style>",
+            '<rect style="fill:url(https://example.test/a)"/>',
+            "<script>x</script>",
+        ):
+            with self.subTest(bad), tempfile.TemporaryDirectory() as d:
+                f = Path(d) / "a.svg"
+                f.write_text(bad + "\n", encoding="utf-8")
+                self.assertEqual(subprocess.run(cmd + f" {f}", shell=True, capture_output=True).returncode, 0)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "ok.svg"
+            f.write_text('<svg viewBox="0 0 1 1"><rect fill="url(#g)"/></svg>\n', encoding="utf-8")
+            self.assertEqual(subprocess.run(cmd + f" {f}", shell=True, capture_output=True).returncode, 1)
+
+    def test_image_check_is_whole_tag_and_accepts_aspect_ratio(self):
+        text = self.text("web-quality")
+        script = re.search(r"```python\n(.*?)```", text, re.S).group(1)
+        html = (
+            '<img src="a.png" alt="a" width="1" height="1">\n'
+            '<img\n  src="b.png"\n  alt="b">\n'
+            '<img src="c.png" alt="c" style="aspect-ratio: 16 / 9">\n'
+            '<img src="d.png" width="1" height="1">\n'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "check.py").write_text(script, encoding="utf-8")
+            page = Path(d) / "p.html"
+            page.write_text(html, encoding="utf-8")
+            out = subprocess.run(
+                [sys.executable, str(Path(d) / "check.py"), str(page)], capture_output=True, text=True
+            ).stdout
+        self.assertIn("p.html:2:", out)  # the multi-line tag, reported at its opening line
+        self.assertIn("p.html:6:", out)  # no alt
+        self.assertNotIn("p.html:1:", out)
+        self.assertNotIn("p.html:5:", out)  # aspect-ratio is accepted
+        self.assertIn("images collected: 4", out)
 
     def test_generated_skills_exist(self):
         for pack in RULES:

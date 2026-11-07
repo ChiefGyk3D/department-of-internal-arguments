@@ -32,8 +32,40 @@ This pack sets thresholds and build/deploy checks. It does not copy the procedur
 
 ## Quick greps (collect loosely, assert strictly)
 
-- Images without dimensions: `grep -rnE '<img ' public | grep -vE 'width=.*height=|height=.*width='` must return nothing (or each hit is explained).
-- Images without alt: `grep -rnE '<img ' public | grep -v 'alt='` must return nothing.
+- Images: a line-based grep misses tags that span lines, so check whole tags. Save this as `check-img.py` and run `find public -name '*.html' -print0 | xargs -0 python3 check-img.py`. It reports each `<img>` with no `alt`, or with neither explicit `width` and `height` nor an inline `aspect-ratio`, and prints how many images it collected. An aspect-ratio set in a stylesheet cannot be seen here; report such images as needing a stylesheet check.
+
+```python
+import pathlib
+import sys
+from html.parser import HTMLParser
+
+
+class Imgs(HTMLParser):
+    def __init__(self, name):
+        super().__init__()
+        self.name, self.count = name, 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "img":
+            return
+        self.count += 1
+        a = {k: v or "" for k, v in attrs}
+        line = self.getpos()[0]
+        if "alt" not in a:
+            print(f"{self.name}:{line}: img without alt")
+        if not ("width" in a and "height" in a) and "aspect-ratio" not in a.get("style", ""):
+            print(f"{self.name}:{line}: img without width and height or aspect-ratio")
+
+
+total = 0
+for name in sys.argv[1:]:
+    parser = Imgs(name)
+    parser.feed(pathlib.Path(name).read_text(encoding="utf-8"))
+    parser.close()
+    total += parser.count
+print(f"images collected: {total}")
+```
+
 - Third-party scripts: `grep -rnoE '<script[^>]+src="https?://[^"]+"' public` lists origins; each must carry `async` or `defer`.
 - A guard that finds zero images has collected nothing: say so, and do not report a pass.
 
