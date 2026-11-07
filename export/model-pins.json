@@ -22,6 +22,7 @@
     "adversarial-reviewer": "standard",
     "cloud-engineer": "standard",
     "devops-engineer": "standard",
+    "grc-analyst": "standard",
     "implementer": "standard",
     "researcher": "standard",
     "reviewer": "standard",
@@ -43,6 +44,7 @@
         "adversarial-reviewer",
         "cloud-engineer",
         "devops-engineer",
+        "grc-analyst",
         "implementer",
         "researcher",
         "reviewer"

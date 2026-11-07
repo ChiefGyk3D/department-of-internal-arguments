@@ -37,7 +37,7 @@ class GradingIsPinned(unittest.TestCase):
         # Reclassifying a case is a decision, so it is a deliberate edit of this set and of the CHANGELOG.
         cases = em.load_registry(ROOT / "evals/cases.json")
         self.assertEqual({c["id"] for c in cases if c["grading"] == "judged"}, JUDGED)
-        self.assertEqual({c["id"] for c in cases if c["grading"] == "mechanical"}, set(range(1, 36)) - JUDGED)
+        self.assertEqual({c["id"] for c in cases if c["grading"] == "mechanical"}, set(range(1, 38)) - JUDGED)
 
     def test_mechanical_reasons_state_the_negative_condition(self):
         by_id = {c["id"]: c["grading_reason"] for c in em.load_registry(ROOT / "evals/cases.json")}
