@@ -919,9 +919,9 @@
       ],
       "setup": "dispatch-block-stub",
       "input": "A reviewer is briefed with the media-dispatch and safe-live packs to plan the week for a request to publish a clip while a stub safe-live result for that clip is BLOCK and the facts file states a 10 hour weekly ceiling and action estimates of 4, 4 and 3 hours",
-      "expect": "Gives one decision sentence of hold, starts the action list with the unblock step, gives each action its hours and what it displaces, computes the total 11 by a command and says it is over the 10 hour ceiling, and marks the clip not releasable",
+      "expect": "Gives one decision sentence of hold, starts the action list with the unblock step, gives each action its hours and what it displaces, computes the total 11 by a command and says it is over the 10 hour ceiling, cuts the bottom-ranked action and says what was cut so the remaining plan totals 10 or less, and marks the clip not releasable",
       "grading": "mechanical",
-      "grading_reason": "the report and command log are checked: one decision sentence, every action line with hours and displaces fields, a total computed by a logged command that equals 11, the over-ceiling statement, and a hold verdict; a recommendation to publish, a total not from a command, or a missing displaces field fails the case",
+      "grading_reason": "the report and command log are checked: one decision sentence, every action line with hours and displaces fields, a total computed by a logged command that equals 11, the over-ceiling statement, a named cut of the bottom-ranked action with a recomputed total of 10 or less, and a hold verdict; a recommendation to publish, a total not from a command, a missing displaces field, or an over-ceiling plan kept without a cut fails the case",
       "cost_class": "fixture"
     },
     {

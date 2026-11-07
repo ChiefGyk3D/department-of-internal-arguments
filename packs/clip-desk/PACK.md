@@ -15,7 +15,16 @@ Status: written 2026-11-07. Lengths and the weekly count are owner-set. The clip
 3. **Length: target 60 to 120 s; up to 180 s for a technical story** (owner-set). Check with `ffprobe` on the exported file. A clip outside the range is flagged, not trimmed by guess. Check each platform's current maximum against its live help page before export (URL and date in the report); this pack states none.
 4. **Never stretch a weak clip.** If a candidate has no payoff, drop it. The weekly target is about 3 finished clips; fewer is a valid week and the report says "N of 3 met the bar". Padding, slow motion or looping to reach a length is a defect.
 5. **Dedupe.** Keep a ledger file (recording, start, end, hook line, platform, publish date). A new clip whose span overlaps a ledgered span by more than 50% of the shorter clip, or whose hook line repeats one, is dropped or merged. Verify: the ledger was read before cutting and the report names any overlap found.
-6. **Caption QA.** Every clip has captions, burned in or as a sidecar file. Run the captions through the owner's technical-name list (tool names, CVE identifiers, protocols, acronyms; one per line, in the overlay) with `grep -nFi -f <list> <captions>` for the expected spellings, and read every line containing a digit, a hyphen or an uppercase run against the audio. Report each correction. A caption of more than 2 lines on screen, or outside the safe area, is flagged.
+6. **Caption QA.** Every clip has captions, burned in or as a sidecar file. A grep for the technical-name list only finds spellings already present, so it is a prefilter and never the check. The check compares the captions against the transcript and the owner's technical-name list (tool names, CVE identifiers, protocols, acronyms; one per line, in the overlay) and reports missing and mismatched terms (a misspelling such as `kubctl` for `kubectl`, or an omitted term):
+
+```bash
+# args: terms.txt transcript.txt captions.txt ; prints terms the transcript has that the captions lack
+grep -oiwFf "$1" "$2" | tr 'A-Z' 'a-z' | sort -u > /tmp/dia_t.$$
+grep -oiwFf "$1" "$3" | tr 'A-Z' 'a-z' | sort -u > /tmp/dia_c.$$
+comm -23 /tmp/dia_t.$$ /tmp/dia_c.$$; rm -f /tmp/dia_t.$$ /tmp/dia_c.$$
+```
+
+Each printed term is a missing or mismatched caption term: find it in the captions by eye and correct it. Also list tokens that appear in the captions but not the transcript (`tr -cs 'A-Za-z0-9-' '\n' < captions | sort -u` against the same for the transcript, `comm -13`) and read each against the audio. Read every line containing a digit, a hyphen or an uppercase run against the audio. Report each correction. A caption of more than 2 lines on screen, or outside the safe area, is flagged.
 7. **Vertical framing check.** A hard center crop of a 16:9 recording is not accepted without a check. Build a vertical layout (face, screen or both, stacked or cropped on purpose) and verify with a frame grab (`ffmpeg -ss <t> -i clip.mp4 -frames:v 1 f.png`) that the subject, the caption area and any on-screen text are inside the destination safe area from `stage-crew`. Output is 9:16 (1080 x 1920 pixels is the planning size; verify the destination's current spec live).
 8. **Thumbnail and title template (YouTube packaging).** One subject, three words or fewer of text, contrast checked by ratio (4.5:1 body text, 3:1 large text; compute the ratio, do not eyeball), one face or mascot position per series. A title leads with the concrete result and names no real third-party target as something to attack. Verify: the contrast ratio is in the report; `safe-live` has cleared the thumbnail. If the platform offers thumbnail or title testing, check live that it exists before relying on it.
 9. **Per-platform export presets.** One preset per destination: container, resolution, frame rate, bitrate cap, loudness target and max duration. The values come from each platform's live help page with URL and date read, stored in a presets file with those two columns; a row with no source or older than the review is unknown and must be re-fetched. Verify with `ffprobe` that each export matches its preset row.
@@ -31,7 +40,7 @@ Per clip: recording, in and out, duration, hook, context, payoff, ledger check, 
 - The recording duration, pass-1 candidate count and kept count are stated and the transcript duration was checked.
 - Every clip's duration comes from `ffprobe`, not from the edit list.
 - The ledger was read and updated; overlaps are reported.
-- Caption corrections cite the technical-name list file used.
+- Caption corrections cite the technical-name list and transcript files used and list the missing and mismatched terms found.
 - Each export was probed against its preset and the preset source URLs have dates.
 - No clip is released without a `safe-live` PASS.
 

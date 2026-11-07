@@ -3,7 +3,9 @@ safe-live keeps its block authority, front-door keeps the partner parity rule, t
 guard bites."""
 
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -49,9 +51,13 @@ RULES = {
         "frame count rule": r"floor\(duration_seconds / 5\)",
         "ocr": r"tesseract",
         "secret shapes": r"BEGIN \[A-Z \]\*PRIVATE KEY",
-        "location and kind": r"location and kind, never the matched value",
+        "location and kind": r"file:line: kind` only, never the matched text",
+        "sampling is prefilter": r"Sampling is a prefilter only",
+        "full duration review": r"whole duration",
+        "scene change": r"scene,0\.05",
+        "thumbnail own path": r"Thumbnail path",
+        "thumbnail no duration": r"no duration",
         "exiftool strip": r"exiftool -all= -overwrite_original",
-        "thumbnails": r"Thumbnails and titles are scrubbed",
         "scope line": r"[Ll]ab-only scope line",
         "disclosure always verified": r"ALWAYS verified against the live platform or regulator text, "
         r"never taken from memory",
@@ -73,6 +79,8 @@ RULES = {
         "dedupe": r"Dedupe",
         "caption qa": r"Caption QA",
         "technical names": r"technical-name list",
+        "compare to transcript": r"comm -23",
+        "missing and mismatched": r"missing and mismatched",
         "vertical framing": r"Vertical framing check",
         "nine sixteen": r"9:16",
         "thumbnail contrast": r"4\.5:1 body text, 3:1 large text",
@@ -176,6 +184,44 @@ class MediaPacks(unittest.TestCase):
         text = self.text("safe-live")
         self.assertNotRegex(text, r"(?i)\"(ad|advertisement|sponsored)\"")
         self.assertIn("record its URL and the date read", text)
+
+    def test_scan_block_prints_location_and_kind_only(self):
+        text = self.text("safe-live")
+        script = re.search(r"```bash\n(.*?)```", text, re.S).group(1)
+        planted = "api_key=" + "PLANTEDVALUE123\nhost 10.1." + "2.3 up\nclean line\n"
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "ocr.txt"
+            f.write_text(planted, encoding="utf-8")
+            out = subprocess.run(["bash", "-c", script, "scan", str(f)], capture_output=True, text=True).stdout
+        self.assertIn(":1: label", out)
+        self.assertIn(":2: ipv4", out)
+        self.assertNotIn("PLANTEDVALUE123", out)
+        self.assertNotIn("10.1.", out)
+        self.assertNotIn("clean line", out)
+
+    def test_caption_compare_finds_misspelling_and_omission(self):
+        text = self.text("clip-desk")
+        cmd = re.search(r"```bash\n(.*?)```", text, re.S).group(1)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "terms.txt").write_text("kubectl\nnmap\n", encoding="utf-8")
+            (Path(d) / "transcript.txt").write_text("run kubectl then nmap\n", encoding="utf-8")
+            (Path(d) / "captions.txt").write_text("run kubctl then\n", encoding="utf-8")
+            out = subprocess.run(
+                ["bash", "-c", cmd, "cmp", "terms.txt", "transcript.txt", "captions.txt"],
+                capture_output=True,
+                text=True,
+                cwd=d,
+            ).stdout
+        self.assertIn("kubectl", out)
+        self.assertIn("nmap", out)
+
+    def test_dispatch_eval_requires_the_cut(self):
+        import json
+
+        cases = json.loads((ROOT / "evals/cases.json").read_text(encoding="utf-8"))["cases"]
+        case = next(c for c in cases if c["id"] == 44)
+        self.assertRegex(case["expect"], r"bottom-ranked")
+        self.assertRegex(case["grading_reason"], r"cut")
 
     def test_generated_skills_exist(self):
         for pack in RULES:
