@@ -6,10 +6,10 @@ Release 0.4.0. Apache-2.0.
 
 ## Read in this order
 
-1. [What and why](what-and-why.md): why seven roles and nine packs, not a dozen personas.
+1. [What and why](what-and-why.md): why seven roles and ten packs, not a dozen personas.
 2. [Install](install.md): project and user layouts, preview then apply, `--update`, and why you never symlink.
 3. [Roles](roles.md): the seven roles, how they are generated, and what a tier means.
-4. [Packs](packs.md): the nine domain packs and when to name one.
+4. [Packs](packs.md): the ten domain packs and when to name one.
 5. [Policies](policies.md): the four policies every generated agent carries.
 6. [Writing a brief](writing-a-brief.md): the brief template and the lead's checklist.
 7. [Overlay and ownership](overlay-and-ownership.md): the marker hash, the private overlay and file modes.
