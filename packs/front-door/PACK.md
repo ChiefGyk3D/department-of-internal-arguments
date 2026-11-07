@@ -1,0 +1,42 @@
+---
+name: "front-door"
+description: "Schedule and distribution: one canonical schedule source, a link hub generated from one data file, Discord and Matrix community rules, a platform priority list (tend the top few by hand, automate the rest), and a weekly rhythm sized to a stated capacity ceiling. Carries the PARTNER PARITY RULE: a creator contractually partnered with two or more platforms diminishes none against another in any surface. Load when publishing a schedule, building a link hub or bios, setting community rules or planning the week. Not for leak review (safe-live)."
+updated: "2026-11-07"
+---
+
+# Pack: front door
+
+Status: written 2026-11-07. The rules are constraints and the hour figures are estimates, not findings: treat the whole pack as pilot until the owner's weekly log shows the real hours. `safe-live` BLOCKS stand over everything here.
+
+## PARTNER PARITY RULE
+
+When the facts file lists two or more platforms as contractually partnered, **none may be diminished against another in any surface**: link hub, bios, panels, schedule graphic, announcements, outros, chat commands and automation. Same size, same prominence, stable order, same wording quality. Verify with a parity table, one row per surface and one column per partnered platform, recording for each cell: rendered size in pixels, position index, the exact text, and the date. The check passes only if every cell in a row is equal on size and wording and the position order does not change between runs. Order is fixed by a stated rule (for example alphabetical within the partnered group) so it never depends on who is live. Automation that posts to one partnered platform and not another is a defect. A unilateral change that favors or demotes one is a BLOCK for `front-door`; the owner rules on any exception in the owner's own message. The contract terms themselves are never read from or stated in this pack: the owner supplies which platforms are partnered, and the report does not interpret a contract.
+
+## Rules
+
+1. **One canonical schedule source.** A single data file holds the schedule: weekday, start time with an explicit IANA timezone name, duration, platform list, status. Every rendering (text, graphic, link-hub page, calendar feed, announcement) is generated from it. Verify: regenerate all renderings and `diff` against the published copies; any diff is drift. The graphic always has a text version and alt text, because text inside an image is invisible to a screen reader (WCAG 1.1.1). Times are shown in the one stated timezone.
+2. **The link hub is generated from one data file.** The hub, every bio's link line and every panel link come from the same file of (platform, handle, URL, rank, partner flag). Handles are the owner's; this pack and its samples use placeholders (`example.test`). Verify: a generator script writes the hub; the published page is compared with `diff`; every URL returns 2xx within 2 redirects (`curl -sL --max-redirs 2 -o /dev/null -w '%{http_code}\n' <url>`); the count of links on the page equals the count of rows in the file.
+3. **Bios agree.** The first line of every bio is identical across platforms where the platform allows it; character limits live in a table with a source URL and a date read (re-fetched when older than the review). Verify by extracting the first line from each and `sort -u | wc -l` equals 1 (or the report lists the platform whose limit forces a difference).
+4. **Discord and Matrix rules.** Both communities carry the same rules text, generated from one file: scope statement (lab-only, no help attacking third parties), what is not discussed, moderation contact, how to report. A rules channel, a verified-onboarding step, roles for subscriber, member and moderator, and an announcements channel fed by an automation (going live, new video). Verify: `diff` of the rules text between the two; the automation posts a test message and the report shows the time. Setting names and paths in each product are fetched live from its docs, not remembered.
+5. **Platform priority list.** The owner ranks platforms. The top few (pilot: three) are tended by hand: replies, posts and community presence. The rest are automated: crossposted from the schedule and clip ledger with a human review step for anything public. Verify: the list is a file with rank and mode (`hand` or `auto`); the weekly log shows hand-tended platforms were visited.
+6. **Weekly rhythm sized to a stated capacity ceiling.** The owner states hours per week available (in the facts file). The plan lists each task with an hour estimate and the total must be at or below the ceiling; the sum is computed by code, not by the model. If the plan is over, name what is dropped or displaced. Stream nights come from the schedule file and are not planned over. The weekly log records actual hours so the estimates can be replaced by measurements.
+7. **Announcements follow the schedule file.** A change to the schedule changes the file first; announcements are regenerated, never typed by hand. A canceled stream is posted on every surface within the same hour (pilot) with the same wording, parity table checked.
+8. **Event and platform facts are fetched.** Any platform limit, API behavior or feature (for example how go-live events are delivered) is read from the vendor's current docs with URL and date; a retired interface is not assumed to still work.
+9. **Public copy in the owner's voice** goes to the private voice skill; this pack restates none of it. Drafts go to the local model step in the brief; code does the counting and diffing.
+
+## Deliverable
+
+Schedule diff result; hub generation and link check results; the bio first-line check; the rules diff; the priority file; the weekly plan with hour estimates, the computed total and the ceiling; the parity table when two or more partnered platforms exist; facts to verify; not verified.
+
+## How to verify (before you hand it back)
+
+- Every rendering was regenerated from its data file and diffed against what is published.
+- Link count equals data-file rows, and each URL's status is listed.
+- The parity table is present whenever the facts file lists two or more partnered platforms, with a value in every cell.
+- The weekly total was computed by code and compared with the stated ceiling.
+- Platform limits cite a URL and a date read.
+- No real handle, domain, schedule or channel name is in this pack's output unless the owner's overlay supplied it for the run.
+
+## What this pack does not cover
+
+Leak review (`safe-live`), clip production (`clip-desk`), stream scenes and audio (`stage-crew`), contract interpretation, and the owner's real platform list and schedule, which live in the overlay.

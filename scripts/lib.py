@@ -33,6 +33,11 @@ PACK_NAMES = (
     "web-quality",
     "asset-production",
     "copy-review",
+    "media-dispatch",
+    "safe-live",
+    "clip-desk",
+    "stage-crew",
+    "front-door",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 

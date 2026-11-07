@@ -26,6 +26,31 @@ An overlay `roles/reviewer.md` (or `packs/threat-model/PACK.md`) does not replac
 
 **What remains:** prose in the additions can still ask for something at odds with the public rules. The public rules come first and the section is labeled as an extension, but a model may weigh both, so read the overlay before installing it. For stronger separation use a distinct persona name, which is then a whole persona held to the usual rules.
 
+## Media team facts file
+
+The media packs (`media-dispatch`, `safe-live`, `clip-desk`, `stage-crew`, `front-door`) hold no real handle, domain, schedule, gear model or tool name. Those live in a private overlay pack outside this repository (a new name such as `media-facts`, held to the usual pack rules, including a `## How to verify` section), and the brief names that pack next to the public ones. This repository does not create or fill it. The shape the packs expect, with placeholders:
+
+```
+## Capacity
+- hours_per_week: <number>
+## Schedule (one source; IANA timezone name)
+- <weekday> <HH:MM> <timezone> <duration> <platform list>
+## Platforms (rank, mode hand|auto, partner yes|no, handle, URL)
+- 1 hand yes @example example.test
+## Alert paths (destination -> service)
+- <destination> -> <service>
+## Tools and gear by role
+- capture: <role only, model in the overlay>
+## Owner decisions with dates
+- live_captions: undecided | <choice> <date>
+- stream_delay_seconds: <number>
+- scope_line: <fixed wording>
+## Lists
+- technical names, banned phrases, names that must not appear (file paths)
+```
+
+Where two or more platforms are marked `partner yes`, the `front-door` partner parity rule applies. Contract terms are never written in the file; only which platforms are partnered. The overlay is private by definition and is not swept; read it before installing, as above.
+
 ## File modes
 
 Overlay-sourced files (additions to a public persona, and whole overlay personas or packs) are created `0600` regardless of umask, so a dotfiles checkout on a shared machine does not expose them. Public files are created with the default mode (`0644` under umask 022). An `--update` never widens a destination: the temporary file is created `0600`, and before the rename it gets the existing file's mode (a `0600` file stays `0600`, a `0640` file stays `0640`); when the new content carries overlay text the mode is narrowed to owner-only. Directories the installer creates use the umask default.
