@@ -106,7 +106,7 @@ def copy_tree(base):
 class RegistryReading(unittest.TestCase):
     def test_real_registry_has_the_35_exercises(self):
         cases = em.load_registry(ROOT / "evals/cases.json")
-        self.assertEqual([c["id"] for c in cases], list(range(1, 36)))
+        self.assertEqual([c["id"] for c in cases], list(range(1, 42)))
         self.assertTrue(any(c["grading"] == "judged" for c in cases))
         self.assertTrue(any(c["grading"] == "mechanical" for c in cases))
         self.assertEqual(cases[25]["clients"], ["codex"])
