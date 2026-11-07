@@ -17,7 +17,7 @@ Status: pilot pack, written 2026-11-07. No item here was measured; the rules are
 5. **Techniques shown are tied to a lab, an owned target or an authorized scope.** Each demonstrated technique names its target and why that target is in scope. A technique with no stated scope is flagged.
 6. **Per-platform length limits live in a table that must be re-verified before use.** Keep the table in a file with a column for the source URL and the date read. A row older than the review, or with no source, is treated as unknown; fetch the platform's current text, then check the copy's length (`wc -m`) against it.
 7. **Owner banned-phrase list by grep.** The owner keeps a list (one phrase per line) in a file the brief names. Run `grep -nFi -f <list> <copy>` and report each hit with line number. Filler phrases are flagged, not judged: report the hit and stop; do not rewrite or rule on style.
-8. **Voice:** if the copy is public-facing and the owner's voice matters, tell the reviewer to call the private `chiefgyk3d-voice` skill. Never restate, summarize or embed its rules or samples in this pack, a report or a brief.
+8. **Voice:** if the copy is public-facing and the owner's voice matters, tell the reviewer to call the private voice skill for first-person drafts. Never restate, summarize or embed its rules or samples in this pack, a report or a brief.
 
 ## Deliverable
 

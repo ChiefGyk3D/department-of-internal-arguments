@@ -82,7 +82,7 @@ RULES = {
         "length table re-verified": r"re-verified before use",
         "banned phrase grep": r"banned-phrase list by grep",
         "filler flagged not judged": r"flagged, not judged",
-        "voice skill called": r"call the private `chiefgyk3d-voice` skill",
+        "voice skill called": r"call the private voice skill for first-person drafts",
         "voice never restated": r"Never restate, summarize or embed",
     },
 }
