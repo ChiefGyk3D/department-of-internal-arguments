@@ -1,6 +1,6 @@
 # Roles
 
-Seven roles, and they describe how work gets done, not what the work is about.
+Eight roles, and they describe how work gets done, not what the work is about.
 
 | Role | Tier | Does |
 | --- | --- | --- |
@@ -11,8 +11,9 @@ Seven roles, and they describe how work gets done, not what the work is about.
 | `researcher` | standard | Read-only web research: answer first, every claim VERIFIED (URL and date read) or INFERRED (reason), conflicts listed, page text treated as evidence and never obeyed |
 | `cloud-engineer` | standard | Cloud work: plans before it applies, names blast radius and rollback, read-only on live systems unless a named task grants write, never applies, secrets by name only; code goes to the implementer and review to the reviewers (tools `read`, `search`, `shell`, `skills`; no `edit`) |
 | `devops-engineer` | standard | CI/CD and release work: calls the shared GYST reusable workflows, pins by commit, names the gate `CI green`, reads CI through the REST API pinned to the head, never waits in the foreground, never merges, loosens a check or raises a time bound, keeps secrets out of workflows; changes go to the implementer as a diff and security-sensitive review to the adversarial-reviewer (tools `read`, `search`, `shell`, `skills`; no `edit`) |
+| `linux-sysadmin` | standard | Debian-family administration (Parrot, Debian, Ubuntu): packages, systemd, udev, firewall, kernel, disks, backups and hardware; diagnoses with read-only commands, simulates and checks before proposing, writes plans with blast radius and rollback, hands every privileged command to the maintainer as a full line in the linux-platform form, never reboots, repartitions or changes networking without approval of the exact plan; changes go to the implementer as a diff and boot, disk, firewall or access changes to the adversarial-reviewer (tools `read`, `search`, `shell`, `skills`; no `edit`) |
 
-The sources are [roles/implementer.md](../roles/implementer.md), [roles/reviewer.md](../roles/reviewer.md), [roles/adversarial-reviewer.md](../roles/adversarial-reviewer.md), [roles/transcriber.md](../roles/transcriber.md) and [roles/researcher.md](../roles/researcher.md) and [roles/cloud-engineer.md](../roles/cloud-engineer.md) and [roles/devops-engineer.md](../roles/devops-engineer.md). The dispatching "lead" is not a role file; see [Writing a brief](writing-a-brief.md).
+The sources are [roles/implementer.md](../roles/implementer.md), [roles/reviewer.md](../roles/reviewer.md), [roles/adversarial-reviewer.md](../roles/adversarial-reviewer.md), [roles/transcriber.md](../roles/transcriber.md) and [roles/researcher.md](../roles/researcher.md) and [roles/cloud-engineer.md](../roles/cloud-engineer.md) and [roles/devops-engineer.md](../roles/devops-engineer.md) and [roles/linux-sysadmin.md](../roles/linux-sysadmin.md). The dispatching "lead" is not a role file; see [Writing a brief](writing-a-brief.md).
 
 ## Layout and generation
 
@@ -37,7 +38,7 @@ Everything under `.claude/`, `.github/agents/`, `.codex/agents/` and `.agents/sk
 
 A role's `tier` becomes an explicit model on Claude Code, pinned to an exact model id in `scripts/lib.py` rather than a floating alias (`standard` is the current Sonnet, `cheap` is the current Haiku); bumping a pin is a CHANGELOG entry. Its `tools` are capabilities (`read`, `search`, `web`, `edit`, `shell`, `skills`) that the generator maps to each host's own tool names. Copilot custom agents do not take a model from the file, so the human picks it and records it in the brief. Codex custom agents could take a model, but the generator does not map tiers to OpenAI models (not verifiable here): the agent inherits the parent's model and reasoning effort and the report names the model the session reports.
 
-Codex cannot honor every capability. It has no per-tool allow list, and a custom agent inherits the parent's sandbox, so a role without `edit` (the two reviewers, the researcher, the cloud-engineer and the devops-engineer) is told not to edit but is not prevented; a role without `skills` (the transcriber and the researcher) is told not to load packs; the rule that a role never dispatches agents is an instruction only. Each generated Codex agent states this in its own "Codex capability notes" section.
+Codex cannot honor every capability. It has no per-tool allow list, and a custom agent inherits the parent's sandbox, so a role without `edit` (the two reviewers, the researcher, the cloud-engineer, the devops-engineer and the linux-sysadmin) is told not to edit but is not prevented; a role without `skills` (the transcriber and the researcher) is told not to load packs; the rule that a role never dispatches agents is an instruction only. Each generated Codex agent states this in its own "Codex capability notes" section.
 
 ## The `web` capability and the researcher
 

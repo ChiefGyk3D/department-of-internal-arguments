@@ -23,6 +23,7 @@
     "cloud-engineer": "standard",
     "devops-engineer": "standard",
     "implementer": "standard",
+    "linux-sysadmin": "standard",
     "researcher": "standard",
     "reviewer": "standard",
     "transcriber": "cheap"
@@ -44,6 +45,7 @@
         "cloud-engineer",
         "devops-engineer",
         "implementer",
+        "linux-sysadmin",
         "researcher",
         "reviewer"
       ]
