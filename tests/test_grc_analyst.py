@@ -183,7 +183,7 @@ class EvalCases(unittest.TestCase):
 
     def test_two_cases(self):
         picked = [c for c in self.cases().values() if c["roles"] == [NAME]]
-        self.assertEqual([c["id"] for c in picked], [36, 37])
+        self.assertEqual([c["id"] for c in picked], [47, 48])
         for c in picked:
             self.assertEqual(c["grading"], "mechanical")
             json.dumps(c)  # serializable
