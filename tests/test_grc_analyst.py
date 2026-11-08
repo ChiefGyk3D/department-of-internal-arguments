@@ -101,6 +101,20 @@ class RoleFile(unittest.TestCase):
         self.assertIn("VERIFIED", body)
         self.assertIn("INFERRED", body)
 
+    def test_each_framework_fact_has_its_own_page_and_label(self):
+        # Rule 15: the facts the role relies on are labeled one framework at a time, each naming its page.
+        body = role()["body"]
+        start = body.index("Facts this role relies on")
+        facts = body[start : body.index("The ISO/IEC 27001:2022 page")]
+        names = ["NIST Cybersecurity Framework 2.0", "NIST SP 800-53 Rev. 5", "CIS Controls v8.1", "AICPA SOC 2"]
+        marks = [facts.index(n) for n in names]
+        self.assertEqual(marks, sorted(marks))
+        for name, lo, hi in zip(names, marks, marks[1:] + [len(facts)]):
+            clause = facts[lo:hi]
+            with self.subTest(name):
+                self.assertRegex(clause, r"\bpage\b")
+                self.assertRegex(clause, r"\b(?:VERIFIED|INFERRED)\b")
+
     def test_no_real_identifier_in_the_source(self):
         text = (ROOT / "roles/grc-analyst.md").read_text(encoding="utf-8")
         self.assertEqual(em.identifier_problems(text), [])
