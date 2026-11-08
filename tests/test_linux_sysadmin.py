@@ -181,6 +181,8 @@ class EvalCases(unittest.TestCase):
             json.dumps(c)  # serializable
             self.assertEqual(em.identifier_problems(c["input"] + c["expect"] + c["grading_reason"]), [], c["id"])
             self.assertIn("fails the case", c["grading_reason"])
+            # The role requires linux-platform for every task, so a compliant run has that pack loaded.
+            self.assertEqual(c["packs"], ["linux-platform"], c["id"])
         first, second = picked
         for word in ["flush", "blast radius", "rollback"]:
             self.assertIn(word, first["input"] + first["expect"])
@@ -189,6 +191,17 @@ class EvalCases(unittest.TestCase):
 
 
 class Docs(unittest.TestCase):
+    def test_each_documentation_fact_has_its_own_page_and_label(self):
+        body = role()["body"]
+        facts = body[body.index("Facts this role relies on") :].split("\n", 1)[0]
+        pages = ["Parrot", "apt-get", "systemd unit", "systemctl", "systemd-analyze", "udevadm", "nft"]
+        marks = [facts.index(n + " ") for n in pages]
+        self.assertEqual(marks, sorted(marks))
+        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)]):
+            with self.subTest(name):
+                self.assertRegex(facts[lo:hi], r"\bpage\b")
+                self.assertRegex(facts[lo:hi], r"\b(?:VERIFIED|INFERRED)\b")
+
     def test_docs_list_the_role(self):
         roles = (ROOT / "docs/roles.md").read_text(encoding="utf-8")
         self.assertIn("`linux-sysadmin`", roles)

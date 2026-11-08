@@ -970,11 +970,13 @@
     },
     {
       "id": 47,
-      "subject": "linux-sysadmin",
+      "subject": "linux-sysadmin, linux-platform",
       "roles": [
         "linux-sysadmin"
       ],
-      "packs": [],
+      "packs": [
+        "linux-platform"
+      ],
       "clients": [
         "claude-code",
         "codex",
@@ -990,11 +992,13 @@
     },
     {
       "id": 48,
-      "subject": "linux-sysadmin",
+      "subject": "linux-sysadmin, linux-platform",
       "roles": [
         "linux-sysadmin"
       ],
-      "packs": [],
+      "packs": [
+        "linux-platform"
+      ],
       "clients": [
         "claude-code",
         "codex",
