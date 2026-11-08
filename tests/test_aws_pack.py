@@ -13,7 +13,7 @@ from lib import PACK_NAMES  # noqa: E402  (path set up above)
 
 PACK = "aws"
 PACK_PATH = ROOT / "packs" / PACK / "PACK.md"
-MAX_BYTES = 15000  # the largest existing pack is under this; there is no enforced cap, so keep to the existing range
+MAX_BYTES = 16000  # no enforced cap; the per-rule Source lines of the review fix took this pack past 15000
 
 # One regex per rule; each must match inside the pack. Loose to collect, strict to assert.
 RULES = {
@@ -115,7 +115,7 @@ PRIVATE = re.compile(
     r"|\barn:aws:[a-z0-9-]*:[a-z0-9-]*:(?!\d{12}\b)\d{6,}"
     r"|\barn:aws:[a-z0-9-]*:[a-z0-9-]*:(?!(?:111122223333|123456789012|<|\$)\S)\d{12}\b"
     r"|\b(?<![0-9])(?!111122223333\b|123456789012\b)\d{12}(?![0-9])\b"
-    r"|\b(?:" + _AK + "|" + _AS + r")[A-Z0-9]{16}\b|\b[A-Za-z0-9/+=]{40}\b(?=.{0,0}$)"
+    r"|\b(?:" + _AK + "|" + _AS + r")[A-Z0-9]{16}\b|(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])"
     r"|\b[a-z0-9-]+\.app\.spacelift\.io\b|\b[a-z0-9-]+\.twingate\.com\b|\bdp\.(?:st|pt|ct|sa)\.[a-z0-9]"
     r"|\b\d{1,3}(?:\.\d{1,3}){3}\b|@[a-z0-9-]+\.[a-z]{2,}|\bgha-(?!security)[a-z]",
     re.I,
@@ -125,6 +125,14 @@ SAFE_HOSTS = ("docs.spacelift.io", "docs.aws.amazon.com", "docs.github.com", "op
 
 def missing(text):
     return [name for name, pat in RULES.items() if not re.search(pat, text, re.S | re.I)]
+
+
+SOURCE = re.compile(r"\(Source: [^\n]*?\b(?:VERIFIED|INFERRED)\b", re.S)
+
+
+def unlabeled_rules(body):
+    """Every rule in body: a line starting with a number and a dot, or with a dash."""
+    return [line for line in body.splitlines() if re.match(r"(?:\d+\.|-) \S", line)]
 
 
 def private_hits(text):
@@ -146,6 +154,13 @@ class AwsPack(unittest.TestCase):
 
     def test_lessons_name_where_they_were_verified(self):
         self.assertGreaterEqual(len(re.findall(r"\(Source: ", self.text)), 20)
+
+    def test_every_rule_carries_a_dated_labeled_source(self):
+        # A rule is a numbered item or a bullet between "## Limits" and "## What this pack does not cover".
+        body = self.text.split("## Limits", 1)[1].split("## What this pack does not cover", 1)[0]
+        rules = unlabeled_rules(body)
+        self.assertGreaterEqual(len(rules), 30)
+        self.assertEqual([r[:60] for r in rules if not SOURCE.search(r)], [])
 
     def test_lessons_are_in_the_generated_skills(self):
         for rel in (f".claude/skills/pack-{PACK}/SKILL.md", f".agents/skills/pack-{PACK}/SKILL.md"):
@@ -186,6 +201,10 @@ class AwsPack(unittest.TestCase):
         ):
             with self.subTest(planted):
                 self.assertNotEqual(private_hits(planted), [])
+        # A secret access key in the middle of a line is caught, not only one at the end of the text.
+        embedded = "aws_secret " + "wJalrXUtnFEMI/" + "K7MDENG/bPxRfiCYEXAMPLEKEY" + " and more text after it"
+        self.assertNotEqual(private_hits(embedded), [])
+        self.assertNotEqual(private_hits(embedded.split(" and")[0]), [])
         # The documented placeholder account IDs and the vendor documentation hosts are not private values.
         self.assertEqual(private_hits("arn:aws:iam::" + "123456789012:role/x"), [])
         self.assertEqual(private_hits("https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"), [])
