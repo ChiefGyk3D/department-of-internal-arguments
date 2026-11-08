@@ -101,6 +101,27 @@ class RoleFile(unittest.TestCase):
         self.assertIn("VERIFIED", body)
         self.assertIn("INFERRED", body)
 
+    def test_no_scan_carve_out_and_one_rule_for_named_writes(self):
+        body = role()["body"]
+        # A named target never makes an offensive scan part of this defensive role.
+        self.assertNotIn("the brief does not name with its owner", body)
+        self.assertRegex(body, r"no port or vulnerability scan of any system")
+        # The opening sentence states the exception the later containment rule makes.
+        opening = body.split("\n", 1)[0]
+        self.assertIn("exact action", opening)
+        self.assertIn("human approval", opening)
+
+    def test_each_documentation_fact_has_its_own_page_and_label(self):
+        body = role()["body"]
+        facts = body[body.index("Facts this role relies on") :].split("\n", 1)[0]
+        pages = ["NIST SP 800-61", "Wazuh rules", "Wazuh Active Response", "Wazuh configuration assessment", "CIS"]
+        marks = [facts.index(n) for n in pages]
+        self.assertEqual(marks, sorted(marks))
+        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)]):
+            with self.subTest(name):
+                self.assertRegex(facts[lo:hi], r"\bpage\b")
+                self.assertRegex(facts[lo:hi], r"\b(?:VERIFIED|INFERRED)\b")
+
     def test_no_real_identifier_in_the_source(self):
         text = (ROOT / "roles/cybersecurity-blue.md").read_text(encoding="utf-8")
         self.assertEqual(em.identifier_problems(text), [])
