@@ -38,6 +38,7 @@ PACK_NAMES = (
     "clip-desk",
     "stage-crew",
     "front-door",
+    "aws",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken")
 

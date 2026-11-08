@@ -152,7 +152,7 @@ class MediaPacks(unittest.TestCase):
                 self.assertRegex(text, r'\nupdated: "\d{4}-\d{2}-\d{2}"\n')
                 self.assertIn("## How to verify", text)
                 self.assertLessEqual(len(text.encode("utf-8")), MAX_BYTES)
-        self.assertEqual(len(PACK_NAMES), 17)
+        self.assertEqual(len(PACK_NAMES), 18)
 
     def test_every_rule_is_present(self):
         for pack in RULES:
