@@ -1,0 +1,53 @@
+---
+name: "asset-production"
+description: "Checks for shipped assets: a provenance manifest per asset, QR codes (error correction, quiet zone, decode round-trip, no shortener), SVG hygiene, PNG/favicon/OG size table, mascot clear-space and minimum size from a brand file, EXIF and GPS stripping, third-party icon and font license allow list, print and merch art specs. Load when creating, reviewing or shipping images, icons, QR codes, favicons, social cards or print art. Not for choosing a design."
+updated: "2026-11-07"
+---
+
+# Pack: asset production
+
+Status: owner-set checks, written 2026-11-07. Each rule is a measurable check. Examples use placeholders only (`https://example.test/`, N0CALL); never put a real handle, domain or location in a manifest sample.
+
+## Rules
+
+1. **Provenance record per shipped asset**, in one manifest file (for example `assets/MANIFEST.md` or `.json`): file path, source, license, author, date, and modification (none, or what was changed). An asset with no row is not shipped. Check: every file under the asset directories appears in the manifest, and every manifest row points at a file that exists.
+2. **QR codes:**
+   - Error correction level Q or H when a logo overlays the code; the logo covers little enough that the decode still passes.
+   - Quiet zone >= 4 modules on every side.
+   - **Decode round-trip:** `zbarimg --raw <file>` prints a string equal to the intended canonical URL, byte for byte. A code that decodes to something else, or to nothing, fails.
+   - The URL is the canonical destination. No third-party shortener or redirecting wrapper (a shortener can be re-pointed or retired, and it hides the destination).
+3. **SVG hygiene:** no `<script>`, no event-handler attributes, no external references (`href` or `xlink:href` to another origin, `@import`, remote `url(...)`), a `viewBox` present, and `svgo` runs clean (no further changes proposed). Greps: `grep -nEi '<script|[[:space:]]on[a-z]+=|(https?:)?//[a-z0-9]|@import|url\([[:space:]]*["'"'"']?[^#"'"'"')[:space:]]' file.svg` (this covers http, protocol-relative `//host`, CSS `@import` and remote `url(...)`; the XML namespace line is the one allowed hit, and `url(#id)` is local) and `grep -L viewBox file.svg`. Where a parser is available, prefer it over grep.
+4. **Raster size table** (a missing size is a finding):
+
+   | Use | Size |
+   |---|---|
+   | Favicon | 32 x 32 |
+   | Apple touch icon | 180 x 180 |
+   | Web app icon | 192 x 192 |
+   | Web app icon (large) | 512 x 512 |
+   | Open Graph / social card | 1200 x 630 |
+
+   Check the pixel size of the real file (`identify -format '%wx%h' file.png`), not the file name.
+5. **Mascot clear-space and minimum size are numbers in a brand file** (for example `brand/BRAND.md`): clear-space in pixels or as a fraction of the mark's height, minimum rendered size in pixels. A dimension check compares each placed instance against those numbers. No numbers on file is a finding; do not invent them.
+6. **Strip EXIF and GPS** from every shipped raster: `exiftool -all= -overwrite_original file` (without `-overwrite_original`, exiftool keeps the unstripped `file_original` beside it; or write to a separate destination with `-o`) and confirm with `exiftool -gps:all -s file` printing nothing. Check the shipped copy, not the source, and confirm `find <asset dir> -name '*_original'` prints nothing so no backup ships.
+7. **Third-party icons and fonts:** the license must be on an owner-kept allow list (file in the repository, one license per line), and the attribution the license requires is present where it requires it. A license not on the list is escalated, not decided here.
+8. **Print and merch art:** 300 DPI at final size, bleed as the printer specifies (get the number from the printer's current spec sheet, record its source), and transparent PNG or vector. Report the measured DPI and pixel size against the final physical size.
+
+## Deliverable
+
+1. **Manifest check** (assets found, rows found, missing either way).
+2. **Per-asset table** (rule, measured value, pass or fail).
+3. **Failures with the file** and the smallest fix.
+4. **Not measured** (a tool not installed, a brand file not present).
+
+## How to verify (before you hand it back)
+
+- Name the tool and version for each check: `zbarimg`, `svgo`, `exiftool`, `identify`. A missing tool is reported as not measured, never as a pass.
+- Show the decode output beside the intended URL for every QR code.
+- `exiftool -gps:all -s` on each shipped raster printed nothing.
+- The greps above collected at least one file; a guard that collects nothing is reported as such.
+- Run the size table against a seeded wrong size once, and show it fail, so the check is known to bite.
+
+## What this pack does not cover
+
+Design choices, logo creation, license legal advice, and print vendor selection. License terms and printer specs are read from their current source each time, not from this pack.
