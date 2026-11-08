@@ -1,0 +1,98 @@
+---
+name: "web-quality"
+description: "Measured delivery thresholds and build/deploy checks for static sites and configurable pages: Lighthouse mobile scores, CLS and LCP, contrast ratios, page-weight budget, no render-blocking third-party script, text measure, line height, font size, tap targets, alt text, image dimensions, keyboard pass, 200% zoom and 320 px reflow, Hugo and Cloudflare Pages build checks. Says when to call the installed accessibility, web-design, ui-ux, frontend-design, web-perf and impeccable skills. Load for site builds, page reviews and pre-deploy checks. Not for choosing aesthetics."
+updated: "2026-11-07"
+---
+
+# Pack: web quality
+
+Status: owner-set thresholds, written 2026-11-07. The numbers below are the delivery bar the owner chose; the pack measures against them and does not judge taste. A page that misses a number is not done, whatever it looks like.
+
+This pack sets thresholds and build/deploy checks. It does not copy the procedures of the installed skills and it does not choose aesthetics (palette, type pairing, layout style, motion). When a check needs a method, call the skill, then bring the measured number back here.
+
+## Thresholds (each is pass or fail, with the measured value in the report)
+
+1. **Lighthouse, mobile profile:** performance >= 90, accessibility = 100, CLS <= 0.1, LCP <= 2.5 s. Report the run's tool version, the URL or build, and the profile; a desktop run does not count.
+2. **Contrast:** 4.5:1 for body text, 3:1 for large text and for UI components and graphics. Report the measured ratio for every failure, not only "low contrast".
+3. **Page weight:** a budget per page, written down before the build (transfer size in KB for HTML, CSS, JS, images and fonts). No budget on file is a finding. Report each page's measured weight against it.
+4. **No render-blocking third-party script.** Any third-party script is `async` or `defer` or loads after first paint, or it is removed. List every third-party origin the page requests.
+5. **Reading text:** body measure 45 to 75 characters per line, line height >= 1.4, body font size >= 16 px (computed, not declared).
+6. **Tap targets:** >= 24 px minimum, 44 px recommended. Below 24 px fails; between 24 and 44 px is a warning to report.
+7. **Images:** every informative image has alt text, a decorative one has empty alt, and every image has explicit width and height (or an aspect-ratio rule) so layout does not shift.
+8. **Keyboard pass:** every interactive element is reachable and operable by keyboard, focus is visible, and the order matches the reading order. A person or an inspected run does this; a score does not replace it.
+9. **Reflow:** at 200% zoom and at 320 px viewport width there is no horizontal scroll (except content that needs two dimensions, such as a data table, which is named).
+
+## Hugo and Cloudflare Pages checks
+
+- `hugo --gc --minify` builds with no warnings and no errors.
+- The Hugo version is pinned (in the build settings or a version file), and the local and deploy versions match.
+- A headers file exists in the published output (`_headers`) and carries the caching and security headers the owner chose; confirm it is in `public/`, not only in the source.
+- A link check over the built output reports no broken internal link; external links are checked on a schedule, not on every build.
+- The deploy check reads the live preview URL, not only the local build.
+
+## Quick greps (collect loosely, assert strictly)
+
+- Images: a line-based grep misses tags that span lines, so check whole tags. Save this as `check-img.py` and run `find public -name '*.html' -print0 | xargs -0 python3 check-img.py`. It reports each `<img>` with no `alt`, or with neither explicit `width` and `height` nor an inline `aspect-ratio`, and prints how many images it collected. An aspect-ratio set in a stylesheet cannot be seen here; report such images as needing a stylesheet check.
+
+```python
+import pathlib
+import sys
+from html.parser import HTMLParser
+
+
+class Imgs(HTMLParser):
+    def __init__(self, name):
+        super().__init__()
+        self.name, self.count = name, 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "img":
+            return
+        self.count += 1
+        a = {k: v or "" for k, v in attrs}
+        line = self.getpos()[0]
+        if "alt" not in a:
+            print(f"{self.name}:{line}: img without alt")
+        if not ("width" in a and "height" in a) and "aspect-ratio" not in a.get("style", ""):
+            print(f"{self.name}:{line}: img without width and height or aspect-ratio")
+
+
+total = 0
+for name in sys.argv[1:]:
+    parser = Imgs(name)
+    parser.feed(pathlib.Path(name).read_text(encoding="utf-8"))
+    parser.close()
+    total += parser.count
+print(f"images collected: {total}")
+```
+
+- Third-party scripts: `grep -rnoE '<script[^>]+src="https?://[^"]+"' public` lists origins; each must carry `async` or `defer`.
+- A guard that finds zero images has collected nothing: say so, and do not report a pass.
+
+## When to call the installed skills
+
+- `accessibility-scan`, `accessibility-inspect`, `accessibility-audit`, `accessibility-fix`, `accessibility-diff`: the automated scan, the hands-on keyboard and zoom pass, a whole-site audit, a repair, or a regression diff. This pack supplies the pass bar; the skill supplies the method.
+- `web-design-guidelines`: a UI code review against interface guidelines.
+- `ui-ux-pro-max` and `frontend-design`: design intelligence and visual direction. Never ask this pack for them, and never let them lower a threshold above.
+- `cloudflare:web-perf`: a performance trace and Core Web Vitals diagnosis when a number above fails.
+- `impeccable`: a design critique or polish pass after the thresholds hold.
+
+## Deliverable
+
+1. **Target** (build or URL, profile, tool versions).
+2. **Measured table** (each threshold above, the measured value, pass or fail).
+3. **Failures with the element or file** and the smallest fix; the fix goes to the `implementer`.
+4. **Skills called** and what each returned.
+5. **Not measured** (what could not be run, and why).
+
+## How to verify (before you hand it back)
+
+- Every threshold row has a measured value, not "looks fine". A row with no value is reported as not measured.
+- The Lighthouse run was the mobile profile; the report names the version that ran it.
+- The greps above were run on the built output, and the report says how many files they collected.
+- Contrast failures carry the measured ratio, for example "3.2:1 against the 4.5:1 bar".
+- No aesthetic judgment appears as a finding.
+
+## What this pack does not cover
+
+Aesthetic direction, brand choices, copy, SEO strategy, and server-side performance. Thresholds here are the owner's bar, not a claim about any standard's full text; when a report cites a standard, check the current text of the standard first.
