@@ -293,7 +293,7 @@ class RoleRules(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = copy_fixture(d)
             f = r / "packs/threat-model/PACK.md"
-            f.write_text(f.read_text().replace('updated: "2026-10-08"', 'updated: "yesterday"'))
+            f.write_text(f.read_text().replace('updated: "2026-11-13"', 'updated: "yesterday"'))
             self.assertTrue(any("updated must be" in e for e in validate(r)))
         with tempfile.TemporaryDirectory() as d:
             r = copy_fixture(d)
