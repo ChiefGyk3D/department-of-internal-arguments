@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+`threat-model` pack (issue #118): every threat model now ships both the markdown report and an OWASP Threat Dragon JSON for the owner to review (owner rule 2026-11-13). Pack text only; no role, policy or registry change.
+
+- `packs/threat-model/PACK.md` (updated 2026-11-13): deliverable item 6 (v2.0 schema file, STRIDE diagram, `tm.Actor`, `tm.Process`, `tm.Store`, `tm.Flow` and `trust-boundary-curve` cells, one threat per risk with the markdown risk id in its title); a "Model it in Threat Dragon" method step; runnable checks that the file parses, every flow end resolves to a cell, `detail.threatTop` is at least the threat count, and markdown and JSON risk ids agree; the JSON follows the same limits (no secrets, no probing, placeholders only). Schema read from OWASP/threat-dragon `ThreatDragonModels/v2-threat-model.json` on 2026-11-13.
+
 Five media packs (issue #110): `media-dispatch` (the entry-point advisor, Dispatch), `safe-live`, `clip-desk`, `stage-crew` and `front-door`. Pack text, registry, evals and tests; no role or policy changed and no model call is made. Dispatch is a pack, not a role: the roles describe how work gets done, and an advisor that classifies and routes needs no new tools, tier or report header, so a pack the lead names in the brief is the smallest conforming design. All five are generic and public, with placeholders only; the owner's real schedule, gear, platform list and tools belong in a private overlay pack that this change does not create (the expected shape is documented in `docs/overlay-and-ownership.md`). The pack benchmark of #73 is not built yet, so the packs are pending it.
 
 - `packs/media-dispatch/PACK.md` (updated 2026-11-07, pilot pack, no item measured): request-to-pack routing table, one decision plus an ordered action list with estimated hours and what each action displaces, the total computed by code against a stated capacity ceiling, a default ranking marked as estimates, and `safe-live` BLOCK precedence.
