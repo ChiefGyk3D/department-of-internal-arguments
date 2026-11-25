@@ -1,5 +1,6 @@
 """Offline structural checks. Not a model-behavior or sandbox certification."""
 
+import json
 import re
 import sys
 import tomllib
@@ -234,6 +235,66 @@ def research_line_errors(text):
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
+
+
+_FM_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_FM_PLAIN_BAD_START = set("[]{},&*!|>'\"%@`#")
+
+
+def _fm_value_error(value):
+    """Why a front-matter value is not a valid YAML 1.2 scalar on one line, or None. Flat `key: value` subset only."""
+    if value == "":
+        return None
+    if value[0] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return "a double-quoted value must be one complete, validly escaped string"
+        return None if isinstance(decoded, str) else "a double-quoted value must be a string"
+    if value[0] == "'":
+        inner = value[1:-1] if len(value) > 1 and value[-1] == "'" else None
+        if inner is None or re.search(r"(?<!')'(?!')", inner.replace("''", "")):
+            return "a single-quoted value must end with its quote and double any quote inside"
+        return None
+    if value[0] == "[":  # a flow sequence of quoted strings, as the Copilot `tools:` line is
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return "a flow sequence must be a complete JSON list of strings"
+        ok = isinstance(decoded, list) and all(isinstance(i, str) for i in decoded)
+        return None if ok else "a flow sequence must be a list of strings"
+    if value[0] in _FM_PLAIN_BAD_START or (value[0] in "-?:" and value[1:2] in ("", " ")):
+        return f"a plain value may not start with {value[0]!r}; quote it"
+    if ": " in value or " #" in value or value.endswith(":"):
+        return "a plain value may not contain ': ' or ' #' or end with ':'; quote it"
+    if "\t" in value:
+        return "a plain value may not contain a tab"
+    return None
+
+
+def strict_frontmatter_errors(text, label):
+    """Problems that make a file's front matter fail a strict YAML loader (DoIA's own loader is more lenient and
+    takes an unquoted value as bare text). Front matter here is flat `key: value` lines between two `---` lines."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        return [f"{label}: front matter is missing"]
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return [f"{label}: front matter is not closed by '---'"]
+    errors, seen = [], set()
+    for n, line in enumerate(lines[1:end], start=2):
+        key, sep, value = line.partition(":")
+        if not sep or not _FM_KEY_RE.fullmatch(key) or (value and not value.startswith(" ")):
+            errors.append(f"{label}: front matter line {n} is not a flat `key: value` line")
+            continue
+        if key in seen:
+            errors.append(f"{label}: front matter key {key!r} is repeated")
+        seen.add(key)
+        problem = _fm_value_error(value.strip(" "))
+        if problem:
+            errors.append(f"{label}: front matter {key!r}: {problem}")
+    return errors
 
 
 def tree_files(root):
@@ -607,6 +668,20 @@ def validate(root=ROOT):
                     f"{GENERATED_MARK} (release {version})" in f.read_text(encoding="utf-8"),
                     f"{f.relative_to(root)}: generated marker lacks the current release",
                 )
+
+        # Strict YAML reading of every front matter (issue #121): a value DoIA's loader takes as bare text must not
+        # fail another loader, so each one is quoted or a safe plain scalar.
+        for glob in (
+            "packs/*/PACK.md",
+            "roles/*.md",
+            ".claude/agents/*.md",
+            ".github/agents/*.agent.md",
+            ".claude/skills/*/SKILL.md",
+            f"{CODEX_SKILLS_DIR}/*/SKILL.md",
+        ):
+            for f in sorted(root.glob(glob)):
+                label = f"{f.relative_to(root).as_posix()}"
+                errors.extend(strict_frontmatter_errors(f.read_text(encoding="utf-8"), label))
 
         # Version agreement.
         require(bool(re.fullmatch(r"\d+\.\d+\.\d+", version)), "VERSION is not semver")
