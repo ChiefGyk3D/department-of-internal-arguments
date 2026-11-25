@@ -52,7 +52,7 @@ An id with a known residual gets its own line with severity and reason, so the r
 
 These are names and contracts only. The shared code is a later task in the maintainer's tooling repository; this pack holds no code. Until it exists, write the behavior inline and keep it small.
 
-1. `safe_open(root, relpath, mode)`: resolve, confine, no-follow, regular file only, size cap.
+1. `safe_open(root, relpath, mode)`: descriptor-relative traversal from the root descriptor, component by component with no-follow, then fstat the opened descriptor (regular file only, size cap); never a path check followed by an open.
 2. `atomic_write(path, data, mode=0o600)`: temp file in the same directory, fsync, rename, clean up on error.
 3. `locked(path, timeout)`: advisory lock with a bounded wait, released on all paths, with owner liveness checked before any lock is broken.
 4. `run_cmd(argv, timeout, max_output, env_allow, cwd)`: no shell, scrubbed environment, bounded output.

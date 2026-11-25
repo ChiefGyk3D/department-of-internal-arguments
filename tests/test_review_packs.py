@@ -166,6 +166,17 @@ class ReviewPacks(unittest.TestCase):
         self.assertRegex(text, r"never drops a mandatory check")
         self.assertRegex(text, r"per identifier kind and per filesystem")
 
+    def test_base_severity_governs_acceptance(self):
+        text = read("review-protocol")
+        self.assertRegex(text, r"follow the BASE severity")
+        self.assertRegex(text, r"adjustment never makes it acceptable")
+        self.assertRegex(text, r"base High stays open until a fix with revert-proved evidence")
+
+    def test_safe_open_contract_is_descriptor_relative(self):
+        line = next(x for x in read("implementer-self-check").splitlines() if "`safe_open(" in x)
+        self.assertRegex(line, r"descriptor-relative.{0,80}component by component with no-follow")
+        self.assertRegex(line, r"fstat the opened descriptor")
+
     def test_guards_bite(self):
         good = read("review-protocol")
         weak = good.replace("S3 does not apply", "S3 applies")

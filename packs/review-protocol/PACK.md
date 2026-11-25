@@ -42,7 +42,7 @@ Round one answers every class with FOUND (finding ids), CLEAR (what was checked,
 - Origin: ORIGINAL, or FIX-INDUCED by round k.
 - Disposition proposed: FIX, or ACCEPT-RESIDUAL with a reason.
 
-Context adjustment: severity may be adjusted from the base band by context (exposure such as internet, tailnet-only, local or CI-only; compensating controls; a warn-mode guard). The adjustment is allowed only with the reason recorded next to the label, one step down at most, and never below Medium unless a named compensating control is verified (a test or a command output, not a claim). When signals disagree, the higher severity holds until a recorded reason lowers it. Critical and High are never closed by the budget; they are fixed.
+Context adjustment: severity may be adjusted from the base band by context (exposure such as internet, tailnet-only, local or CI-only; compensating controls; a warn-mode guard). The adjustment is allowed only with the reason recorded next to the label, one step down at most, and never below Medium unless a named compensating control is verified (a test or a command output, not a claim). When signals disagree, the higher severity holds until a recorded reason lowers it. The no-accept, S1, S2 and budget rules follow the BASE severity (the reviewer's label before any adjustment). A base Critical or High is never accepted, never closed by the budget, and an adjustment never makes it acceptable or counts as below Medium for S1 or S2; adjustment affects only ordering and fix priority. A base High stays open until a fix with revert-proved evidence.
 
 ## Stop rule
 
