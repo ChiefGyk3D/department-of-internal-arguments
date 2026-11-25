@@ -52,6 +52,72 @@ def policies_block(root):
     return "\n".join(parts).rstrip()
 
 
+# A role without a shell must not be told to run, execute, invoke or capture anything. Every quality-gates bullet that
+# orders a command (the check run and exit code, the lint and test run, the revert proof, the clean-tree restore) is
+# replaced for such a role by wording that hands the command to a role with a shell. Shell-capable roles keep the
+# policy text byte for byte. The prefixes below are the starts of those bullets in policies/quality-gates.md.
+NO_SHELL_GATE_BULLETS = {
+    "- A plan or a reviewer's opinion is not proof of execution.": (
+        "- A plan or a reviewer's opinion is not proof of execution. This role has no shell and runs no command, test "
+        "or gate. Hand every computation, check and gate to the analyst or the implementer under HANDOFFS (under OPEN "
+        "when your report has no HANDOFFS field), report each as `not-run` with the reason `no shell`, and quote the "
+        "captured result (the command and its exit code) that the handoff returns. Never write a result you did not "
+        "receive."
+    ),
+    "- **If no gate is defined**": (
+        "- **If no gate is defined** (neither the brief nor the repository documents one), the gate is `not-run - none "
+        "defined`. This role has no shell, so it lists under HANDOFFS the commands a role with a shell would need and "
+        "proposes a gate command in the report. Never invent a command and call it the gate."
+    ),
+    "- **Reviewers prove fixes bite.**": (
+        "- **Reviewers prove fixes bite.** A claimed fix or a new test is proved by a reviewer with a shell, who "
+        "reverts the fix in a scratch copy and confirms the test goes red. This role has no shell: hand the proof to "
+        "the reviewer under HANDOFFS and quote its result. A claim with no proof is NOT VERIFIED."
+    ),
+    "- **Reviewers finish with a clean tree.**": (
+        "- **Reviewers finish with a clean tree.** This role changes no file and leaves nothing mutated; a reviewer "
+        "who mutates a tree shows the proof that it is clean."
+    ),
+}
+GATES_HEADING = "### Quality gates"
+_IMPERATIVE_RE = re.compile(r"\b(?:run|execute|invoke|capture|revert|restore)\b", re.I)
+_NEGATION_RE = re.compile(r"\b(?:no|not|never|nothing|without)\b", re.I)
+
+
+def gates_section(text):
+    """The rendered quality-gates policy section: from its heading to the next heading, or the end of the text."""
+    start = text.find(GATES_HEADING)
+    if start < 0:
+        return ""
+    end = re.search(r"^#{1,3} ", text[start + len(GATES_HEADING) :], re.M)
+    return text[start : start + len(GATES_HEADING) + end.start()] if end else text[start:]
+
+
+def command_imperatives(text):
+    """Sentences that use run, execute, invoke, capture, revert or restore as a base-form verb with no negation in the
+    same sentence: an instruction to do the thing. Word-level, over the whole text given."""
+    out = []
+    for sentence in re.split(r"(?<=[.!?:;])\s+|\n+", text):
+        if _IMPERATIVE_RE.search(sentence) and not _NEGATION_RE.search(sentence):
+            out.append(sentence.strip())
+    return out
+
+
+def role_policies(role, policies):
+    """The shared policies for one role: unchanged when the role has a shell; for a role without one, every bullet in
+    NO_SHELL_GATE_BULLETS is replaced, and a bullet that appears twice is an error."""
+    if "shell" in role["tools"]:
+        return policies
+    lines = policies.split("\n")
+    for prefix, replacement in NO_SHELL_GATE_BULLETS.items():
+        hit = [i for i, ln in enumerate(lines) if ln.startswith(prefix)]
+        if len(hit) > 1:
+            raise ValueError(f"roles/{role['file']}: the quality-gates bullet {prefix!r} was found more than once")
+        for i in hit:  # the validator fails the gate if a command imperative is left in a no-shell role's section
+            lines[i] = replacement
+    return "\n".join(lines)
+
+
 def _marker(source, ver, extra="", digest=None):
     sha = f" sha256:{digest}." if digest else ""
     return f"<!-- {GENERATED_MARK} (release {ver}) from {source}{extra}.{sha} Do not edit; run the generator. -->"
@@ -98,14 +164,14 @@ def render_claude_agent(role, policies, ver, source=None, additions=None):
         f"tools: {', '.join(tools)}\n"
         "---\n"
     )
-    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    tail = f"{role['body']}\n\n{role_policies(role, policies)}\n" + (additions_section(additions) if additions else "")
     return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
 def render_copilot_agent(role, policies, ver, source=None, additions=None):
     tools = [COPILOT_TOOLS[c] for c in _capabilities(role) if c in COPILOT_TOOLS]
     head = f"---\nname: {role['name']}\ndescription: {_q(role['description'])}\ntools: {_q(tools)}\n---\n"
-    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    tail = f"{role['body']}\n\n{role_policies(role, policies)}\n" + (additions_section(additions) if additions else "")
     return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
@@ -120,6 +186,33 @@ CODEX_WEB_SANDBOX = (
     "nothing and report that under OPEN. If a fetch cannot run under the read-only sandbox, report that under OPEN; "
     "never ask to widen the sandbox. UNVERIFIED: this has not been run in Codex."
 )
+# The pilot roles that must not change the repository or a live system. Codex cannot remove edit or shell from a custom
+# agent, so for these roles only the parent's sandbox enforces it, and the file says so: a dispatch under a writable
+# sandbox is held, never run on trust. Nothing here has been run in Codex.
+CODEX_ROLE_SANDBOX = {
+    "assessor": (
+        "Required sandbox: read-only. This role must not change the repository or any live system and runs no command, "
+        "and Codex cannot remove edit or shell from a custom agent, so only a read-only sandbox mode on the parent "
+        "enforces it; the rule is otherwise an instruction only. If the session shows a writable sandbox, change "
+        "nothing, run nothing and report STATUS: blocked under OPEN: the dispatch is held, never run on trust. "
+        "UNVERIFIED: this has not been run in Codex."
+    ),
+    "planner": (
+        "Required sandbox: read-only. This role must not change the repository or any live system and runs no command, "
+        "and Codex cannot remove edit or shell from a custom agent, so only a read-only sandbox mode on the parent "
+        "enforces it; the rule is otherwise an instruction only. If the session shows a writable sandbox, change "
+        "nothing, run nothing and report STATUS: blocked under OPEN: the dispatch is held, never run on trust. "
+        "UNVERIFIED: this has not been run in Codex."
+    ),
+    "analyst": (
+        "Required sandbox: the repository and live systems read-only, with one writable scratch directory named in the "
+        "brief as the only writable root. Codex cannot remove edit from a custom agent and the shell is not limited to "
+        "read-only commands, so only the parent's sandbox enforces this; the rule is otherwise an instruction only. "
+        "If the session shows the repository or a live system writable, change nothing, run nothing and report "
+        "STATUS: blocked under OPEN: the dispatch is held, never run on trust. UNVERIFIED: this has not been run in "
+        "Codex."
+    ),
+}
 TOML_LITERAL_END = "'''"
 CODEX_KEYS = {"name", "description", "developer_instructions"}
 
@@ -145,6 +238,8 @@ def codex_notes(role):
         "`MODEL:` line of the report is the exact model id the session reports, never a family name.",
         "- read, search: honored through Codex's own file and search tools, inside the inherited sandbox.",
     ]
+    if role["name"] in CODEX_ROLE_SANDBOX:
+        lines.append("- " + CODEX_ROLE_SANDBOX[role["name"]])
     if "web" in caps:
         lines.append("- " + CODEX_WEB_SANDBOX)
         lines.append(
@@ -198,7 +293,7 @@ def render_codex_agent(role, policies, ver, source=None, additions=None):
         f"description = {_q(role['description'])}\n"
         f"developer_instructions = {TOML_LITERAL_END}"
     )
-    tail = f"{role['body']}\n\n{codex_notes(role)}\n\n{policies}\n"
+    tail = f"{role['body']}\n\n{codex_notes(role)}\n\n{role_policies(role, policies)}\n"
     tail += additions_section(additions) if additions else ""
     if TOML_LITERAL_END in tail:
         raise ValueError(f"roles/{role['file']}: text must not contain three single quotes (they end the TOML string)")

@@ -2,7 +2,7 @@
 
 I started from a ChatGPT-made starter with twelve personas (chief of staff, QA, security architect, and so on). Some of it was good machinery and I kept that: the installer, the policies, the behavioral exercises. But I was already running a smaller design that I had measured, three process roles plus domain packs chosen per dispatch, and twelve personas change too many variables at once to ever tell which one helped. If a review gets better, I want to know whether it was the role, the pack, or the model, and I cannot know that when the persona list is the thing that changed.
 
-So there are seven roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And twenty packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
+So there are ten roles, and they describe how work gets done, not what the work is about (see [Roles](roles.md)). And twenty-five packs, which are the domain knowledge you name in a brief when the task needs it (see [Packs](packs.md)).
 
 ## The fifth persona
 
@@ -11,6 +11,14 @@ The sixth persona is the one dispatching the other five. It is not an agent file
 ## One report header, one severity scale
 
 Every role's report opens with the same header (role, model, head, base, gate, other gates, packs loaded, tree, not verified, and a `LOCAL-LLM:` line saying whether a local model was used, which exact model answered, what its output was checked against and how many discrepancies were found), so the lead can log a task from the header alone and a hook can check `MODEL:` against the dispatch. Both reviewers use one severity scale: blocking, important, minor.
+
+## Why Organizations Need More Than Coding
+
+Organizations need more than code generation. Security operations must detect and investigate threats. Governance and compliance work must connect controls to evidence. Delivery work must define ownership, dependencies, risks, and decisions across teams.
+
+Roles define who does the work and what boundaries apply. An analyst reads, measures, and runs approved commands in a scratch area. An assessor checks work against a control or standard and reports the evidence. A planner turns a goal into an actionable plan. Packs provide the working guidance for a specific function, while `org-dispatch` selects no more than three relevant packs for the task.
+
+These roles and packs are pilots. Each starts with a predicted effect and measurement targets. Results are reviewed before the role or pack is trusted for broader use.
 
 ## What I did not keep
 

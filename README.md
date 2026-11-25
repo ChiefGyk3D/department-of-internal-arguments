@@ -4,7 +4,7 @@ This is my shared home for AI agent personas and the domain knowledge they load,
 
 Release 0.4.0. Apache-2.0.
 
-Seven roles (`implementer`, `reviewer`, `adversarial-reviewer`, `transcriber`, `researcher`, `cloud-engineer`, `devops-engineer`) describe how work gets done, and twenty packs hold the domain knowledge you name in a brief when the task needs it.
+This repository now defines ten roles and twenty-five packs for AI coding assistants. The new analyst, assessor, and planner roles add measured research, evidence-based assessment, and planning with clear owners, dependencies, and risks. Five new packs cover threat detection, governance controls, delivery management, organization design, and function-based pack selection. All eight additions are pilots. Their expected effects are predictions with measurement targets, not proven results.
 
 ## 60-second install
 
@@ -23,8 +23,8 @@ The pages live in [docs/](docs/home.md) and are mirrored to the wiki.
 
 - [What and why](docs/what-and-why.md): why roles and packs, not a dozen personas.
 - [Install](docs/install.md): project and user layouts, the lead persona (`--lead`), `--update`, drift checks, never symlink, exporting a prompt.
-- [Roles](docs/roles.md): the seven roles, repository layout, tiers and tools.
-- [Packs](docs/packs.md): the twenty packs.
+- [Roles](docs/roles.md): the ten roles, repository layout, tiers and tools.
+- [Packs](docs/packs.md): the twenty-five packs.
 - [Policies](docs/policies.md): the four policies, one line each.
 - [Writing a brief](docs/writing-a-brief.md): the brief template and the lead.
 - [Overlay and ownership](docs/overlay-and-ownership.md): the marker hash, the private overlay, file modes.

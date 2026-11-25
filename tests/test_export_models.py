@@ -79,7 +79,17 @@ class Content(unittest.TestCase):
         self.assertEqual(data["tiers"]["cheap"]["roles"], ["transcriber"])
         self.assertEqual(
             data["tiers"]["standard"]["roles"],
-            ["adversarial-reviewer", "cloud-engineer", "devops-engineer", "implementer", "researcher", "reviewer"],
+            [
+                "adversarial-reviewer",
+                "analyst",
+                "assessor",
+                "cloud-engineer",
+                "devops-engineer",
+                "implementer",
+                "planner",
+                "researcher",
+                "reviewer",
+            ],
         )
         self.assertEqual(data["roles"]["transcriber"], "cheap")
 

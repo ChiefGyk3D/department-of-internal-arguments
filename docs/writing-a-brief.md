@@ -20,7 +20,7 @@ model: sonnet
 - Task and owner; outcome and who uses it; scope and non-goals.
 - Acceptance criteria, with observable examples.
 - Base commit, worktree (absolute path) and permitted files.
-- Role agent and model: one of the seven roles (reviewer, adversarial-reviewer, implementer, transcriber, cloud-engineer, devops-engineer or researcher); tier standard (cheap only for mechanical work whose code is already written). On Claude Code the model is pinned by the role's tier; on every other host name the exact model id. Never inherit. The most capable tier needs the human's recorded OK.
+- Role agent and model: one of the ten roles (reviewer, adversarial-reviewer, implementer, transcriber, cloud-engineer, devops-engineer, researcher, or the pilot roles analyst, assessor or planner); tier standard (cheap only for mechanical work whose code is already written). On Claude Code the model is pinned by the role's tier; on every other host name the exact model id. Never inherit. The most capable tier needs the human's recorded OK.
 - Fix round number and prior findings. A third round on the same finding class is not dispatched; the lead escalates instead.
 - Domain packs to load (see [Packs](packs.md)), or none. The report must say which it loaded.
 - Local model step for text-only drafts, or `n/a` with a reason.

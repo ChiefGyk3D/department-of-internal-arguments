@@ -23,6 +23,9 @@ ROLE_NAMES = (
     "researcher",
     "cloud-engineer",
     "devops-engineer",
+    "analyst",
+    "assessor",
+    "planner",
 )
 PACK_NAMES = (
     "python-untrusted-input",
@@ -45,6 +48,11 @@ PACK_NAMES = (
     "aws",
     "review-protocol",
     "implementer-self-check",
+    "threat-detection",
+    "grc-controls",
+    "delivery-business-mgmt",
+    "org-operating-model",
+    "org-dispatch",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken", "deleting-files", "report-contract")
 
