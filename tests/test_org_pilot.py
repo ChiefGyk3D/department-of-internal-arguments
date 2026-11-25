@@ -372,6 +372,67 @@ class Roles(unittest.TestCase):
                 self.assertIn("Required sandbox:", codex)
                 self.assertIn("the dispatch is held, never run on trust", codex)
 
+    def adapters(self, role):
+        import generate
+
+        policies = generate.policies_block(ROOT)
+        return {
+            "claude": generate.render_claude_agent(role, policies, "0.0.0"),
+            "copilot": generate.render_copilot_agent(role, policies, "0.0.0"),
+            "codex": generate.render_codex_agent(role, policies, "0.0.0"),
+        }
+
+    def test_no_shell_gates_section_has_no_command_imperative(self):
+        import generate
+
+        seen = 0
+        for role in load_roles(ROOT):
+            if "shell" in role["tools"]:
+                continue
+            for label, text in self.adapters(role).items():
+                with self.subTest((role["name"], label)):
+                    section = generate.gates_section(text)
+                    self.assertIn("This role has no shell", section)  # something was collected
+                    self.assertEqual(generate.command_imperatives(section), [])
+                    self.assertEqual(validate.gate_wording_errors(role["name"], text), [])
+                    seen += 1
+        self.assertEqual(seen, 9)  # three no-shell roles (researcher, assessor, planner), three adapters each
+
+    def test_shell_roles_keep_the_gate_wording_byte_identical(self):
+        import generate
+
+        policies = generate.policies_block(ROOT)
+        seen = 0
+        for role in load_roles(ROOT):
+            if "shell" not in role["tools"]:
+                continue
+            self.assertEqual(generate.role_policies(role, policies), policies)
+            for label, text in self.adapters(role).items():
+                with self.subTest((role["name"], label)):
+                    self.assertIn(policies, text)
+                    seen += 1
+        self.assertGreaterEqual(seen, 18)
+
+    def test_the_imperative_check_bites(self):
+        import generate
+
+        raw = generate.gates_section(generate.policies_block(ROOT))
+        self.assertGreaterEqual(len(generate.command_imperatives(raw)), 3)
+        text = (ROOT / ".claude/agents/assessor.md").read_text(encoding="utf-8")
+        for planted in (
+            "Run the tests and lint before you report.",
+            "Execute the script on the table.",
+            "Invoke the linter, then capture the output.",
+            "Revert the fix and confirm the test goes red.",
+        ):
+            with self.subTest(planted):
+                bad = text.replace("- Say what you did not run", planted + "\n- Say what you did not run", 1)
+                self.assertNotEqual(bad, text)
+                self.assertTrue(validate.gate_wording_errors("assessor", bad))
+        self.assertEqual(generate.command_imperatives("This role runs no command. Never run a test."), [])
+        implementer = (ROOT / ".claude/agents/implementer.md").read_text(encoding="utf-8")
+        self.assertTrue(validate.gate_wording_errors("implementer", implementer))
+
     def test_no_shell_roles_are_not_told_to_run_commands(self):
         for r in sorted(validate.ORG_ROLE_NO_SHELL):
             for rel in (f".claude/agents/{r}.md", f".github/agents/{r}.agent.md", f".codex/agents/{r}.toml"):

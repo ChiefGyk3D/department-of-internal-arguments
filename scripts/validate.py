@@ -9,7 +9,14 @@ from pathlib import Path
 from benchmark import corpus_errors, load_corpus
 from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
 from export_models import BRIEF_KEYS, EXPORT_PATH, ModelPinsError, read_pins
-from generate import ADDITIONS_HEADING, CODEX_ROLE_SANDBOX, CODEX_WEB_SANDBOX, drift
+from generate import (
+    ADDITIONS_HEADING,
+    CODEX_ROLE_SANDBOX,
+    CODEX_WEB_SANDBOX,
+    command_imperatives,
+    drift,
+    gates_section,
+)
 from lib import (
     CAPABILITY_ORDER,
     CODEX_AGENTS_DIR,
@@ -493,6 +500,17 @@ def workflow_errors(root):
     return errors
 
 
+def gate_wording_errors(name, text):
+    """Problems in the rendered quality-gates section of one generated agent of a role without a shell: the section
+    must exist, say the role has no shell, and hold no sentence that orders a command, test, lint or gate."""
+    section = gates_section(text)
+    if "This role has no shell" not in section:
+        return [f"{name}: the quality-gates section must say the role has no shell"]
+    return [
+        f"{name}: a role without a shell is told to run a command: {s[:70]!r}" for s in command_imperatives(section)
+    ]
+
+
 def role_errors(r):
     """Structural rules for one loaded role. Shared by the public tree and the private overlay.
 
@@ -773,6 +791,8 @@ def validate(root=ROOT):
         for f in sorted((root / ".claude/agents").glob("*.md")):
             d, _ = frontmatter(f)
             require(set(d) == {"name", "description", "model", "tools"}, f"{f.name}: unreviewed Claude fields")
+            if "Bash" not in str(d.get("tools", "")):
+                errors.extend(f"{f.name}: {e}" for e in gate_wording_errors(f.stem, f.read_text(encoding="utf-8")))
             require(d.get("model") in set(TIER_MODEL.values()), f"{f.name}: model must be explicit (never inherit)")
             require(
                 "Agent" not in str(d.get("tools", "")).split(", "), f"{f.name}: must not be able to dispatch agents"
@@ -800,10 +820,8 @@ def validate(root=ROOT):
                     "shell" in tools or "no shell capability" in instr, f"{f.name}: Codex file is silent about shell"
                 )
                 require("edit" in tools or "no edit capability" in instr, f"{f.name}: Codex file is silent about edit")
-                require(
-                    "shell" in tools or "capture the exit code" not in instr,
-                    f"{f.name}: a role without a shell must not be told to capture an exit code",
-                )
+                if "shell" not in tools:
+                    errors.extend(f"{f.name}: {e}" for e in gate_wording_errors(f.stem, instr))
                 if f.stem in CODEX_ROLE_SANDBOX:
                     require(
                         CODEX_ROLE_SANDBOX[f.stem] in instr,

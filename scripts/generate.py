@@ -52,26 +52,69 @@ def policies_block(root):
     return "\n".join(parts).rstrip()
 
 
-GATE_BULLET_START = "- A plan or a reviewer's opinion is not proof of execution."
-NO_SHELL_GATE_BULLET = (
-    GATE_BULLET_START + " This role has no shell and runs no command, test or gate. Hand every computation, check "
-    "and gate to the analyst or the implementer under HANDOFFS (under OPEN when your report has no HANDOFFS "
-    "field), report each as `not-run` with the reason `no shell`, and quote the captured result (the command and "
-    "its exit code) that the handoff returns. Never write a result you did not receive."
-)
+# A role without a shell must not be told to run, execute, invoke or capture anything. Every quality-gates bullet that
+# orders a command (the check run and exit code, the lint and test run, the revert proof, the clean-tree restore) is
+# replaced for such a role by wording that hands the command to a role with a shell. Shell-capable roles keep the
+# policy text byte for byte. The prefixes below are the starts of those bullets in policies/quality-gates.md.
+NO_SHELL_GATE_BULLETS = {
+    "- A plan or a reviewer's opinion is not proof of execution.": (
+        "- A plan or a reviewer's opinion is not proof of execution. This role has no shell and runs no command, test "
+        "or gate. Hand every computation, check and gate to the analyst or the implementer under HANDOFFS (under OPEN "
+        "when your report has no HANDOFFS field), report each as `not-run` with the reason `no shell`, and quote the "
+        "captured result (the command and its exit code) that the handoff returns. Never write a result you did not "
+        "receive."
+    ),
+    "- **If no gate is defined**": (
+        "- **If no gate is defined** (neither the brief nor the repository documents one), the gate is `not-run - none "
+        "defined`. This role has no shell, so it lists under HANDOFFS the commands a role with a shell would need and "
+        "proposes a gate command in the report. Never invent a command and call it the gate."
+    ),
+    "- **Reviewers prove fixes bite.**": (
+        "- **Reviewers prove fixes bite.** A claimed fix or a new test is proved by a reviewer with a shell, who "
+        "reverts the fix in a scratch copy and confirms the test goes red. This role has no shell: hand the proof to "
+        "the reviewer under HANDOFFS and quote its result. A claim with no proof is NOT VERIFIED."
+    ),
+    "- **Reviewers finish with a clean tree.**": (
+        "- **Reviewers finish with a clean tree.** This role changes no file and leaves nothing mutated; a reviewer "
+        "who mutates a tree shows the proof that it is clean."
+    ),
+}
+GATES_HEADING = "### Quality gates"
+_IMPERATIVE_RE = re.compile(r"\b(?:run|execute|invoke|capture|revert|restore)\b", re.I)
+_NEGATION_RE = re.compile(r"\b(?:no|not|never|nothing|without)\b", re.I)
+
+
+def gates_section(text):
+    """The rendered quality-gates policy section: from its heading to the next heading, or the end of the text."""
+    start = text.find(GATES_HEADING)
+    if start < 0:
+        return ""
+    end = re.search(r"^#{1,3} ", text[start + len(GATES_HEADING) :], re.M)
+    return text[start : start + len(GATES_HEADING) + end.start()] if end else text[start:]
+
+
+def command_imperatives(text):
+    """Sentences that use run, execute, invoke, capture, revert or restore as a base-form verb with no negation in the
+    same sentence: an instruction to do the thing. Word-level, over the whole text given."""
+    out = []
+    for sentence in re.split(r"(?<=[.!?:;])\s+|\n+", text):
+        if _IMPERATIVE_RE.search(sentence) and not _NEGATION_RE.search(sentence):
+            out.append(sentence.strip())
+    return out
 
 
 def role_policies(role, policies):
-    """The shared policies for one role. A role without a shell is not told to run checks or capture an exit code:
-    the quality-gates bullet that says so is replaced by one that hands every command to a role that can run it."""
+    """The shared policies for one role: unchanged when the role has a shell; for a role without one, every bullet in
+    NO_SHELL_GATE_BULLETS is replaced, and a bullet that appears twice is an error."""
     if "shell" in role["tools"]:
         return policies
     lines = policies.split("\n")
-    hit = [i for i, ln in enumerate(lines) if ln.startswith(GATE_BULLET_START)]
-    if len(hit) > 1:
-        raise ValueError(f"roles/{role['file']}: the quality-gates bullet to replace was found more than once")
-    for i in hit:  # the validator fails the gate if the real policy text no longer carries exactly one bullet
-        lines[i] = NO_SHELL_GATE_BULLET
+    for prefix, replacement in NO_SHELL_GATE_BULLETS.items():
+        hit = [i for i, ln in enumerate(lines) if ln.startswith(prefix)]
+        if len(hit) > 1:
+            raise ValueError(f"roles/{role['file']}: the quality-gates bullet {prefix!r} was found more than once")
+        for i in hit:  # the validator fails the gate if a command imperative is left in a no-shell role's section
+            lines[i] = replacement
     return "\n".join(lines)
 
 
