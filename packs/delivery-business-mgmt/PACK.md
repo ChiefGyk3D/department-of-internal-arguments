@@ -15,7 +15,7 @@ A plan is a set of items a named person will do by a date, in an order, within a
 1. **Owner, date and next action on every item.** An item lacking any of the three is flagged, not guessed. The owner is a named human or role, the date is a date, the next action is a verb phrase someone can start tomorrow. Status is one of: not started, in progress, blocked (with the blocker), done (with the evidence).
 2. **State the capacity ceiling before planning.** Hours per week, or a fixed date, as given by the human. The plan total is computed by code against it. When the plan exceeds the ceiling, say what each added item displaces; do not squeeze the estimate to fit.
 3. **Estimates are labeled estimates.** A duration the human did not supply is an estimate with its basis (similar past item, guess). Never present an estimate as a commitment, and never report the sum of estimates as a date.
-4. **The critical path is computed by code** from the item table (id, duration, dependencies), not read off a chart. Use the script below, show the input table in the report, and name the path and the total. A cycle is an error to fix in the plan, not something to report around.
+4. **The critical path is computed by code** from the item table (id, duration, dependencies), not read off a chart. The planner has no shell: the `analyst` or the `implementer` runs the script below on the item table and returns its captured output (command and exit code). Show the input table and that output in the report, and name the path and the total; until it returns, the computation is `not-run` and no figure is stated. A cycle is an error to fix in the plan, not something to report around.
 5. **RAID log: risks, assumptions, issues, dependencies.** Each entry carries owner, date and next action. A risk is written as cause, event, consequence, with likelihood and impact on the scale the owner set. An assumption names how it will be checked and by when. An issue has already happened and has an owner now. A dependency names who provides what by when. (RAID is practitioner vocabulary; see Sources.)
 6. **Name the top three risks in every plan,** ranked by impact times how soon they can bite, with the owner's next action for each. Three, not ten: a longer list goes in the log.
 7. **State cost gates up front, in one list at the start of the plan:** paid tiers, quotas, per-call charges, caps and who pays. A plan with a spend in it and no such list is incomplete, and the human decides once from that list.
@@ -28,7 +28,7 @@ A plan is a set of items a named person will do by a date, in an order, within a
 
 ### Critical path by code
 
-Reads lines `id duration [dependency ids]` on stdin and prints the longest path and its total; exits non-zero on a cycle or an unknown dependency. Example input `a 2`, `b 3 a`, `c 1 a`, `d 4 b c` prints the path `a b d` and total 9.
+Run by a role with a shell, never by the planner. Reads lines `id duration [dependency ids]` on stdin and prints the longest path and its total; exits non-zero on a cycle or an unknown dependency. Example input `a 2`, `b 3 a`, `c 1 a`, `d 4 b c` prints the path `a b d` and total 9.
 
 ```python
 import sys
@@ -81,7 +81,7 @@ print("total:", format(finish[end], "g"))
 ## How to verify (before you hand it back)
 
 - Count plan and RAID rows lacking owner, date or next action: the count is 0 or each is flagged in the report.
-- The critical path in the report equals the script's output on the table shown, and the total equals the script's total.
+- The critical path in the report equals the output the handoff returned for the table shown, and the total equals its total.
 - The capacity check shows hours planned against the ceiling, computed by code.
 - The cost-gate list is the first section when any spend is present.
 - Pilot measurement (a prediction until run, thresholds are starting points): three realistic planning tasks per run, pack on versus off, same model, scored by code on this rubric: every RAID item has owner, date and next action; the plan names the critical path and the top three risks. Measurement target: pack-on passes at least 20 percentage points more rubric items than pack-off, and zero live-system writes by the planner. Report counts, not significance; a pack with no gain after two runs is rewritten once, then retired.

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import validate  # noqa: E402  (path set up above)
-from lib import PACK_NAMES, ROLE_NAMES, load_roles  # noqa: E402
+from lib import PACK_NAMES, ROLE_NAMES, load_packs, load_roles  # noqa: E402
 
 PACKS = ("threat-detection", "grc-controls", "delivery-business-mgmt", "org-operating-model", "org-dispatch")
 ROLES = ("analyst", "assessor", "planner")
@@ -149,6 +149,43 @@ FRAMEWORKS = (
 )
 
 
+def shape_problems(pack):
+    """Size and description problems of one loaded pack (a dict from lib.load_packs)."""
+    out = []
+    desc, body = pack["description"], pack["body"]
+    if not desc.startswith("Load "):
+        out.append("description must start with Load")
+    if len(desc) > MAX_DESC_CHARS:
+        out.append("description too long")
+    if len(body) > MAX_BODY_CHARS:
+        out.append("body too long")
+    if len(body) <= MIN_BODY_CHARS:
+        out.append("body near empty")
+    for h in ("## How to verify", "## Limits", "## Deliverable", "## Sources"):
+        if h not in body:
+            out.append(f"missing {h}")
+    return out
+
+
+def style_problems(text):
+    out = []
+    if PRIVATE.search(text):
+        out.append("private value or em dash")
+    if BRITISH.search(text):
+        out.append("British spelling")
+    return out
+
+
+def mutated_tree(case, pack, edit):
+    """A temporary tree holding one pack, edited by `edit(text)`; cleaned up with the test case."""
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    d = Path(tmp.name) / "packs" / pack
+    d.mkdir(parents=True)
+    (d / "PACK.md").write_text(edit(pack_text(pack)), encoding="utf-8")
+    return Path(tmp.name)
+
+
 def pack_text(pack):
     return (ROOT / "packs" / pack / "PACK.md").read_text(encoding="utf-8")
 
@@ -267,9 +304,25 @@ class Roles(unittest.TestCase):
 
     def test_report_sections(self):
         sections = {
-            "analyst": ("EVIDENCE:", "TIMELINE:", "HYPOTHESES:", "OPTIONS FOR THE HUMAN:", "NOT COVERED:"),
-            "assessor": ("CONTROL TABLE:", "EXCEPTIONS:", "INDEPENDENCE:", "NOT COVERED:"),
-            "planner": ("PLAN:", "CRITICAL PATH:", "TOP THREE RISKS:", "RAID:", "DECISIONS NEEDED:"),
+            "analyst": (
+                "EVIDENCE:",
+                "TIMELINE:",
+                "HYPOTHESES:",
+                "OPTIONS FOR THE HUMAN:",
+                "NOT COVERED:",
+                "FINDINGS:",
+                "ESCALATIONS:",
+            ),
+            "assessor": ("CONTROL TABLE:", "EXCEPTIONS:", "INDEPENDENCE:", "NOT COVERED:", "FINDINGS:", "ESCALATIONS:"),
+            "planner": (
+                "PLAN:",
+                "CRITICAL PATH:",
+                "TOP THREE RISKS:",
+                "RAID:",
+                "DECISIONS NEEDED:",
+                "FINDINGS:",
+                "ESCALATIONS:",
+            ),
         }
         for r, wanted in sections.items():
             for s in wanted:
@@ -293,25 +346,83 @@ class Roles(unittest.TestCase):
                     bad = dict(by[r])
                     bad["tools"] = [*by[r]["tools"], cap]
                     self.assertTrue(validate.role_errors(bad))
-        bad = dict(by["assessor"])
-        bad["tools"] = [*by["assessor"]["tools"], "shell"]
-        self.assertTrue(any("assessor" in e for e in validate.role_errors(bad)))
+        self.assertEqual(validate.ORG_ROLE_NO_SHELL, {"assessor", "planner"})
+        for r in sorted(validate.ORG_ROLE_NO_SHELL):
+            with self.subTest((r, "shell")):
+                bad = dict(by[r])
+                bad["tools"] = [*by[r]["tools"], "shell"]
+                self.assertTrue(any(r in e and "capability" in e for e in validate.role_errors(bad)))
+
+    def test_sandbox_requirement_is_in_every_role_and_adapter(self):
+        ro = "Dispatch only under an enforced read-only sandbox of the parent session."
+        marks = {
+            "assessor": ro,
+            "planner": ro,
+            "analyst": "Dispatch only with the repository and live systems read-only to you",
+        }
+        for r, mark in marks.items():
+            for rel in (f"roles/{r}.md", f".claude/agents/{r}.md", f".github/agents/{r}.agent.md"):
+                with self.subTest(rel):
+                    text = (ROOT / rel).read_text(encoding="utf-8")
+                    self.assertIn(mark, text)
+                    self.assertIn("the dispatch is held", text)
+                    self.assertIn("instruction only", text)
+            with self.subTest((r, "codex")):
+                codex = (ROOT / f".codex/agents/{r}.toml").read_text(encoding="utf-8")
+                self.assertIn("Required sandbox:", codex)
+                self.assertIn("the dispatch is held, never run on trust", codex)
+
+    def test_no_shell_roles_are_not_told_to_run_commands(self):
+        for r in sorted(validate.ORG_ROLE_NO_SHELL):
+            for rel in (f".claude/agents/{r}.md", f".github/agents/{r}.agent.md", f".codex/agents/{r}.toml"):
+                with self.subTest(rel):
+                    text = (ROOT / rel).read_text(encoding="utf-8")
+                    self.assertNotIn("capture the exit code", text)
+                    self.assertNotIn("gate exit=", text)
+                    self.assertIn("This role has no shell and runs no command, test or gate.", text)
+                    self.assertIn("`not-run`", text)
+        for rel in (".claude/agents/analyst.md", ".claude/agents/implementer.md"):
+            self.assertIn("capture the exit code", (ROOT / rel).read_text(encoding="utf-8"))
+
+    def test_planner_hands_computation_to_a_role_with_a_shell(self):
+        text = role_text("planner")
+        self.assertIn("you have no shell", text)
+        self.assertIn("`analyst` or the `implementer` runs", text)
+        self.assertNotIn("produced by code", text)
+        self.assertRegex(pack_text("delivery-business-mgmt"), r"the `analyst` or the `implementer` runs the script")
+
+    def test_generator_output_follows_the_shell_capability_and_the_sandbox_table(self):
+        import generate
+
+        policies = generate.policies_block(ROOT)
+        for role in load_roles(ROOT):
+            claude = generate.render_claude_agent(role, policies, "0.0.0")
+            codex = generate.render_codex_agent(role, policies, "0.0.0")
+            has_shell = "shell" in role["tools"]
+            for label, text in (("claude", claude), ("codex", codex)):
+                with self.subTest((role["name"], label)):
+                    self.assertEqual("capture the exit code" in text, has_shell)
+            with self.subTest((role["name"], "sandbox")):
+                if role["name"] in ROLES:
+                    self.assertIn(generate.CODEX_ROLE_SANDBOX[role["name"]], codex)
+                else:
+                    self.assertNotIn("the dispatch is held, never run on trust", codex)
+
+    def test_the_codex_sandbox_table_covers_the_pilot_roles(self):
+        import generate
+
+        for r in ROLES:
+            self.assertIn(r, generate.CODEX_ROLE_SANDBOX)
+        self.assertNotIn("researcher", generate.CODEX_ROLE_SANDBOX)
 
 
 class Packs(unittest.TestCase):
     def test_shape_and_size(self):
         for p in PACKS:
             with self.subTest(p):
-                text = pack_text(p)
-                self.assertTrue(text.startswith(f'---\nname: "{p}"\n'))
-                desc, body = split(text)
-                self.assertIsNotNone(desc)
-                self.assertTrue(desc.startswith("Load "), "the trigger comes first")
-                self.assertLessEqual(len(desc), MAX_DESC_CHARS)
-                self.assertLessEqual(len(body), MAX_BODY_CHARS)
-                self.assertGreater(len(body), MIN_BODY_CHARS, "a near-empty body is not a pack")
-                for h in ("## How to verify", "## Limits", "## Deliverable", "## Sources"):
-                    self.assertIn(h, body)
+                self.assertTrue(pack_text(p).startswith(f'---\nname: "{p}"\n'))
+                loaded = {x["dir"]: x for x in load_packs(ROOT)}[p]
+                self.assertEqual(shape_problems(loaded), [])
 
     def test_every_rule_is_present(self):
         for p in PACKS:
@@ -338,12 +449,11 @@ class Packs(unittest.TestCase):
     def test_no_private_value_no_british_no_em_dash(self):
         for p in PACKS:
             with self.subTest(p):
-                self.assertIsNone(PRIVATE.search(pack_text(p)), PRIVATE.search(pack_text(p)))
-                self.assertIsNone(BRITISH.search(pack_text(p)))
+                self.assertEqual(style_problems(pack_text(p)), [])
         for r in ROLES:
             with self.subTest(r):
-                self.assertIsNone(PRIVATE.search(role_text(r)))
-                self.assertIsNone(BRITISH.search(role_text(r)))
+                self.assertEqual(style_problems(role_text(r)), [])
+        self.assertEqual(validate.privacy_hits(ROOT), [])
 
     def test_docs_list_every_new_pack_and_role(self):
         packs_doc = (ROOT / "docs/packs.md").read_text(encoding="utf-8")
@@ -429,16 +539,31 @@ class GuardsBite(unittest.TestCase):
         self.assertTrue(any("unknown pack" in e for e in router_problems(body + ghost, set(PACK_NAMES))))
 
     def test_size_and_description_guards_bite(self):
-        desc, body = split(pack_text("org-dispatch"))
-        self.assertLessEqual(len(desc), MAX_DESC_CHARS)
-        self.assertGreater(len("x" * 201), MAX_DESC_CHARS)
-        self.assertGreater(len(body + "x" * MAX_BODY_CHARS), MAX_BODY_CHARS)
+        def loaded(edit):
+            return load_packs(mutated_tree(self, "org-dispatch", edit))[0]
+
+        self.assertEqual(shape_problems(loaded(lambda t: t)), [])
+        long_desc = loaded(lambda t: t.replace('description: "Load', 'description: "Load ' + "x" * 250, 1))
+        self.assertIn("description too long", shape_problems(long_desc))
+        not_load = loaded(lambda t: t.replace('description: "Load', 'description: "Use', 1))
+        self.assertIn("description must start with Load", shape_problems(not_load))
+        big = loaded(lambda t: t + "\n" + "word " * 3000)
+        self.assertIn("body too long", shape_problems(big))
+        no_sources = loaded(lambda t: t.replace("## Sources", "## Notes"))
+        self.assertIn("missing ## Sources", shape_problems(no_sources))
 
     def test_privacy_guard_bites(self):
-        for planted in ("/ho" + "me/someone/x", "host 10.1." + "2.3", "a" + "@example.com", "dash " + "—" + " here"):
-            with self.subTest(planted):
-                self.assertIsNotNone(PRIVATE.search(planted))
-        self.assertIsNotNone(BRITISH.search("organis" + "ation"))
+        planted = {"home path": "/ho" + "me/someone/x", "address": "host 10.1." + "2.3 is up"}
+        for label, text in planted.items():
+            with self.subTest(label):
+                tree = mutated_tree(self, "org-dispatch", lambda t, x=text: t + "\n" + x + "\n")
+                self.assertTrue(validate.privacy_hits(tree), label)
+        clean = mutated_tree(self, "org-dispatch", lambda t: t)
+        self.assertEqual(validate.privacy_hits(clean), [])
+        for label, text in {"em dash": "dash " + chr(0x2014) + " here", "british": "organis" + "ation"}.items():
+            with self.subTest(label):
+                tree = mutated_tree(self, "org-dispatch", lambda t, x=text: t + "\n" + x + "\n")
+                self.assertTrue(style_problems((tree / "packs/org-dispatch/PACK.md").read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":

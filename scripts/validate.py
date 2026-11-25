@@ -9,7 +9,7 @@ from pathlib import Path
 from benchmark import corpus_errors, load_corpus
 from evals_matrix import CASES_PATH, EXAMPLE_PATH, identifier_problems, load_registry, load_results
 from export_models import BRIEF_KEYS, EXPORT_PATH, ModelPinsError, read_pins
-from generate import ADDITIONS_HEADING, CODEX_WEB_SANDBOX, drift
+from generate import ADDITIONS_HEADING, CODEX_ROLE_SANDBOX, CODEX_WEB_SANDBOX, drift
 from lib import (
     CAPABILITY_ORDER,
     CODEX_AGENTS_DIR,
@@ -115,6 +115,9 @@ ORG_ROLE_RULES = {
         "source per line": "a source on every line",
         "pilot": "## Pilot status",
         "prediction": "prediction, not a finding",
+        "sandbox": "Dispatch only with the repository and live systems read-only to you",
+        "held": "the dispatch is held",
+        "instruction only": "instruction only",
     },
     "assessor": {
         "never operates": "never operate, tune, fix or accept an exception for the control you test",
@@ -124,6 +127,10 @@ ORG_ROLE_RULES = {
         "not covered": "NOT COVERED",
         "pilot": "## Pilot status",
         "prediction": "prediction, not a finding",
+        "sandbox": "Dispatch only under an enforced read-only sandbox of the parent session.",
+        "held": "the dispatch is held",
+        "instruction only": "instruction only",
+        "no shell": "you have no shell",
     },
     "planner": {
         "owner date next action": "owner, date and next action",
@@ -132,13 +139,34 @@ ORG_ROLE_RULES = {
         "no live writes": "never write to a live system",
         "pilot": "## Pilot status",
         "prediction": "prediction, not a finding",
+        "sandbox": "Dispatch only under an enforced read-only sandbox of the parent session.",
+        "held": "the dispatch is held",
+        "instruction only": "instruction only",
+        "no shell": "you have no shell",
+        "handoff": "`analyst` or the `implementer` runs",
     },
 }
 ORG_ROLE_NO_SHELL = {"assessor", "planner"}
 ORG_ROLE_SECTIONS = {
-    "analyst": ("EVIDENCE:", "TIMELINE:", "HYPOTHESES:", "OPTIONS FOR THE HUMAN:", "NOT COVERED:"),
-    "assessor": ("CONTROL TABLE:", "EXCEPTIONS:", "INDEPENDENCE:", "NOT COVERED:"),
-    "planner": ("PLAN:", "CRITICAL PATH:", "TOP THREE RISKS:", "RAID:", "DECISIONS NEEDED:"),
+    "analyst": (
+        "EVIDENCE:",
+        "TIMELINE:",
+        "HYPOTHESES:",
+        "OPTIONS FOR THE HUMAN:",
+        "NOT COVERED:",
+        "FINDINGS:",
+        "ESCALATIONS:",
+    ),
+    "assessor": ("CONTROL TABLE:", "EXCEPTIONS:", "INDEPENDENCE:", "NOT COVERED:", "FINDINGS:", "ESCALATIONS:"),
+    "planner": (
+        "PLAN:",
+        "CRITICAL PATH:",
+        "TOP THREE RISKS:",
+        "RAID:",
+        "DECISIONS NEEDED:",
+        "FINDINGS:",
+        "ESCALATIONS:",
+    ),
 }
 # The devops-engineer's rules and report sections (issue #87); a rule that silently disappears from the role must
 # fail the gate. Phrases are exact text from roles/devops-engineer.md.
@@ -772,6 +800,15 @@ def validate(root=ROOT):
                     "shell" in tools or "no shell capability" in instr, f"{f.name}: Codex file is silent about shell"
                 )
                 require("edit" in tools or "no edit capability" in instr, f"{f.name}: Codex file is silent about edit")
+                require(
+                    "shell" in tools or "capture the exit code" not in instr,
+                    f"{f.name}: a role without a shell must not be told to capture an exit code",
+                )
+                if f.stem in CODEX_ROLE_SANDBOX:
+                    require(
+                        CODEX_ROLE_SANDBOX[f.stem] in instr,
+                        f"{f.name}: a Codex pilot role must state its required sandbox",
+                    )
                 require(
                     ("web" in tools) == (CODEX_WEB_SANDBOX in instr),
                     f"{f.name}: a Codex web role must state the read-only sandbox with approvals on request",

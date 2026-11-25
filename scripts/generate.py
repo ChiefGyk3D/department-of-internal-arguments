@@ -52,6 +52,29 @@ def policies_block(root):
     return "\n".join(parts).rstrip()
 
 
+GATE_BULLET_START = "- A plan or a reviewer's opinion is not proof of execution."
+NO_SHELL_GATE_BULLET = (
+    GATE_BULLET_START + " This role has no shell and runs no command, test or gate. Hand every computation, check "
+    "and gate to the analyst or the implementer under HANDOFFS (under OPEN when your report has no HANDOFFS "
+    "field), report each as `not-run` with the reason `no shell`, and quote the captured result (the command and "
+    "its exit code) that the handoff returns. Never write a result you did not receive."
+)
+
+
+def role_policies(role, policies):
+    """The shared policies for one role. A role without a shell is not told to run checks or capture an exit code:
+    the quality-gates bullet that says so is replaced by one that hands every command to a role that can run it."""
+    if "shell" in role["tools"]:
+        return policies
+    lines = policies.split("\n")
+    hit = [i for i, ln in enumerate(lines) if ln.startswith(GATE_BULLET_START)]
+    if len(hit) > 1:
+        raise ValueError(f"roles/{role['file']}: the quality-gates bullet to replace was found more than once")
+    for i in hit:  # the validator fails the gate if the real policy text no longer carries exactly one bullet
+        lines[i] = NO_SHELL_GATE_BULLET
+    return "\n".join(lines)
+
+
 def _marker(source, ver, extra="", digest=None):
     sha = f" sha256:{digest}." if digest else ""
     return f"<!-- {GENERATED_MARK} (release {ver}) from {source}{extra}.{sha} Do not edit; run the generator. -->"
@@ -98,14 +121,14 @@ def render_claude_agent(role, policies, ver, source=None, additions=None):
         f"tools: {', '.join(tools)}\n"
         "---\n"
     )
-    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    tail = f"{role['body']}\n\n{role_policies(role, policies)}\n" + (additions_section(additions) if additions else "")
     return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
 def render_copilot_agent(role, policies, ver, source=None, additions=None):
     tools = [COPILOT_TOOLS[c] for c in _capabilities(role) if c in COPILOT_TOOLS]
     head = f"---\nname: {role['name']}\ndescription: {_q(role['description'])}\ntools: {_q(tools)}\n---\n"
-    tail = f"{role['body']}\n\n{policies}\n" + (additions_section(additions) if additions else "")
+    tail = f"{role['body']}\n\n{role_policies(role, policies)}\n" + (additions_section(additions) if additions else "")
     return _seal(head, tail, source or "roles/" + role["file"], ver)
 
 
@@ -120,6 +143,33 @@ CODEX_WEB_SANDBOX = (
     "nothing and report that under OPEN. If a fetch cannot run under the read-only sandbox, report that under OPEN; "
     "never ask to widen the sandbox. UNVERIFIED: this has not been run in Codex."
 )
+# The pilot roles that must not change the repository or a live system. Codex cannot remove edit or shell from a custom
+# agent, so for these roles only the parent's sandbox enforces it, and the file says so: a dispatch under a writable
+# sandbox is held, never run on trust. Nothing here has been run in Codex.
+CODEX_ROLE_SANDBOX = {
+    "assessor": (
+        "Required sandbox: read-only. This role must not change the repository or any live system and runs no command, "
+        "and Codex cannot remove edit or shell from a custom agent, so only a read-only sandbox mode on the parent "
+        "enforces it; the rule is otherwise an instruction only. If the session shows a writable sandbox, change "
+        "nothing, run nothing and report STATUS: blocked under OPEN: the dispatch is held, never run on trust. "
+        "UNVERIFIED: this has not been run in Codex."
+    ),
+    "planner": (
+        "Required sandbox: read-only. This role must not change the repository or any live system and runs no command, "
+        "and Codex cannot remove edit or shell from a custom agent, so only a read-only sandbox mode on the parent "
+        "enforces it; the rule is otherwise an instruction only. If the session shows a writable sandbox, change "
+        "nothing, run nothing and report STATUS: blocked under OPEN: the dispatch is held, never run on trust. "
+        "UNVERIFIED: this has not been run in Codex."
+    ),
+    "analyst": (
+        "Required sandbox: the repository and live systems read-only, with one writable scratch directory named in the "
+        "brief as the only writable root. Codex cannot remove edit from a custom agent and the shell is not limited to "
+        "read-only commands, so only the parent's sandbox enforces this; the rule is otherwise an instruction only. "
+        "If the session shows the repository or a live system writable, change nothing, run nothing and report "
+        "STATUS: blocked under OPEN: the dispatch is held, never run on trust. UNVERIFIED: this has not been run in "
+        "Codex."
+    ),
+}
 TOML_LITERAL_END = "'''"
 CODEX_KEYS = {"name", "description", "developer_instructions"}
 
@@ -145,6 +195,8 @@ def codex_notes(role):
         "`MODEL:` line of the report is the exact model id the session reports, never a family name.",
         "- read, search: honored through Codex's own file and search tools, inside the inherited sandbox.",
     ]
+    if role["name"] in CODEX_ROLE_SANDBOX:
+        lines.append("- " + CODEX_ROLE_SANDBOX[role["name"]])
     if "web" in caps:
         lines.append("- " + CODEX_WEB_SANDBOX)
         lines.append(
@@ -198,7 +250,7 @@ def render_codex_agent(role, policies, ver, source=None, additions=None):
         f"description = {_q(role['description'])}\n"
         f"developer_instructions = {TOML_LITERAL_END}"
     )
-    tail = f"{role['body']}\n\n{codex_notes(role)}\n\n{policies}\n"
+    tail = f"{role['body']}\n\n{codex_notes(role)}\n\n{role_policies(role, policies)}\n"
     tail += additions_section(additions) if additions else ""
     if TOML_LITERAL_END in tail:
         raise ValueError(f"roles/{role['file']}: text must not contain three single quotes (they end the TOML string)")
