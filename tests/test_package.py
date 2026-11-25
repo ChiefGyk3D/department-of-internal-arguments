@@ -485,6 +485,23 @@ class RoleFileTrim(unittest.TestCase):
                 self.assertLessEqual(n, 1, f.name)
 
 
+class LocalRoutingPackName(unittest.TestCase):
+    """Issue #121: one name for the local-model routing pack. The installer names a skill `pack-<directory>`, so the
+    directory name is the installed name; the older hand-made copy called ollama-local-routing is not a second pack."""
+
+    def test_one_directory_and_one_installed_skill_name(self):
+        self.assertEqual((ROOT / "packs/local-llm-routing/PACK.md").is_file(), True)
+        self.assertEqual(sorted(p.name for p in (ROOT / "packs").glob("*ollama*")), [])
+        for base in (".claude/skills", ".agents/skills"):
+            self.assertTrue((ROOT / base / "pack-local-llm-routing/SKILL.md").is_file(), base)
+            self.assertEqual(sorted(p.name for p in (ROOT / base).glob("*ollama*")), [], base)
+
+    def test_pack_page_names_the_old_name_once(self):
+        text = (ROOT / "docs/packs.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("ollama-local-routing"), 1)
+        self.assertIn("pack-local-llm-routing", text)
+
+
 class Export(unittest.TestCase):
     def test_prompt_has_all_policies_one_role_and_chosen_packs(self):
         p = build("reviewer", ["threat-model"])
