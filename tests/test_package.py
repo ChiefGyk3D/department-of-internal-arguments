@@ -463,7 +463,7 @@ class RoleFileTrim(unittest.TestCase):
 
     def test_role_files_carry_no_lead_addressed_routing_text(self):
         files = self.agent_files()
-        self.assertEqual(len(files), 21)
+        self.assertEqual(len(files), 30)
         for f in files:
             text = f.read_text(encoding="utf-8")
             for needle in self.LEAD_ONLY:
@@ -510,14 +510,22 @@ class DeletingFilesRule(unittest.TestCase):
     """Issue #121: the delete-only-your-own-files rule, a shared fragment, reaches every role that can run commands."""
 
     RULE = "Delete only files and directories you created in this task"
-    HAS_SHELL = ("implementer", "reviewer", "adversarial-reviewer", "transcriber", "cloud-engineer", "devops-engineer")
+    HAS_SHELL = (
+        "implementer",
+        "reviewer",
+        "adversarial-reviewer",
+        "transcriber",
+        "cloud-engineer",
+        "devops-engineer",
+        "analyst",
+    )
 
     def test_every_shell_role_carries_it_in_every_adapter(self):
         paths = []
         for name in self.HAS_SHELL:
             paths += [ROOT / f".claude/agents/{name}.md", ROOT / f".github/agents/{name}.agent.md"]
             paths.append(ROOT / f".codex/agents/{name}.toml")
-        self.assertEqual(len(paths), 18)
+        self.assertEqual(len(paths), 21)
         for p in paths:
             self.assertEqual(p.read_text(encoding="utf-8").count(self.RULE), 1, p.name)
 
@@ -554,7 +562,7 @@ class ReportContract(unittest.TestCase):
 
     def test_every_role_file_has_the_contract_once_and_no_old_sentence(self):
         files = self.files()
-        self.assertEqual(len(files), 21)
+        self.assertEqual(len(files), 30)
         for f in files:
             text = f.read_text(encoding="utf-8")
             self.assertEqual(text.count("**Report contract.**"), 1, f.name)

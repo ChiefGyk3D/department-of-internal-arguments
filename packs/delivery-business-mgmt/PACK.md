@@ -1,0 +1,105 @@
+---
+name: "delivery-business-mgmt"
+description: "Load for plans, backlogs, RAID logs, status reports, budgets, vendors or procurement: owner, date and next action on every item, critical path by code, cost gates up front, no approvals by the agent."
+updated: "2026-11-25"
+---
+
+# Pack: delivery and business management
+
+Status: pilot pack, written 2026-11-25. The rules are constraints and checklists, not measured findings. That the pack improves plans and status is a prediction until the measurement in "How to verify" is run.
+
+A plan is a set of items a named person will do by a date, in an order, within a stated capacity. This pack keeps plans honest: nothing is tracked without an owner, nothing is estimated without saying so, and nothing is approved by the agent that wrote it.
+
+## Rules
+
+1. **Owner, date and next action on every item.** An item lacking any of the three is flagged, not guessed. The owner is a named human or role, the date is a date, the next action is a verb phrase someone can start tomorrow. Status is one of: not started, in progress, blocked (with the blocker), done (with the evidence).
+2. **State the capacity ceiling before planning.** Hours per week, or a fixed date, as given by the human. The plan total is computed by code against it. When the plan exceeds the ceiling, say what each added item displaces; do not squeeze the estimate to fit.
+3. **Estimates are labeled estimates.** A duration the human did not supply is an estimate with its basis (similar past item, guess). Never present an estimate as a commitment, and never report the sum of estimates as a date.
+4. **The critical path is computed by code** from the item table (id, duration, dependencies), not read off a chart. Use the script below, show the input table in the report, and name the path and the total. A cycle is an error to fix in the plan, not something to report around.
+5. **RAID log: risks, assumptions, issues, dependencies.** Each entry carries owner, date and next action. A risk is written as cause, event, consequence, with likelihood and impact on the scale the owner set. An assumption names how it will be checked and by when. An issue has already happened and has an owner now. A dependency names who provides what by when. (RAID is practitioner vocabulary; see Sources.)
+6. **Name the top three risks in every plan,** ranked by impact times how soon they can bite, with the owner's next action for each. Three, not ten: a longer list goes in the log.
+7. **State cost gates up front, in one list at the start of the plan:** paid tiers, quotas, per-call charges, caps and who pays. A plan with a spend in it and no such list is incomplete, and the human decides once from that list.
+8. **Status is honest.** One decision sentence first (what you need from whom), then what slipped (new date and cause), what is blocked, and what is stale: no update inside the period the owner set (the default of 7 days is INFERRED, set your own). An item that slipped is never reported as on track.
+9. **If the team uses Scrum, use its words only as the Scrum Guide gives them:** accountabilities Developers, Product Owner and Scrum Master; events Sprint, Sprint Planning, Daily Scrum, Sprint Review and Sprint Retrospective; artifacts Product Backlog, Sprint Backlog and Increment. Do not invent a role or ceremony the team does not run.
+10. **Delivery metrics come in pairs.** The DORA software delivery metrics are throughput (change lead time, deployment frequency, failed deployment recovery time) and instability (change fail rate, deployment rework rate). Report one only where the data exists, with its counterpart, and as an observation: a metric is never a target on its own.
+11. **Vendors and purchases.** A row per vendor or purchase: service, what data class the vendor holds, owner, renewal date, exit plan, cost and who pays. A high-risk vendor or any spend is decided by the human; the planner never approves one.
+12. **Decisions are recorded.** A decision that changes scope, cost or risk becomes a short record (use templates/adr.md): context, options, decision, who decided, date. Lessons need an action and an owner: "a postmortem without subsequent action is indistinguishable from no postmortem" (Google SRE, under Sources).
+13. **The planner never approves** a plan, date, budget, risk acceptance or exception, and never writes to a live system. It names the decision and its owner; implementation is briefed to the implementer and checked by the reviewer.
+
+### Critical path by code
+
+Reads lines `id duration [dependency ids]` on stdin and prints the longest path and its total; exits non-zero on a cycle or an unknown dependency. Example input `a 2`, `b 3 a`, `c 1 a`, `d 4 b c` prints the path `a b d` and total 9.
+
+```python
+import sys
+
+tasks = {}
+for line in sys.stdin:
+    parts = line.split()
+    if parts:
+        tasks[parts[0]] = (float(parts[1]), parts[2:])
+for name, (_, deps) in tasks.items():
+    for d in deps:
+        if d not in tasks:
+            sys.exit(f"unknown dependency {d} of {name}")
+finish, prev, state = {}, {}, {}
+
+
+def visit(n):
+    if state.get(n) == 1:
+        sys.exit(f"cycle at {n}")
+    if state.get(n) == 2:
+        return finish[n]
+    state[n] = 1
+    start, via = 0.0, None
+    for d in tasks[n][1]:
+        f = visit(d)
+        if via is None or f > start:
+            start, via = f, d
+    finish[n], prev[n], state[n] = start + tasks[n][0], via, 2
+    return finish[n]
+
+
+for t in tasks:
+    visit(t)
+end = max(finish, key=finish.get)
+path, node = [], end
+while node is not None:
+    path.append(node)
+    node = prev[node]
+print("critical path:", " ".join(reversed(path)))
+print("total:", format(finish[end], "g"))
+```
+
+## Limits
+
+- No approvals, no live-system writes, no edits of the repository by the planner.
+- Plans are only as good as the items supplied; say what the human has not told you.
+- Money and contracts: facts come from the human's documents; no legal or tax advice.
+- Standards read only through search summaries (PMBOK, PRINCE2) are not quoted.
+
+## How to verify (before you hand it back)
+
+- Count plan and RAID rows lacking owner, date or next action: the count is 0 or each is flagged in the report.
+- The critical path in the report equals the script's output on the table shown, and the total equals the script's total.
+- The capacity check shows hours planned against the ceiling, computed by code.
+- The cost-gate list is the first section when any spend is present.
+- Pilot measurement (a prediction until run, thresholds are starting points): three realistic planning tasks per run, pack on versus off, same model, scored by code on this rubric: every RAID item has owner, date and next action; the plan names the critical path and the top three risks. Measurement target: pack-on passes at least 20 percentage points more rubric items than pack-off, and zero live-system writes by the planner. Report counts, not significance; a pack with no gain after two runs is rewritten once, then retired.
+
+## Deliverable
+
+1. Cost gates (first, when any spend exists).
+2. Plan table, critical path with its input table, and capacity check.
+3. Top three risks and the RAID log.
+4. Status: the decision sentence, slipped, blocked, stale items.
+5. Decisions needed, each with its owner and date.
+
+## Sources
+
+Read 2026-11-25 on the publisher's pages.
+
+- VERIFIED: the Scrum Guide (2020) names three accountabilities (Developers, Product Owner, Scrum Master), five events and three artifacts (https://scrumguides.org/scrum-guide.html, read 2026-11-25).
+- VERIFIED: DORA software delivery metrics, page last updated January 5, 2026: three throughput factors (change lead time, deployment frequency, failed deployment recovery time) and two instability factors (change fail rate, deployment rework rate) (https://dora.dev/guides/dora-metrics/, read 2026-11-25).
+- VERIFIED: Google SRE workbook, "Postmortem Culture": "a postmortem without subsequent action is indistinguishable from no postmortem" (https://sre.google/workbook/postmortem-culture/, read 2026-11-25).
+- UNVERIFIED: PMBOK and PRINCE2 role and domain lists were not read on a publisher page on 2026-11-25; nothing here is drawn from them.
+- INFERRED: RAID as the log structure, the stale-item period, the top-three rule and the capacity-ceiling method are this repository's design and practitioner convention, not a standard's requirement.

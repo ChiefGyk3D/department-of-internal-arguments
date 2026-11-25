@@ -207,7 +207,7 @@ class ResearchAndRoles(unittest.TestCase):
 
     def test_template_lists_every_role(self):
         data = em.read_pins(ROOT / em.EXPORT_PATH)
-        self.assertEqual(len(data["roles"]), 7)
+        self.assertEqual(len(data["roles"]), 10)
         for role in data["roles"]:
             with self.subTest(role):
                 self.assertRegex(self.text, rf"(?m)^- Role agent and model:.*\b{re.escape(role)}\b")
