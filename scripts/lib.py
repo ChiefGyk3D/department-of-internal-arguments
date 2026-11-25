@@ -43,6 +43,8 @@ PACK_NAMES = (
     "stage-crew",
     "front-door",
     "aws",
+    "review-protocol",
+    "implementer-self-check",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken", "deleting-files", "report-contract")
 
