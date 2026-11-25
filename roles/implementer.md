@@ -30,7 +30,9 @@ You implement one task as briefed. Follow the brief's scope exactly; anything ou
 
 ## Report format (return as text)
 
-The header is shared by every role so the lead can log it; keep the field names and order. HEAD is your last commit; TREE is the state of your worktree after the gate (your commits are expected; uncommitted leftovers are not).
+{{fragment:report-contract}}
+
+HEAD is your last commit; TREE is the state of your worktree after the gate (your commits are expected; uncommitted leftovers are not).
 
 ```
 {{fragment:report-header}}

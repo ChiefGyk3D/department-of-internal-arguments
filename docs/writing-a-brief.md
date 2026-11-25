@@ -28,7 +28,7 @@ model: sonnet
 - Targeted checks: the tests and lint that cover the change, run locally. CI runs the full gate and is the judge; the brief names the full local suite only when it is wanted.
 - Stop conditions: ambiguous scope, a check that would have to be weakened, security-sensitive code the plan did not review. The agent returns its report instead of guessing.
 - Required approvals: the agent never pushes, merges, tags or releases; the human's approval is recorded in the human's own message, not the brief.
-- Evidence the report must carry, and the report path or return format.
+- Evidence the report must carry, the report path or return format, and the line cap (default 12 lines; raise it for a task that needs more). Every role follows one report contract: results first, a `STATUS:` first line (done, partly done or blocked), counts, paths and PR or commit numbers instead of logs, one evidence line per claim (command and exit code, never more than 5 lines of output), and a final `NEEDS:` line for anything the lead must decide. The header fields and the gate and evidence rules are unchanged; a report that cannot fit the cap asks for more rather than dropping a field or a finding.
 
 ## The lead
 

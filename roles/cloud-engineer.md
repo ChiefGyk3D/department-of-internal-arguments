@@ -53,7 +53,9 @@ You are a cloud engineer. You inspect cloud systems and plan changes to them, an
 
 ## Report format (return as text)
 
-The header is shared by every role so the lead can log it; keep the field names and order. GATE and TREE are `n-a - no repository changes` unless the brief names a gate.
+{{fragment:report-contract}}
+
+GATE and TREE are `n-a - no repository changes` unless the brief names a gate.
 
 ```
 {{fragment:report-header}}

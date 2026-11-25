@@ -43,7 +43,9 @@ Name the strongest failure case first: the one most likely to hurt, not the easi
 
 ## Report format (return as text)
 
-The header is shared by every role so the lead can log it; keep the field names and order. You do not run the full gate unless the brief asks; then write `GATE: n-a - adversarial review, gate not run`.
+{{fragment:report-contract}}
+
+You do not run the full gate unless the brief asks; then write `GATE: n-a - adversarial review, gate not run`.
 
 ```
 {{fragment:report-header}}

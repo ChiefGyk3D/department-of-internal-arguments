@@ -526,6 +526,47 @@ class DeletingFilesRule(unittest.TestCase):
         self.assertIn("exact path", text)
 
 
+class ReportContract(unittest.TestCase):
+    """Issue #121: one report contract per role file, replacing the old shared-header sentence, with every mandatory
+    field and the gate and evidence rules unchanged."""
+
+    PARTS = ("STATUS: done | partly done | blocked", "default 12 lines", "5 lines", "`NEEDS:`", "exit code")
+    OLD = "The header is shared by every role so the lead can log it"
+    FIELDS = ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "OTHER GATES:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:")
+
+    def files(self):
+        out = sorted((ROOT / ".claude/agents").glob("*.md")) + sorted((ROOT / ".github/agents").glob("*.md"))
+        return out + sorted((ROOT / ".codex/agents").glob("*.toml"))
+
+    def test_every_role_file_has_the_contract_once_and_no_old_sentence(self):
+        files = self.files()
+        self.assertEqual(len(files), 21)
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            self.assertEqual(text.count("**Report contract.**"), 1, f.name)
+            self.assertNotIn(self.OLD, text, f.name)
+            for part in self.PARTS:
+                self.assertIn(part, text, (f.name, part))
+
+    def test_mandatory_fields_and_gate_rules_are_still_there(self):
+        for f in self.files():
+            text = f.read_text(encoding="utf-8")
+            for field in self.FIELDS:
+                self.assertIn(field, text, (f.name, field))
+            for rule in ("Never weaken a check to get green", "Reviewers prove fixes bite", "not-run - none defined"):
+                self.assertIn(rule, text, (f.name, rule))
+        for name in ("implementer", "adversarial-reviewer"):
+            text = (ROOT / f".claude/agents/{name}.md").read_text(encoding="utf-8")
+            self.assertIn("DEVIATIONS" if name == "implementer" else "VERDICT:", text)
+        self.assertIn("ESCALATIONS:", (ROOT / ".claude/agents/implementer.md").read_text(encoding="utf-8"))
+
+    def test_brief_template_states_the_cap(self):
+        text = (ROOT / "templates/brief.md").read_text(encoding="utf-8")
+        self.assertIn("default 12 lines", text)
+        self.assertIn("NEEDS", text)
+        self.assertIn("Evidence the report must carry (gate exit code, red evidence, revert check", text)
+
+
 class Export(unittest.TestCase):
     def test_prompt_has_all_policies_one_role_and_chosen_packs(self):
         p = build("reviewer", ["threat-model"])

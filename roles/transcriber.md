@@ -33,7 +33,9 @@ Stop and report, rather than finishing, when the plan's code looks wrong in a wa
 
 ## Report format (return as text)
 
-The header is shared by every role so the lead can log it; keep the field names and order. HEAD is your last commit; PACKS LOADED is `none` (this role loads no packs).
+{{fragment:report-contract}}
+
+HEAD is your last commit; PACKS LOADED is `none` (this role loads no packs).
 
 ```
 {{fragment:report-header}}
