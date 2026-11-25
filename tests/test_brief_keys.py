@@ -189,6 +189,50 @@ class ResearchAndRoles(unittest.TestCase):
         text = "~~~~\n" + line + "   ~~~~~\nresearch: n/a - real\n"
         self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
 
+    def test_fence_opened_in_a_list_item_is_an_opener_and_its_indented_closer_closes_it(self):
+        hid = "research: n/a - hidden\n"
+        real = "research: n/a - real\n"
+        want = ["research: n/a - real"]
+        # the failing example from #127: a bullet with a python fence, closed two spaces in, then a real line
+        text = "- item\n  ```python\n" + hid + "  ```\n" + real
+        self.assertEqual(validate.policy_lines(text, "research"), want)
+        for label, text in {
+            "bullet opener, indented closer": "- ```python\n" + hid + "  ```\n" + real,
+            "star bullet": "* ```\n" + hid + "  ```\n" + real,
+            "ordered item": "1. ```\n" + hid + "   ```\n" + real,
+            "ordered paren item": "1) ~~~\n" + hid + "   ~~~\n" + real,
+            "nested item": "- a\n  - ```\n" + hid + "    ```\n" + real,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), want, label)
+        # hidden while the fence is open, also when it is never closed or the closer is the wrong kind
+        for label, text in {
+            "bullet fence never closed": "- ```\n  " + hid + hid,
+            "wrong closer character": "- ```\n" + hid + "  ~~~\n" + hid,
+            "closer too short": "- ````\n" + hid + "  ```\n" + hid,
+            "closer carries text": "- ```\n" + hid + "  ``` x\n" + hid,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # a closer indented past the content indent plus three spaces is content, not a closer
+        self.assertEqual(validate.policy_lines("- ```\n" + hid + "      ```\n" + hid, "research"), [])
+        # four spaces without a marker is indented code, not an opener
+        self.assertEqual(validate.policy_lines("    ```\n" + real, "research"), want)
+
+    def test_backtick_info_string_clause_a_backtick_after_the_run_is_inline_code_not_an_opener(self):
+        line = "research: n/a - real\n"
+        for label, text in {
+            "inline code span": "```x``` and more\n" + line,
+            "backtick in info string": "```py`thon\n" + line,
+            "bullet inline code": "- ```x```\n" + line,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"], label)
+        # the clause applies to backticks only: a tilde fence may carry a backtick in its info string
+        self.assertEqual(validate.policy_lines("~~~ a`b\n" + line + "~~~\n", "research"), [])
+        # no backtick after the run: it is an opener and hides the line
+        self.assertEqual(validate.policy_lines("```python\n" + line, "research"), [])
+
     def test_research_reason_is_printable_ascii_only_and_the_template_says_so(self):
         self.assertTrue(validate.research_line_errors("research: n/a - caf\u00e9\n"))
         self.assertEqual(validate.research_line_errors("research: n/a - cafe\n"), [])
