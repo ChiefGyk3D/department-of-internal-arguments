@@ -8,6 +8,10 @@ The `spend:` line stands alone at the start of its line and has one value, eithe
 A paid brief quotes the human's own message and its time; without that, write
 `none - free-only` and the agent makes no paid call.
 
+The `research:` line also stands alone at the start of its line and has one value, either
+`n/a - <reason>` or `ladder - <the sources it follows, in order>` (for example prior art, then the vendor's own
+documentation page, then the live system through its API). A claim about a vendor, a price or a limit needs the ladder.
+
 The `role:` and `model:` lines below are read by machines: each alone on its line at line start, lowercase key,
 exactly one value (one role name from roles/, and the alias or exact model id passed to the dispatch; no `|`, no
 comma). Replace the example values; never list alternatives there. The prose line further down keeps the reasons.
@@ -19,6 +23,8 @@ role: reviewer
 model: sonnet
 
 spend: none - free-only
+
+research: n/a - editing the repository's own files; no outside facts needed
 
 - Task / owner:
 - Outcome and who uses it:

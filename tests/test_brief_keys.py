@@ -23,6 +23,7 @@ KEY_LINE = re.compile(r"(role|model):")
 ROLE_VALUE = re.compile(r"[a-z][a-z-]{0,39}")
 MODEL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 LOWER_KEY_LINE = re.compile(r"[a-z][a-z-]*:")
+TEMPLATE_RESEARCH = "research: n/a - editing the repository's own files; no outside facts needed\n"
 
 
 def parse_brief(text):
@@ -131,10 +132,46 @@ class TemplateLines(unittest.TestCase):
     def test_export_brief_keys_equal_template_keys_both_directions(self):
         data = em.read_pins(ROOT / em.EXPORT_PATH)
         template_keys = {ln.split(":")[0] for ln in self.text.split("\n") if LOWER_KEY_LINE.match(ln)}
-        # `spend:` is a separate policy line (issue #66) with its own validator; it is not a machine-read brief key.
-        self.assertEqual(template_keys - {"spend"}, set(data["brief_keys"]))
+        # `spend:` (issue #66) and `research:` (issue #121) are separate policy lines with their own validators; they
+        # are not machine-read brief keys.
+        self.assertEqual(template_keys - {"spend", "research"}, set(data["brief_keys"]))
         self.assertEqual(data["brief_keys"], ["role", "model"])
         self.assertEqual(data["brief_keys"], list(em.BRIEF_KEYS))
+
+
+class ResearchAndRoles(unittest.TestCase):
+    """Issue #121: the template carries one `research:` line and names every role."""
+
+    def setUp(self):
+        self.text = comment_free((ROOT / TEMPLATE).read_text(encoding="utf-8"))
+
+    def test_template_has_exactly_one_valid_research_line(self):
+        self.assertEqual(validate.research_line_errors(self.text), [])
+        self.assertEqual(sum(ln.startswith("research: ") for ln in self.text.split("\n")), 1)
+
+    def test_research_guard_bites(self):
+        good = "research: n/a - reason\n"
+        cases = {
+            "missing": "",
+            "duplicated": good * 2,
+            "empty": "research:\n",
+            "no reason": "research: n/a\n",
+            "empty reason": "research: n/a - \n",
+            "unknown form": "research: maybe\n",
+            "only in a code fence": "```\n" + good + "```\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertTrue(validate.research_line_errors(text), label)
+        for ok in (good, "research: ladder - prior art, vendor docs page, live API\n"):
+            self.assertEqual(validate.research_line_errors(ok), [])
+
+    def test_template_lists_every_role(self):
+        data = em.read_pins(ROOT / em.EXPORT_PATH)
+        self.assertEqual(len(data["roles"]), 7)
+        for role in data["roles"]:
+            with self.subTest(role):
+                self.assertRegex(self.text, rf"(?m)^- Role agent and model:.*\b{re.escape(role)}\b")
 
 
 class Scratch(unittest.TestCase):
@@ -177,6 +214,17 @@ class Validator(Scratch):
             with self.subTest(label):
                 self.setUp()
                 self.edit(TEMPLATE, old, new)
+                self.assertTrue(self.brief_problems(), label)
+
+    def test_research_line_missing_or_malformed_fails_validation(self):
+        for label, new in {
+            "missing": "",
+            "no reason": "research: n/a\n",
+            "duplicated": "research: n/a - x\n" * 2,
+        }.items():
+            with self.subTest(label):
+                self.setUp()
+                self.edit(TEMPLATE, TEMPLATE_RESEARCH, new)
                 self.assertTrue(self.brief_problems(), label)
 
     def test_exact_model_id_is_accepted(self):

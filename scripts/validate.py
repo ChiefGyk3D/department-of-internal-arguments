@@ -210,6 +210,27 @@ def spend_line_errors(text):
     return [f"`spend:` value {value!r} is neither {SPEND_FREE!r} nor {paid!r}"]
 
 
+# The brief's `research:` line (issue #121): alone on its line at line start, one of two forms, so a dispatch either
+# says it needs no outside facts or names the ladder of sources it follows. A line in a code fence does not count.
+RESEARCH_RE = re.compile(r"(?:n/a|ladder) - \S[ -~]*")
+
+
+def research_line_errors(text):
+    """Problems with the `research:` line of a brief (empty list when there is exactly one valid line)."""
+    lines, fenced = [], False
+    for line in text.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("research:"):
+            lines.append(line)
+    if len(lines) != 1:
+        return [f"expected exactly one `research:` line at line start, found {len(lines)}"]
+    value = lines[0][len("research:") :].removeprefix(" ")
+    if RESEARCH_RE.fullmatch(value):
+        return []
+    return [f"`research:` value {value!r} is neither 'n/a - <reason>' nor 'ladder - <the sources it follows>'"]
+
+
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
@@ -450,7 +471,8 @@ def export_errors(root):
 def brief_errors(root):
     """templates/brief.md carries exactly one `role:` and one `model:` line at line start, one plain value each, and
     the values and key names agree with the export. Fail closed: any other lowercase `key:` line is a key the export
-    does not name, except `spend:`, which is its own policy line checked by spend_line_errors."""
+    does not name, except `spend:` and `research:`, which are their own policy lines checked by spend_line_errors and
+    research_line_errors."""
     rel = "templates/brief.md"
     try:
         text = (Path(root) / rel).read_text(encoding="utf-8")
@@ -460,7 +482,11 @@ def brief_errors(root):
     body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     lines = body.split("\n")
     errors = []
-    keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m and m.group(1) != "spend"]
+    keys = [
+        m.group(1)
+        for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines)
+        if m and m.group(1) not in ("spend", "research")
+    ]
     if set(keys) != set(data["brief_keys"]):
         errors.append(f"{rel}: key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
     pins = {t["model"] for t in data["tiers"].values()} | {t["family"] for t in data["tiers"].values()}
@@ -511,6 +537,9 @@ def validate(root=ROOT):
             require(phrase in lead, f"templates/lead.md lacks the {rule} rule ({phrase!r})")
 
         for err in spend_line_errors((root / "templates/brief.md").read_text(encoding="utf-8")):
+            errors.append(f"templates/brief.md: {err}")
+        brief_body = re.sub(r"<!--.*?-->", "", (root / "templates/brief.md").read_text(encoding="utf-8"), flags=re.S)
+        for err in research_line_errors(brief_body):
             errors.append(f"templates/brief.md: {err}")
         require(
             "approvals on request" in (root / "templates/brief.md").read_text(encoding="utf-8"),
