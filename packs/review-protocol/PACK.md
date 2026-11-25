@@ -1,0 +1,111 @@
+---
+name: "review-protocol"
+description: "Load when running or briefing a security or adversarial review on the cyber tier: prompt shape, round-one class sweep, severity labels, stop rule, round budget, evidence handoff. Not for ordinary review."
+updated: "2026-11-25"
+---
+
+# Pack: review protocol
+
+Status: pilot pack, written 2026-11-25 (issue #124) from the maintainer's review logs, counts only. Nothing here is measured as a cure yet: the claim is a prediction, and the measurement is in the last section. Tier model, held-not-clean, single-flight, hardware-key and cutoff handling stay in `cyber-tier-review`. This pack covers what goes in a review, when a review loop ends, and how findings are labeled. Where the two differ, this pack's sweep rule replaces the "exactly one defect class per run" line of `cyber-tier-review` (that line is the likely cause of the extra rounds below).
+
+Why: 22 review rounds over 9 changes (mean 2.44). 43 of 44 later-round findings (98 percent) fell in classes a round-one checklist covers, and 40 of those 43 were in a class already seen in that change's round one. At least 34 percent of later findings were in code the previous fix round had added (15 of 44 blame-measured). Reviews found the same classes serially, then attacked each fix.
+
+## Prompt shape that passes the filter
+
+Write as a defender describing code to be checked. In this order:
+
+1. `CONTEXT:` one sentence: what the code is, who trusts whom, where it runs, what it can write.
+2. `SCOPE:` name the files, the base and head commits. Review the diff and the code it calls.
+3. `TASK:` find defects, not style. For each: a failing input or state, the observed behavior derived from the code, `file:line`, a severity and a CIA tag.
+4. `CLASSES:` all the classes in round one (the twelve ids of `implementer-self-check`, one neutral line each). One task, the whole list.
+5. `EVIDENCE:` see the handoff section. `RESOLVED:` prior finding ids and fixes, so they are not repeated.
+6. `OUTPUT:` the findings table, then `COVERED` and `NOT COVERED` lines.
+
+Rules:
+
+- Name defect categories ("path confinement", "fail-open on a parse error"). Do not write an attacker-voice list ("how would you break in", payload strings, exploit steps). Ask for a failing input and observed behavior, not an exploit.
+- No secrets, real hostnames or live target details in the prompt. Run the placeholder sweep over the evidence first.
+- A cutoff message means the wrong tier. Never reword around a filter: fix the tier and rerun the same prompt. If a full class list ever trips the filter, ask the maintainer before splitting it into two groups; both groups still run in round one.
+
+## Round one: complete-class sweep
+
+The class ids, stable and shared with `implementer-self-check`: F1 file opens and paths; S1 subprocess and environment; O1 fail-closed versus fail-open; L1 locks and ordering; P1 parsing and normalization; B1 bounds and timeouts; E1 output escaping; K1 secrets handling; T1 tests that bite; D1 docs accuracy; G1 GitHub automation; X1 trust boundaries.
+
+Round one answers every class with FOUND (finding ids), CLEAR (what was checked, `file:line`) or N/A (why). A class left unanswered is a defect of the review: rerun that class only, not the whole review. Rounds two and later: verify each prior fix; attack only the code the fix added or changed; re-sweep only the classes the fix touched.
+
+## Labels on every finding
+
+- Severity: Critical, High, Medium, Low. Critical: remote or unauthenticated compromise, a live exposed secret, or a control disabled in a live path. High: reachable by a low-privilege actor or a fork PR, a fail-open guard, a secret in logs, a credential carried across a boundary. Medium: unusual prerequisites or a compensating control, a correctness bug in a security path, a test that does not bite. Low: hardening, consistency, docs, preference. These bands are proposed, pending the maintainer's confirmation.
+- CIA tag: C, I, A, or several.
+- Reproduction: a failing input or state plus the observed behavior. On a read-only tier derive it by reading and quote the lines (REPRODUCED-STATIC). A speculative finding is capped at Low unless the reviewer names the one fact that would confirm it.
+- Origin: ORIGINAL, or FIX-INDUCED by round k.
+- Disposition proposed: FIX, or ACCEPT-RESIDUAL with a reason.
+
+Context adjustment: severity may be adjusted from the base band by context (exposure such as internet, tailnet-only, local or CI-only; compensating controls; a warn-mode guard). The adjustment is allowed only with the reason recorded next to the label. When signals disagree, the higher severity holds until a recorded reason lowers it. Critical and High are never closed by the budget; they are fixed.
+
+## Stop rule
+
+The loop ends, evaluated by the lead from the findings and not by feel, when any one holds:
+
+- S1: the round has no finding above Low, or only accepted residuals with recorded reasons.
+- S2: every finding is fix-induced from the previous round, none is above Medium, and class coverage is complete. Medium findings here become a recorded decision (fix or accept), not another round.
+- S3: the budget is reached. Remaining findings go to the lead with severities.
+
+It continues while a Critical or High is open, an ORIGINAL finding at Medium or above is open, or class coverage was incomplete.
+
+## Budget and escalation
+
+The default budget is 3 rounds per change: sweep, fix check plus fix-induced attack, final fix check. Escalate to rounds 4 to 6 without asking only when a Critical or High is still open, or the code is a parser, sandbox or auth boundary and a High fix-induced finding appeared last round. Escalation triggers a simplify pass first: the implementer removes surface instead of adding guards (see `implementer-self-check`) before the next round. Round 7 asks the owner. Two rounds failing on one class: say so and recommend a different model.
+
+## Evidence handoff
+
+A review run read-only cannot run or execute tests, so the prompt carries the evidence:
+
+1. The gate command, its exit code and the last 40 lines of a captured test-run log (`<gate> > log 2>&1; echo exit=$?`, never piped).
+2. Tests for the changed behavior, pass or fail each.
+3. The revert-proof summary: per fix, "test T fails with line L reverted, passes restored", with an output excerpt.
+4. Files changed and lines added.
+5. Prior findings with their dispositions.
+
+The reviewer judges whether each failing input is the right one; it does not rerun tests. The lead or a standard-tier reviewer turns each REPRODUCED-STATIC finding into a failing test before the fix. A finding without that test is not closed.
+
+## Round prompt and findings table
+
+```
+CONTEXT: <what the code is, who trusts whom, what it can write>
+SCOPE: files <list>; base <sha>; head <sha>; round <n> of <budget>
+TASK: defects with a failing input, observed behavior, file:line, severity, CIA tag
+CLASSES: <ids and one-line names; all in round 1, only open classes after>
+EVIDENCE: <gate log tail, test list, revert-proof summary>
+RESOLVED: <ids and fixes>
+OUTPUT: table, COVERED, NOT COVERED, stop-rule clause
+```
+
+| id | severity | CIA | class | file:line | origin | failing input and observed behavior | disposition |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| f-1 | Medium | I | P1 | path:42 | ORIGINAL | input, behavior, REPRODUCED-STATIC | FIX |
+
+## Accepted residuals
+
+Record each as its own line: residual id, finding id, severity and adjusted severity with the reason, compensating control, owner, review date, and the signal that reopens it. Only Medium and Low can be accepted. A Critical or High is never accepted by the budget; the maintainer decides any exception in the maintainer's own message.
+
+## Limits
+
+- Security wins a tradeoff. Never weaken a check or skip a review to end a loop sooner.
+- Review output from the cyber tier is sensitive until the fix merges. In a public repository the issue says only that hardening is tracked, with counts.
+- No active probing of a target: this pack is about code and diffs.
+- The bands, the budget and the stop rule come from the maintainer's decisions of 2026-11-25; changing them is the maintainer's call.
+
+## How to verify (commands)
+
+- A round prompt has every section: `grep -cE '^(CONTEXT|SCOPE|TASK|CLASSES|EVIDENCE|RESOLVED|OUTPUT):' prompt.txt` returns 7.
+- No payload or attacker-voice text: `grep -niE 'how (would|to) (you )?(break|exploit|attack)|payload' prompt.txt` returns nothing.
+- Every finding has a severity and a CIA tag: count table rows and compare with `grep -cE '\| (Critical|High|Medium|Low) \| [CIA]+ \|'`.
+- Evidence is attached: the prompt holds a gate exit code line and a revert-proof line per fix.
+- Measurement, after about 10 reviews: rounds per change (target median 2 for tool code), findings after round one in checklist classes (target under 20 percent), fix-induced findings per fix (target under 0.5), filter cutoffs per 10 reviews (must not rise), revert-proof coverage (100 percent). A faster loop that finds fewer Critical or High issues is a failure.
+
+## Deliverable
+
+1. The round prompt as sent, with the evidence attached.
+2. The findings table with severity, CIA, reproduction, origin and disposition.
+3. The class coverage list, the stop-rule clause that applies (or why the loop continues) and the residual records.
