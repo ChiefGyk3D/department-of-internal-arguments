@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+Local LLM pack refresh (issue ChiefGyk3D/workbench#16): `packs/local-llm-routing` carries the 2026-11-25 measurements (task fit for gemma4:12b, qwen3.5:4b and qwen3:14b, what fits one 16 GB card, `think: false` and the `num_ctx` default read from the Ollama docs with dates), the reference client's flags, exit codes (75 is busy, not an outage), call and outcome log fields and settings, and an evaluation record row per model. The description opens with `Load`; the body is under 3,000 tokens. `tests/test_local_llm_pack.py` checks the stated flags, outcomes, exit 75, log fields and settings against a copy of the client's `--help` (and the live tool when present), with negative cases.
+
 Organization pilot (issue #125): three roles, `analyst`, `assessor` and `planner`, and five packs, `threat-detection`, `grc-controls`, `delivery-business-mgmt`, `org-operating-model` and the router `org-dispatch`, for three functions (SOC and detection, GRC, project management). Pilot: that they improve results is a prediction, and each file states its measurement targets. Role and pack text, registry, validator rules, docs, generated outputs and tests; no policy changed and no model call is made. The design is the maintainer's private organization matrix; every standard or framework a pack states was read on the publisher's page on 2026-11-25 and is listed VERIFIED with its URL and date under the pack's Sources, or is listed UNVERIFIED and not quoted.
 
 - `roles/analyst.md` (read, search, shell, skills), `roles/assessor.md` and `roles/planner.md` (read, search, skills): no `edit` or `web`; the assessor and planner cannot run commands. Each has a pilot status section and its own report sections.
