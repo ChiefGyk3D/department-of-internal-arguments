@@ -132,6 +132,43 @@ class Evidence(unittest.TestCase):
                 self.assertIn(phrase, self.text)
 
 
+class ReviewProtocolPointer(unittest.TestCase):
+    """Issue #127: the role and the pack point at `review-protocol` for the sweep, budget and stop rules, say no
+    more than one class per run, and keep every existing prohibition."""
+
+    FILES = (
+        ROOT / "roles" / "adversarial-reviewer.md",
+        PACK_PATH,
+        ROOT / ".claude" / "agents" / "adversarial-reviewer.md",
+        ROOT / ".claude" / "skills" / f"pack-{PACK}" / "SKILL.md",
+    )
+    ONE_CLASS = re.compile(r"(?:exactly\s+)?one\s+(?:defect\s+)?class\s+per\s+run", re.IGNORECASE)
+
+    def test_files_reference_review_protocol_and_drop_the_one_class_rule(self):
+        for f in self.FILES:
+            text = f.read_text(encoding="utf-8")
+            with self.subTest(f=str(f.relative_to(ROOT))):
+                self.assertIn("review-protocol", text)
+                self.assertIsNone(self.ONE_CLASS.search(text))
+
+    def test_guard_bites_on_the_old_wording(self):
+        old = "Name the files and exactly one defect class per run (for example: path confinement)."
+        self.assertIsNotNone(self.ONE_CLASS.search(old))
+        self.assertIsNone(self.ONE_CLASS.search("the sweep rule covers every class in one run"))
+
+    def test_budget_text_is_not_duplicated_here(self):
+        text = PACK_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("3-4 rounds", text)
+        self.assertIn("Critical and High are never accepted", text)
+
+    def test_prohibitions_survive(self):
+        pack = PACK_PATH.read_text(encoding="utf-8")
+        role = (ROOT / "roles" / "adversarial-reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("Never reword the prompt to get past the filter, and never skip the review", pack)
+        self.assertIn("Never reword a prompt around a provider filter: fix the tier and rerun", role)
+        self.assertIn("Critical and High findings are never accepted", role)
+
+
 class PrivacySweep(unittest.TestCase):
     FILES = (
         PACK_PATH,

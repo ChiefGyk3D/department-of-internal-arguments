@@ -268,25 +268,38 @@ SPEND_FREE = "none - free-only"
 SPEND_PAID_RE = re.compile(r"paid - approval in the human message at [^,\s][ -~]*?, cap [0-9]+(?:\.[0-9]{1,2})? USD")
 
 
-FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# A fence run, optionally after a list marker (bullet or ordered). The marker's content indent is where the item's
+# content starts; a fence opened there lives inside the list item. Several markers may share a line (`- - ```),
+# and tabs are expanded to four-column stops before matching.
+FENCE_RE = re.compile(r"( *)((?:(?:[-+*]|[0-9]{1,9}[.)]) {1,4})*)(`{3,}|~{3,})")
 
 
 def policy_lines(text, key):
-    """Lines of the text that start with `key:` at line start, outside Markdown code fences (``` or ~~~, indented up
-    to three spaces). A fence closes only with the same character and at least the opener's length; one never closed
-    hides the rest. A displayed example in a fence is not the operative line."""
-    out, fence = [], None  # fence: (character, length) of the opener
+    """Lines of the text that start with `key:` at line start, outside Markdown code fences (``` or ~~~). An opener is
+    indented up to three spaces, or sits in a list item (list marker, then content indent). A fence closes only with
+    the same character and at least the opener's length, indented up to three spaces past the opener's container
+    content indent (a dedented closer also closes). One never closed hides the rest, dedented lines included.
+    A displayed example in a fence is not the operative line."""
+    out, fence = [], None  # fence: (character, length, container content indent)
     for line in text.split("\n"):
-        m = FENCE_RE.match(line)
+        m = FENCE_RE.match(line.expandtabs(4))
         if m:
-            run = m.group(1)
+            run, indent = m.group(3), len(m.group(1))
+            marker = bool(m.group(2))
             if fence is None:
-                if run[0] == "`" and "`" in line[m.end() :]:
+                if indent > 3:
+                    pass  # indented code, not a fence
+                elif run[0] == "`" and "`" in line[m.end() :]:
                     pass  # a backtick run with a backtick after it is inline code, not an opener
                 else:
-                    fence = (run[0], len(run))
+                    fence = (run[0], len(run), m.end(3) - len(run) if marker else 0)
                     continue
-            elif run[0] == fence[0] and len(run) >= fence[1] and not line.strip().strip(fence[0]):
+            elif (
+                run[0] == fence[0]
+                and len(run) >= fence[1]
+                and not line.strip().strip(fence[0])
+                and indent <= fence[2] + 3
+            ):
                 fence = None
                 continue
             else:
