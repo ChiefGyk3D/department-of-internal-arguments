@@ -23,7 +23,7 @@ from lib import (
     COPILOT_TOOLS,
     GENERATED_DIRS,
     GENERATED_MARK,
-    POLICIES,
+    ROLE_POLICIES,
     ROOT,
     TIER_MODEL,
     body_sha256,
@@ -41,7 +41,7 @@ def _q(value):
 
 def policies_block(root):
     parts = ["## Shared policies", ""]
-    for name in POLICIES:
+    for name in ROLE_POLICIES:
         text = policy_text(name, root)
         first, _, rest = text.partition("\n")
         if not first.startswith("# "):

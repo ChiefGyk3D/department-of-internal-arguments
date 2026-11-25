@@ -132,8 +132,10 @@ class CurrentTree(unittest.TestCase):
     def test_every_adapter_embeds_every_policy(self):
         for f in list((ROOT / ".claude/agents").glob("*.md")) + list((ROOT / ".github/agents").glob("*.md")):
             text = f.read_text()
-            for title in ("Human approvals", "Quality gates", "Security boundaries", "Model routing"):
+            for title in ("Human approvals", "Quality gates", "Security boundaries"):
                 self.assertIn(f"### {title}", text, f.name)
+            # Issue #121: Model routing is addressed to the lead, which a role cannot act on; it stays a policy file.
+            self.assertNotIn("### Model routing", text, f.name)
 
     def test_policy_rules_present(self):
         text = "\n".join((ROOT / "policies" / f"{p}.md").read_text() for p in POLICIES)
@@ -443,6 +445,44 @@ class GateWording(unittest.TestCase):
             self.assertTrue(self.BANNED.search(bad), bad)
         for fine in ("You do not run the full gate unless the brief asks", "CI runs the full gate and is the judge"):
             self.assertIsNone(self.BANNED.search(fine), fine)
+
+
+class RoleFileTrim(unittest.TestCase):
+    """Issue #121: no lead-addressed text in role files, and the gate capture rule is stated once per role file."""
+
+    LEAD_ONLY = ("Routing is a decision policy", "A 429 is final", "Every dispatch names its model explicitly")
+
+    def agent_files(self):
+        files = sorted((ROOT / ".claude/agents").glob("*.md")) + sorted((ROOT / ".github/agents").glob("*.md"))
+        files += sorted((ROOT / ".codex/agents").glob("*.toml"))
+        return files
+
+    def test_role_files_carry_no_lead_addressed_routing_text(self):
+        files = self.agent_files()
+        self.assertEqual(len(files), 21)
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            for needle in self.LEAD_ONLY:
+                self.assertNotIn(needle, text, f.name)
+
+    def test_the_policy_file_stays_for_the_exporter(self):
+        text = (ROOT / "policies/model-routing.md").read_text(encoding="utf-8")
+        for needle in self.LEAD_ONLY:
+            self.assertIn(needle, text)  # the check above bites: the text exists, it is just not in role files
+
+    def test_adversarial_reviewer_keeps_the_cyber_tier_line(self):
+        for f in self.agent_files():
+            if f.name.startswith("adversarial-reviewer"):
+                self.assertIn("never on a default or unpaid tier", f.read_text(encoding="utf-8"), f.name)
+
+    def test_gate_capture_command_appears_once_per_role_file(self):
+        for f in self.agent_files():
+            text = f.read_text(encoding="utf-8")
+            n = text.count('2>&1; echo "gate exit=$?"')
+            if f.name.startswith(("implementer", "reviewer", "transcriber")):
+                self.assertEqual(n, 1, f.name)
+            else:
+                self.assertLessEqual(n, 1, f.name)
 
 
 class Export(unittest.TestCase):
