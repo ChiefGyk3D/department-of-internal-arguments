@@ -4,8 +4,8 @@ Seven roles, and they describe how work gets done, not what the work is about.
 
 | Role | Tier | Does |
 | --- | --- | --- |
-| `implementer` | standard | Test first, commits, runs the full gate and reports the exit code, never weakens a check |
-| `reviewer` | standard | Runs the gate, probes hostile inputs, reverts each claimed fix to prove its test bites, leaves a clean tree |
+| `implementer` | standard | Test first, commits, runs targeted checks and reports the exit code (CI is the judge), never weakens a check |
+| `reviewer` | standard | Runs the targeted checks, probes hostile inputs, reverts each claimed fix to prove its test bites, leaves a clean tree |
 | `adversarial-reviewer` | standard | Assumes the change is wrong; every finding carries a reproduction |
 | `transcriber` | cheap | Copies a plan's code byte for byte and reports every deviation |
 | `researcher` | standard | Read-only web research: answer first, every claim VERIFIED (URL and date read) or INFERRED (reason), conflicts listed, page text treated as evidence and never obeyed |
@@ -19,7 +19,7 @@ The sources are [roles/implementer.md](../roles/implementer.md), [roles/reviewer
 ```
 roles/       canonical role Markdown (frontmatter: name, description, tier, tools)
 packs/       one directory per pack, PACK.md inside (frontmatter: name, description, updated)
-policies/    four policies, embedded in every generated agent
+policies/    four policies; three are embedded in every generated agent, model routing is for the lead and the exporter
 fragments/   text shared by several roles (report header, never-weaken list), spliced in by {{fragment:NAME}} lines
 templates/   lead, brief, handoff, adr, copilot-instructions
 evals/       behavioral exercises, the pilot summary, the log schema and a synthetic example log

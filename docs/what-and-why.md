@@ -17,5 +17,5 @@ Every role's report opens with the same header (role, model, head, base, gate, o
 Three more things from that starter I did not keep, and the reasons are measured or at least argued in [the pilot notes](../evals/pilot-2026-10.md):
 
 - `model: inherit`: an inherited model can quietly become the expensive one, so every agent names its model.
-- Reviewers with no shell: a reviewer that cannot run the gate or revert a fix cannot prove the fix bites.
+- Reviewers with no shell: a reviewer that cannot run the checks or revert a fix cannot prove the fix bites.
 - "Only the human runs tests": the implementer runs its own gate and reports the exit code.

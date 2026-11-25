@@ -8,6 +8,11 @@ The `spend:` line stands alone at the start of its line and has one value, eithe
 A paid brief quotes the human's own message and its time; without that, write
 `none - free-only` and the agent makes no paid call.
 
+The `research:` line also stands alone at the start of its line and has one value, either
+`n/a - <reason>` or `ladder - <the sources it follows, in order>` (for example prior art, then the vendor's own
+documentation page, then the live system through its API). A claim about a vendor, a price or a limit needs the ladder.
+The text after the dash is printable ASCII only (one line, no accents or other Unicode); the validator rejects the rest.
+
 The `role:` and `model:` lines below are read by machines: each alone on its line at line start, lowercase key,
 exactly one value (one role name from roles/, and the alias or exact model id passed to the dispatch; no `|`, no
 comma). Replace the example values; never list alternatives there. The prose line further down keeps the reasons.
@@ -20,6 +25,8 @@ model: sonnet
 
 spend: none - free-only
 
+research: n/a - editing the repository's own files; no outside facts needed
+
 - Task / owner:
 - Outcome and who uses it:
 - In scope / non-goals:
@@ -30,8 +37,8 @@ spend: none - free-only
 - Domain packs to load (from packs/): <names, or none>. The report must say which it loaded.
 - Local model step: <your local-model command for text-only drafts, or `n/a - <reason>`>
 - Data class and what must not appear (hostnames, addresses, serials, callsigns, grid squares, employer, secrets):
-- Gate command (the full gate, exactly as CI runs it):
+- Targeted checks to run locally (CI runs the full gate and is the judge; name the full local suite only if you want it):
 - Stop conditions (ambiguous scope, a check that would have to be weakened, security-sensitive code the plan did not review): the agent returns its report instead of guessing.
 - Required approvals: the agent never pushes, merges, tags or releases. Note here what the lead will do after the report and where the human's approval for it is recorded (the human's own message, not this file).
 - Evidence the report must carry (gate exit code, red evidence, revert check, other gates as pass | fail | not-run | n-a):
-- Report path or return format:
+- Report path or return format, and the line cap (default 12 lines of free text; the header fields, the role's report fields and the NEEDS line are exempt and never dropped; raise the cap here when the task needs more prose; if the required evidence alone exceeds the cap, the evidence wins: never drop it, request a higher cap in the `NEEDS:` line). The role file's report contract applies: results first, a STATUS line, counts and paths instead of logs, one evidence line per claim, a final NEEDS line for decisions:

@@ -1,5 +1,6 @@
 """Offline structural checks. Not a model-behavior or sandbox certification."""
 
+import json
 import re
 import sys
 import tomllib
@@ -193,26 +194,180 @@ SPEND_FREE = "none - free-only"
 SPEND_PAID_RE = re.compile(r"paid - approval in the human message at [^,\s][ -~]*?, cap [0-9]+(?:\.[0-9]{1,2})? USD")
 
 
+FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def policy_lines(text, key):
+    """Lines of the text that start with `key:` at line start, outside Markdown code fences (``` or ~~~, indented up
+    to three spaces). A fence closes only with the same character and at least the opener's length; one never closed
+    hides the rest. A displayed example in a fence is not the operative line."""
+    out, fence = [], None  # fence: (character, length) of the opener
+    for line in text.split("\n"):
+        m = FENCE_RE.match(line)
+        if m:
+            run = m.group(1)
+            if fence is None:
+                if run[0] == "`" and "`" in line[m.end() :]:
+                    pass  # a backtick run with a backtick after it is inline code, not an opener
+                else:
+                    fence = (run[0], len(run))
+                    continue
+            elif run[0] == fence[0] and len(run) >= fence[1] and not line.strip().strip(fence[0]):
+                fence = None
+                continue
+            else:
+                continue
+        if fence is None and line.startswith(f"{key}:"):
+            out.append(line)
+    return out
+
+
+def _policy_value(text, key):
+    """(value, error): the one `key: value` line's value after exactly one space, or an error string."""
+    lines = policy_lines(text, key)
+    if len(lines) != 1:
+        return None, f"expected exactly one `{key}:` line at line start, found {len(lines)}"
+    line = lines[0]
+    if not line.startswith(f"{key}: ") or line[len(key) + 2 :][:1] in ("", " "):
+        return None, f"`{key}:` needs exactly one space after the colon and then its value"
+    return line[len(key) + 2 :], None
+
+
 def spend_line_errors(text):
     """Problems with the `spend:` line of a brief (empty list when there is exactly one valid line)."""
-    lines, fenced = [], False
-    for line in text.split("\n"):
-        if line.startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("spend:"):
-            lines.append(line)
-    if len(lines) != 1:
-        return [f"expected exactly one `spend:` line at line start, found {len(lines)}"]
-    value = lines[0][len("spend:") :].removeprefix(" ")
+    value, err = _policy_value(text, "spend")
+    if err:
+        return [err]
     if value == SPEND_FREE or SPEND_PAID_RE.fullmatch(value):
         return []
     paid = "paid - approval in the human message at <time>, cap <n> USD"
     return [f"`spend:` value {value!r} is neither {SPEND_FREE!r} nor {paid!r}"]
 
 
+# The brief's `research:` line (issue #121): alone on its line at line start, one of two forms, so a dispatch either
+# says it needs no outside facts or names the ladder of sources it follows. A line in a code fence does not count.
+RESEARCH_RE = re.compile(r"(?:n/a|ladder) - \S[ -~]*")
+
+
+def research_line_errors(text):
+    """Problems with the `research:` line of a brief (empty list when there is exactly one valid line)."""
+    value, err = _policy_value(text, "research")
+    if err:
+        return [err]
+    if RESEARCH_RE.fullmatch(value):
+        return []
+    return [f"`research:` value {value!r} is neither 'n/a - <reason>' nor 'ladder - <the sources it follows>'"]
+
+
 PRIVACY_RE = re.compile("|".join(f"(?:{p})" for p in PRIVACY_PATTERNS))
 FORBIDDEN_SUFFIXES = {".vtt", ".pem", ".key", ".p12", ".pfx"}
 SKIP_PARTS = {".git", "__pycache__"}
+
+
+_FM_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_FM_PLAIN_BAD_START = set("[]{},&*!|>'\"%@`#")
+# Plain scalars a YAML loader resolves to something other than a string (null, bool, int, float, timestamp, merge and
+# value tags). The patterns follow the resolver of PyYAML 6.0.2. The check is a sound subset of PyYAML: whatever it
+# passes is a string for PyYAML, and it may reject more (tags, anchors and aliases, flow and block starts). A test
+# compares it with PyYAML on a corpus.
+_FM_NON_STRING_RES = tuple(
+    re.compile(p)
+    for p in (
+        r"~|null|Null|NULL",
+        r"yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF",
+        r"[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+        r"[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?"
+        r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+        r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?"
+        r"(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?",
+        r"<<|=",
+    )
+)
+_FM_DQ_ESCAPES = set('0abt\tnvfre "/\\N_LP')
+
+
+def _fm_double_quoted_error(value):
+    """A YAML double-quoted scalar on one line: one closing quote at the end, only YAML escapes inside."""
+    i, n = 1, len(value)
+    while i < n:
+        c = value[i]
+        if c == '"':
+            return None if i == n - 1 else "a double-quoted value has text after its closing quote"
+        if c == "\\":
+            i += 1
+            if i >= n:
+                break
+            e = value[i]
+            width = {"x": 2, "u": 4, "U": 8}.get(e)
+            if width:
+                digits = value[i + 1 : i + 1 + width]
+                if not re.fullmatch(rf"[0-9a-fA-F]{{{width}}}", digits):
+                    return f"a double-quoted value has a bad \\{e} escape"
+                code = int(digits, 16)
+                if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                    return f"a double-quoted value has a \\{e} escape that is not a Unicode scalar value"
+                i += width
+            elif e not in _FM_DQ_ESCAPES:
+                return f"a double-quoted value has an unknown escape \\{e}"
+        i += 1
+    return "a double-quoted value must end with its quote"
+
+
+def _fm_value_error(key, value):
+    """Why a front-matter value is not a YAML string on one line, or None. Flat `key: value` subset only."""
+    if value == "":
+        return "an empty value is null, not a string; quote it"
+    if value[0] == '"':
+        return _fm_double_quoted_error(value)
+    if value[0] == "'":
+        inner = value[1:-1] if len(value) > 1 and value[-1] == "'" else None
+        if inner is None or re.search(r"(?<!')'(?!')", inner.replace("''", "")):
+            return "a single-quoted value must end with its quote and double any quote inside"
+        return None
+    if value[0] == "[":  # a flow sequence of quoted strings; only the `tools` list of the Copilot agents is one
+        if key != "tools":
+            return "only `tools` may be a list; every other value must be a string"
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return "a flow sequence must be a complete JSON list of strings"
+        ok = isinstance(decoded, list) and all(isinstance(i, str) for i in decoded)
+        return None if ok else "a flow sequence must be a list of strings"
+    if value[0] in _FM_PLAIN_BAD_START or (value[0] in "-?:" and value[1:2] in ("", " ")):
+        return f"a plain value may not start with {value[0]!r}; quote it"
+    if ": " in value or " #" in value or value.endswith(":"):
+        return "a plain value may not contain ': ' or ' #' or end with ':'; quote it"
+    if "\t" in value:
+        return "a plain value may not contain a tab"
+    if any(r.fullmatch(value) for r in _FM_NON_STRING_RES):
+        return "a YAML loader reads this plain value as null, a boolean, a number or a date, not a string; quote it"
+    return None
+
+
+def strict_frontmatter_errors(text, label):
+    """Problems that make a file's front matter fail a strict YAML loader (DoIA's own loader is more lenient and
+    takes an unquoted value as bare text). Front matter here is flat `key: value` lines between two `---` lines."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        return [f"{label}: front matter is missing"]
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return [f"{label}: front matter is not closed by '---'"]
+    errors, seen = [], set()
+    for n, line in enumerate(lines[1:end], start=2):
+        key, sep, value = line.partition(":")
+        if not sep or not _FM_KEY_RE.fullmatch(key) or (value and not value.startswith(" ")):
+            errors.append(f"{label}: front matter line {n} is not a flat `key: value` line")
+            continue
+        if key in seen:
+            errors.append(f"{label}: front matter key {key!r} is repeated")
+        seen.add(key)
+        problem = _fm_value_error(key, value.strip(" "))
+        if problem:
+            errors.append(f"{label}: front matter {key!r}: {problem}")
+    return errors
 
 
 def tree_files(root):
@@ -450,7 +605,8 @@ def export_errors(root):
 def brief_errors(root):
     """templates/brief.md carries exactly one `role:` and one `model:` line at line start, one plain value each, and
     the values and key names agree with the export. Fail closed: any other lowercase `key:` line is a key the export
-    does not name, except `spend:`, which is its own policy line checked by spend_line_errors."""
+    does not name, except `spend:` and `research:`, which are their own policy lines checked by spend_line_errors and
+    research_line_errors."""
     rel = "templates/brief.md"
     try:
         text = (Path(root) / rel).read_text(encoding="utf-8")
@@ -460,7 +616,11 @@ def brief_errors(root):
     body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     lines = body.split("\n")
     errors = []
-    keys = [m.group(1) for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines) if m and m.group(1) != "spend"]
+    keys = [
+        m.group(1)
+        for m in (re.match(r"([a-z][a-z-]*):", ln) for ln in lines)
+        if m and m.group(1) not in ("spend", "research")
+    ]
     if set(keys) != set(data["brief_keys"]):
         errors.append(f"{rel}: key lines {sorted(set(keys))} differ from brief_keys {data['brief_keys']} in the export")
     pins = {t["model"] for t in data["tiers"].values()} | {t["family"] for t in data["tiers"].values()}
@@ -511,6 +671,9 @@ def validate(root=ROOT):
             require(phrase in lead, f"templates/lead.md lacks the {rule} rule ({phrase!r})")
 
         for err in spend_line_errors((root / "templates/brief.md").read_text(encoding="utf-8")):
+            errors.append(f"templates/brief.md: {err}")
+        brief_body = re.sub(r"<!--.*?-->", "", (root / "templates/brief.md").read_text(encoding="utf-8"), flags=re.S)
+        for err in research_line_errors(brief_body):
             errors.append(f"templates/brief.md: {err}")
         require(
             "approvals on request" in (root / "templates/brief.md").read_text(encoding="utf-8"),
@@ -578,6 +741,20 @@ def validate(root=ROOT):
                     f"{GENERATED_MARK} (release {version})" in f.read_text(encoding="utf-8"),
                     f"{f.relative_to(root)}: generated marker lacks the current release",
                 )
+
+        # Strict YAML reading of every front matter (issue #121): a value DoIA's loader takes as bare text must not
+        # fail another loader, so each one is quoted or a safe plain scalar.
+        for glob in (
+            "packs/*/PACK.md",
+            "roles/*.md",
+            ".claude/agents/*.md",
+            ".github/agents/*.agent.md",
+            ".claude/skills/*/SKILL.md",
+            f"{CODEX_SKILLS_DIR}/*/SKILL.md",
+        ):
+            for f in sorted(root.glob(glob)):
+                label = f"{f.relative_to(root).as_posix()}"
+                errors.extend(strict_frontmatter_errors(f.read_text(encoding="utf-8"), label))
 
         # Version agreement.
         require(bool(re.fullmatch(r"\d+\.\d+\.\d+", version)), "VERSION is not semver")
