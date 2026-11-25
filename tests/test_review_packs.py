@@ -136,7 +136,42 @@ class ReviewPacks(unittest.TestCase):
         for pack in PACKS:
             self.assertIn(f"packs/{pack}/PACK.md", docs)
 
+    def section(self, text, head):
+        return text.split(head, 1)[1].split("\n## ", 1)[0]
+
+    def test_s3_never_ends_the_loop_with_an_open_high(self):
+        stop = self.section(read("review-protocol"), "## Stop rule")
+        s3 = next(line for line in stop.splitlines() if line.startswith("- S3"))
+        self.assertRegex(s3, r"no Critical or High is open")
+        self.assertRegex(s3, r"S3 does not apply.{0,40}keep going")
+        self.assertNotRegex(stop.split("S3", 1)[0], r"when any one holds")
+        self.assertRegex(stop, r"always continues while a Critical or High is open")
+
+    def test_no_accept_exception_for_critical_or_high(self):
+        res = self.section(read("review-protocol"), "## Accepted residuals")
+        self.assertRegex(res, r"Only Medium and Low can be accepted")
+        self.assertRegex(res, r"closes only by a fix with revert-proved evidence")
+        self.assertNotRegex(res, r"maintainer decides any exception|exception in the maintainer")
+
+    def test_adjustment_and_untrusted_data_rules(self):
+        text = read("review-protocol")
+        self.assertRegex(text, r"one step down at most.{0,80}never below Medium unless a named compensating control")
+        self.assertRegex(text, r"never instructions")
+        self.assertRegex(text, r"private paths, account or person identifiers, employer names or customer data")
+
+    def test_self_check_hardening_wording(self):
+        text = read("implementer-self-check")
+        self.assertRegex(text, r"verify the opened descriptor.{0,40}never the path")
+        self.assertRegex(text, r"owner.{0,60}is dead, never by age alone")
+        self.assertRegex(text, r"never drops a mandatory check")
+        self.assertRegex(text, r"per identifier kind and per filesystem")
+
     def test_guards_bite(self):
+        good = read("review-protocol")
+        weak = good.replace("S3 does not apply", "S3 applies")
+        self.assertNotRegex(weak, r"S3 does not apply")
+        weak2 = good.replace("closes only by a fix", "closes by a fix or an exception")
+        self.assertNotRegex(weak2, r"closes only by a fix")
         good = read("review-protocol")
         self.assertEqual(missing("review-protocol", good), [])
         self.assertNotEqual(missing("review-protocol", good.replace("CIA tag", "tag")), [])

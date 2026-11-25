@@ -12,7 +12,7 @@ The author runs the same sweep the reviewer will run, before the first review, a
 
 ## Rules
 
-1. **Prefer removing surface over adding guards.** Before adding a validation, ask whether the input, option, file format or feature can go. A guard you do not write cannot be bypassed or attacked in the next round. List every new validation branch and say whether removing a feature would delete it.
+1. **Prefer removing surface over adding guards.** Before adding a validation, ask whether the input, option, file format or feature can go. A guard you do not write cannot be bypassed or attacked in the next round. List every new validation branch and say whether removing a feature would delete it. Removal never drops a mandatory check, evidence, documented behavior or security property; if it would, keep it.
 2. **Fail closed.** Every exception, missing file, unset variable, timeout, empty list and parse error ends in refusal.
 3. **One reader per input.** Parse once into a typed value and pass the value.
 4. **Prove success by the protected action,** not by the step before it.
@@ -25,11 +25,11 @@ Each row: id, class, concrete checks, then the recurring findings that motivated
 
 | Id | Class | Checks |
 | --- | --- | --- |
-| F1 | Files and paths | Confine to an allowed root after resolving symlinks; open no-follow where a path is influenced from outside; refuse FIFOs, devices and non-regular files; open then fstat, never check then open; create with an explicit mode (0600 for secrets); mkstemp in a private directory. Recurring: unsafe file open, 20 findings in 7 changes; check-then-use race, 3 in 3. |
+| F1 | Files and paths | Open each path component with no-follow (directory descriptors, `openat` style) and verify the opened descriptor with fstat, never the path; a resolve-then-open check is racy, so confine on the descriptor; refuse FIFOs, devices and non-regular files; create with an explicit mode (0600 for secrets); mkstemp in a private directory. Recurring: unsafe file open, 20 findings in 7 changes; check-then-use race, 3 in 3. |
 | S1 | Subprocess and environment | argv list, never a shell string; resolved binary; allow-list environment, not copy-and-delete; `--` before untrusted arguments; bounded timeout and output; stdin closed; read the exit code, not text; explicit working directory. Recurring: subprocess and environment hygiene, 26 in 6. |
 | O1 | Fail-closed versus fail-open | Walk every branch: lookup failure, parse error, missing input, exception. The default is deny; a skipped check reports skipped, never pass. Recurring: fail-open or silent success, 21 in 8. |
-| L1 | Locks and ordering | Lock before read-modify-write; release on every path; bounded stale-lock recovery; atomic write by temp file and rename on one filesystem; no state recorded before the action it describes succeeded; signal and timer handlers cannot leave half-written state. Recurring: atomic write and ordering, 13 in 6; locking, 9 in 4; signal and timer, 10 in 4. |
-| P1 | Parsing and normalization | One parser; normalize (case, Unicode, trailing dots, separators) before comparing; duplicate keys, empty and oversized values, NUL bytes, line endings; reject unknown fields; a validator is tested with an input it must reject. Recurring: parsing and normalization, 24 in 9 (the most common class); validator false negatives, 18 in 8. |
+| L1 | Locks and ordering | Lock before read-modify-write; release on every path; stale-lock recovery only after checking the owner (a recorded pid or lease) is dead, never by age alone; atomic write by temp file and rename on one filesystem; no state recorded before the action it describes succeeded; signal and timer handlers cannot leave half-written state. Recurring: atomic write and ordering, 13 in 6; locking, 9 in 4; signal and timer, 10 in 4. |
+| P1 | Parsing and normalization | One parser; normalize before comparing, per identifier kind and per filesystem (case, Unicode, trailing dots and separators are not universal; a folded compare can merge distinct names); duplicate keys, empty and oversized values, NUL bytes, line endings; reject unknown fields; a validator is tested with an input it must reject. Recurring: parsing and normalization, 24 in 9 (the most common class); validator false negatives, 18 in 8. |
 | B1 | Bounds and timeouts | Size cap before read; depth and count caps; a timeout on every network and subprocess call; bounded retries and pagination; never replay a non-idempotent call after an ambiguous outcome; check arithmetic at zero, negative and huge values. Recurring: resource bounds and timeouts, 25 in 7; logic and state correctness, 18 in 5. |
 | E1 | Output escaping | Escape each sink for its own grammar (shell, Markdown, HTML, workflow commands, a log line, JSON); untrusted text never reaches a command, summary or log un-neutralized; strip control characters and newlines from logged values. Recurring: output escaping, 6 in 3. |
 | K1 | Secrets handling | Environment or secret manager, never argv, repository or fixtures; never in errors, logs, reports or artifacts; redact before writing, not after; least-scope tokens. Recurring: confidentiality and secrets, 12 in 5. |
@@ -54,10 +54,10 @@ These are names and contracts only. The shared code is a later task in the maint
 
 1. `safe_open(root, relpath, mode)`: resolve, confine, no-follow, regular file only, size cap.
 2. `atomic_write(path, data, mode=0o600)`: temp file in the same directory, fsync, rename, clean up on error.
-3. `locked(path, timeout)`: advisory lock with a bounded wait, released on all paths.
+3. `locked(path, timeout)`: advisory lock with a bounded wait, released on all paths, with owner liveness checked before any lock is broken.
 4. `run_cmd(argv, timeout, max_output, env_allow, cwd)`: no shell, scrubbed environment, bounded output.
 5. `bounded_read(stream, limit)`, `load_json_strict`, `load_yaml_strict`: size and depth caps, duplicate keys rejected.
-6. `normalize_path_component` and `normalize_text`: Unicode NFKC plus case fold, for comparison only.
+6. `normalize_path_component` and `normalize_text`: normalization chosen per identifier kind and per filesystem (for example NFKC plus case fold only where the names are case-insensitive), for comparison only.
 7. `redact(text, patterns)`: applied at the write boundary.
 8. `gh_api(...)`: REST only, timeout, bounded pagination, no redirect credential carry, no replay of a non-idempotent call.
 9. `fail_closed(fn, default=DENY)`: for hooks, so an exception denies.
