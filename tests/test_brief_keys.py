@@ -171,6 +171,29 @@ class ResearchAndRoles(unittest.TestCase):
         for ok in (good, "research: ladder - prior art, vendor docs page, live API\n"):
             self.assertEqual(validate.research_line_errors(ok), [])
 
+    def test_fence_closes_only_with_same_character_and_at_least_the_same_length(self):
+        line = "research: n/a - hidden\n"
+        for label, text in {
+            "four backticks closed by three": "````\n" + line + "```\n" + line + "````\n",
+            "five tildes closed by four": "~~~~~\n" + line + "~~~~\n" + line + "~~~~~\n",
+            "backticks closed by tildes": "```\n" + line + "~~~\n" + line + "```\n",
+            "tildes closed by backticks": "~~~\n" + line + "```\n" + line + "~~~\n",
+            "closer carries text": "```\n" + line + "``` x\n" + line + "```\n",
+            "never closed": "```\n" + line,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # a longer closer ends the fence, and a line after it is operative
+        text = "```\n" + line + "`````\n" + "research: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+        text = "~~~~\n" + line + "   ~~~~~\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+
+    def test_research_reason_is_printable_ascii_only_and_the_template_says_so(self):
+        self.assertTrue(validate.research_line_errors("research: n/a - caf\u00e9\n"))
+        self.assertEqual(validate.research_line_errors("research: n/a - cafe\n"), [])
+        self.assertIn("printable ASCII only", (ROOT / TEMPLATE).read_text(encoding="utf-8"))  # the comment block
+
     def test_spend_line_fences_and_spacing_bite_too(self):
         free = "spend: none - free-only\n"
         for label, text in {

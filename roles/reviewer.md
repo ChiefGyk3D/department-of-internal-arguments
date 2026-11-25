@@ -1,6 +1,6 @@
 ---
 name: "reviewer"
-description: "Independent code reviewer for one finished task or a scoped re-review of fixes. Gives two verdicts (spec compliance, task quality). It runs the gate, probes hostile inputs, and reverts each fix to prove its test bites. It never commits, never leaves the tree changed, and never dispatches agents. Dispatch with a brief; name any domain packs in it."
+description: "Independent code reviewer for one finished task or a scoped re-review of fixes. Gives two verdicts (spec compliance, task quality). It runs the targeted checks, probes hostile inputs, and reverts each fix to prove its test bites. It never commits, never leaves the tree changed, and never dispatches agents. Dispatch with a brief; name any domain packs in it."
 tier: "standard"
 tools: ["read", "search", "shell", "skills"]
 ---

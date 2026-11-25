@@ -417,7 +417,7 @@ class GateWording(unittest.TestCase):
     )
     BANNED = re.compile(
         r"(?i)(?<!CI )\b(?:run|runs|running) (?:the )?(?:repo(?:sitory)?'s )?full gate\b(?! unless)"
-        r"|(?<!CI )\\b(?:run|runs|running) the gate\\b|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
+        r"|(?<!CI )\b(?:run|runs|running) the gate\b|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
     )
 
     def texts(self):
@@ -443,6 +443,8 @@ class GateWording(unittest.TestCase):
             "exactly as CI runs it",
             "a narrower subset",
             "not a subset",
+            "run the gate",
+            "Then run the gate again",
         ):
             self.assertTrue(self.BANNED.search(bad), bad)
         for fine in ("You do not run the full gate unless the brief asks", "CI runs the full gate and is the judge"):
@@ -541,6 +543,7 @@ class ReportContract(unittest.TestCase):
         "5 lines",
         "`NEEDS:`",
         "exit code",
+        "request a higher cap in the `NEEDS:` line",
     )
     OLD = "The header is shared by every role so the lead can log it"
     FIELDS = ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "OTHER GATES:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:")
@@ -576,6 +579,7 @@ class ReportContract(unittest.TestCase):
         self.assertIn("default 12 lines", text)
         self.assertIn("lines of free text", text)
         self.assertIn("NEEDS", text)
+        self.assertIn("request a higher cap in the `NEEDS:` line", text)
         self.assertIn("Evidence the report must carry (gate exit code, red evidence, revert check", text)
 
 

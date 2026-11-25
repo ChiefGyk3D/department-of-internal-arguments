@@ -49,6 +49,19 @@ class StrictCheckBites(unittest.TestCase):
             with self.subTest(value):
                 self.assertTrue(errors(value))
 
+    def test_unicode_escapes_out_of_range_or_surrogate_fail(self):
+        for body in ("U00110000", "UFFFFFFFF", "ud800", "udfff", "U0000D800", "U0000DFFF"):
+            with self.subTest(body):
+                self.assertTrue(errors('"' + chr(92) + body + '"'))
+        for body in ("U0010FFFF", "u00e9", "U0001F600", "ud7ff", "ue000"):
+            with self.subTest(body):
+                self.assertFalse(errors('"' + chr(92) + body + '"'))
+
+    def test_exponent_numbers_are_strings_like_pyyaml_6_0_2(self):
+        for value in ("1E3", "1e3", "1e+3", "1.5e3", "1e-3"):
+            with self.subTest(value):
+                self.assertFalse(errors(value))
+
     def test_duplicate_key_missing_end_and_nested_value_fail(self):
         self.assertTrue(validate.strict_frontmatter_errors('---\nname: "x"\nname: "y"\n---\n', "f"))
         self.assertTrue(validate.strict_frontmatter_errors('---\nname: "x"\n', "f"))

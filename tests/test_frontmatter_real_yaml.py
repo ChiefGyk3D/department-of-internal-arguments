@@ -23,13 +23,14 @@ NON_STRING = (
 STRING = (
     "plain words", "a-b_c.d", "name 2026-11-25 stamped", "v1.2.3", "yesterday", "nullable", "1.2.3",
     '"quoted"', '"123"', '"null"', '"a\\x41"', '"tab\\there"', "'single'", "'it''s'", '"2026-11-25"',
+    "1E3", "1e3", "1e+3", "1.5e3",
 )  # fmt: skip
 
 
 def real_type_is_string(value):
     try:
         data = yaml.safe_load(f'name: "x"\ndescription: {value}\n')
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError):  # PyYAML raises ValueError for an out-of-range code point
         return False
     return isinstance(data, dict) and isinstance(data.get("description"), str)
 
@@ -55,6 +56,14 @@ class AgreesWithARealLoader(unittest.TestCase):
         for value in STRING:
             with self.subTest(value):
                 self.assertTrue(strict_ok(value))
+
+    def test_escapes_the_real_loader_rejects_fail_the_strict_check(self):
+        bs = chr(92)
+        for body in ("U00110000", "UFFFFFFFF"):
+            value = '"' + bs + body + '"'
+            with self.subTest(value):
+                self.assertFalse(real_type_is_string(value))
+                self.assertFalse(strict_ok(value))
 
     def test_empty_value_is_null_and_fails(self):
         self.assertIsNone(yaml.safe_load("description:\n")["description"])

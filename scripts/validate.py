@@ -199,16 +199,24 @@ FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 
 def policy_lines(text, key):
     """Lines of the text that start with `key:` at line start, outside Markdown code fences (``` or ~~~, indented up
-    to three spaces). A displayed example in a fence is not the operative line."""
-    out, fence = [], None
+    to three spaces). A fence closes only with the same character and at least the opener's length; one never closed
+    hides the rest. A displayed example in a fence is not the operative line."""
+    out, fence = [], None  # fence: (character, length) of the opener
     for line in text.split("\n"):
         m = FENCE_RE.match(line)
         if m:
+            run = m.group(1)
             if fence is None:
-                fence = m.group(1)[0] * 3
-            elif m.group(1).startswith(fence) and not line.strip().strip(fence[0]):
+                if run[0] == "`" and "`" in line[m.end() :]:
+                    pass  # a backtick run with a backtick after it is inline code, not an opener
+                else:
+                    fence = (run[0], len(run))
+                    continue
+            elif run[0] == fence[0] and len(run) >= fence[1] and not line.strip().strip(fence[0]):
                 fence = None
-            continue
+                continue
+            else:
+                continue
         if fence is None and line.startswith(f"{key}:"):
             out.append(line)
     return out
@@ -259,8 +267,9 @@ SKIP_PARTS = {".git", "__pycache__"}
 _FM_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 _FM_PLAIN_BAD_START = set("[]{},&*!|>'\"%@`#")
 # Plain scalars a YAML loader resolves to something other than a string (null, bool, int, float, timestamp, merge and
-# value tags). The patterns follow PyYAML's resolver (YAML 1.1), which is the wider reading, so a value safe under it
-# is a string under the 1.2 loaders too. A test compares this check with PyYAML on a corpus.
+# value tags). The patterns follow the resolver of PyYAML 6.0.2. The check is a sound subset of PyYAML: whatever it
+# passes is a string for PyYAML, and it may reject more (tags, anchors and aliases, flow and block starts). A test
+# compares it with PyYAML on a corpus.
 _FM_NON_STRING_RES = tuple(
     re.compile(p)
     for p in (
@@ -273,7 +282,6 @@ _FM_NON_STRING_RES = tuple(
         r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?"
         r"(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?",
         r"<<|=",
-        r"[-+]?[0-9][0-9_]*(?:[eE][-+]?[0-9]+)",  # `1e3`: a float to some loaders
     )
 )
 _FM_DQ_ESCAPES = set('0abt\tnvfre "/\\N_LP')
@@ -293,8 +301,12 @@ def _fm_double_quoted_error(value):
             e = value[i]
             width = {"x": 2, "u": 4, "U": 8}.get(e)
             if width:
-                if not re.fullmatch(rf"[0-9a-fA-F]{{{width}}}", value[i + 1 : i + 1 + width]):
+                digits = value[i + 1 : i + 1 + width]
+                if not re.fullmatch(rf"[0-9a-fA-F]{{{width}}}", digits):
                     return f"a double-quoted value has a bad \\{e} escape"
+                code = int(digits, 16)
+                if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                    return f"a double-quoted value has a \\{e} escape that is not a Unicode scalar value"
                 i += width
             elif e not in _FM_DQ_ESCAPES:
                 return f"a double-quoted value has an unknown escape \\{e}"
