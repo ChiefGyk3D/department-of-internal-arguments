@@ -195,8 +195,9 @@ SPEND_PAID_RE = re.compile(r"paid - approval in the human message at [^,\s][ -~]
 
 
 # A fence run, optionally after a list marker (bullet or ordered). The marker's content indent is where the item's
-# content starts; a fence opened there lives inside the list item.
-FENCE_RE = re.compile(r"( *)(?:(?:[-+*]|[0-9]{1,9}[.)])( {1,4}))?(`{3,}|~{3,})")
+# content starts; a fence opened there lives inside the list item. Several markers may share a line (`- - ```),
+# and tabs are expanded to four-column stops before matching.
+FENCE_RE = re.compile(r"( *)((?:(?:[-+*]|[0-9]{1,9}[.)]) {1,4})*)(`{3,}|~{3,})")
 
 
 def policy_lines(text, key):
@@ -207,10 +208,10 @@ def policy_lines(text, key):
     A displayed example in a fence is not the operative line."""
     out, fence = [], None  # fence: (character, length, container content indent)
     for line in text.split("\n"):
-        m = FENCE_RE.match(line)
+        m = FENCE_RE.match(line.expandtabs(4))
         if m:
             run, indent = m.group(3), len(m.group(1))
-            marker = m.group(2) is not None
+            marker = bool(m.group(2))
             if fence is None:
                 if indent > 3:
                     pass  # indented code, not a fence

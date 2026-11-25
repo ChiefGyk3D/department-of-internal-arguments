@@ -219,6 +219,25 @@ class ResearchAndRoles(unittest.TestCase):
         # four spaces without a marker is indented code, not an opener
         self.assertEqual(validate.policy_lines("    ```\n" + real, "research"), want)
 
+    def test_fence_after_several_list_markers_or_a_tab_is_an_opener(self):
+        hid = "research: n/a - hidden\n"
+        for label, text in {
+            "two bullets": "- - ```\n" + hid + "```\n",
+            "three markers": "- - - ```\n" + hid + "```\n",
+            "ordered inside bullet": "- 1. ```\n" + hid + "```\n",
+            "ordered pair": "1. 2) ```\n" + hid + "```\n",
+            "tab after marker": "-\t```\n" + hid + "```\n",
+            "tab after ordered marker": "1.\t```\n" + hid + "```\n",
+            "tab between markers": "-\t- ```\n" + hid + "```\n",
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # and the closer still closes: a real line after it is returned
+        text = "- - ```\n" + hid + "    ```\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+        text = "-\t```\n" + hid + "\t```\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+
     def test_backtick_info_string_clause_a_backtick_after_the_run_is_inline_code_not_an_opener(self):
         line = "research: n/a - real\n"
         for label, text in {
