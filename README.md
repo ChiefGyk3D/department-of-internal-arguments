@@ -4,7 +4,7 @@ This is my shared home for AI agent personas and the domain knowledge they load,
 
 Release 0.4.0. Apache-2.0.
 
-Ten roles (`implementer`, `reviewer`, `adversarial-reviewer`, `transcriber`, `researcher`, `cloud-engineer`, `devops-engineer` and the pilot roles `analyst`, `assessor`, `planner`) describe how work gets done, and twenty-five packs hold the domain knowledge you name in a brief when the task needs it.
+This repository now defines ten roles and twenty-five packs for AI coding assistants. The new analyst, assessor, and planner roles add measured research, evidence-based assessment, and planning with clear owners, dependencies, and risks. Five new packs cover threat detection, governance controls, delivery management, organization design, and function-based pack selection. All eight additions are pilots. Their expected effects are predictions with measurement targets, not proven results.
 
 ## 60-second install
 

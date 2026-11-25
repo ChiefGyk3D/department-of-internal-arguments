@@ -6,6 +6,8 @@ updated: "2026-11-25"
 
 # Pack: organization operating model
 
+These packs describe working practices and examples, not legal, audit, or compliance advice. No output produced with these packs is a claim of compliance.
+
 Status: pilot pack, written 2026-11-25. Most of this is a design synthesis, labeled INFERRED where it is one; only the incident roles, on-call numbers and the CSF Govern function are read on publisher pages (Sources). That the pack improves planning is a prediction until the measurement in "How to verify" is run.
 
 A healthy organization separates who decides, who builds and runs, who checks and who assures, and it writes down who is accountable for each process. A small team cannot staff every layer, so it keeps the separation of decisions and replaces missing people with compensating controls. This pack is the vocabulary for that; it does not set policy for anyone.

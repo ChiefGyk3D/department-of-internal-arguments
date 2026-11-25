@@ -12,6 +12,14 @@ The sixth persona is the one dispatching the other five. It is not an agent file
 
 Every role's report opens with the same header (role, model, head, base, gate, other gates, packs loaded, tree, not verified, and a `LOCAL-LLM:` line saying whether a local model was used, which exact model answered, what its output was checked against and how many discrepancies were found), so the lead can log a task from the header alone and a hook can check `MODEL:` against the dispatch. Both reviewers use one severity scale: blocking, important, minor.
 
+## Why Organizations Need More Than Coding
+
+Organizations need more than code generation. Security operations must detect and investigate threats. Governance and compliance work must connect controls to evidence. Delivery work must define ownership, dependencies, risks, and decisions across teams.
+
+Roles define who does the work and what boundaries apply. An analyst reads, measures, and runs approved commands in a scratch area. An assessor checks work against a control or standard and reports the evidence. A planner turns a goal into an actionable plan. Packs provide the working guidance for a specific function, while `org-dispatch` selects no more than three relevant packs for the task.
+
+These roles and packs are pilots. Each starts with a predicted effect and measurement targets. Results are reviewed before the role or pack is trusted for broader use.
+
 ## What I did not keep
 
 Three more things from that starter I did not keep, and the reasons are measured or at least argued in [the pilot notes](../evals/pilot-2026-10.md):

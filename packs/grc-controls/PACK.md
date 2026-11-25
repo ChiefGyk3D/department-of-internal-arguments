@@ -6,6 +6,8 @@ updated: "2026-11-25"
 
 # Pack: GRC controls
 
+These packs describe working practices and examples, not legal, audit, or compliance advice. No output produced with these packs is a claim of compliance.
+
 Status: pilot pack, written 2026-11-25. The rules are constraints and checklists, not measured findings. That the pack improves control work is a prediction until the measurement in "How to verify" is run.
 
 Governance, risk and compliance work answers one question with evidence: does this control exist, and does it operate. A claim without a row of evidence is not a result. This pack builds the table and the registers; the human owner accepts risk, grants exceptions and approves anything said to an outside audience.
