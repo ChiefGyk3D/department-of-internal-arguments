@@ -412,10 +412,12 @@ class GateWording(unittest.TestCase):
         "docs/writing-a-brief.md",
         "docs/roles.md",
         "packs/python-untrusted-input/PACK.md",
+        "CLAUDE.md",
+        "templates/lead.md",
     )
     BANNED = re.compile(
         r"(?i)(?<!CI )\b(?:run|runs|running) (?:the )?(?:repo(?:sitory)?'s )?full gate\b(?! unless)"
-        r"|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
+        r"|(?<!CI )\\b(?:run|runs|running) the gate\\b|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
     )
 
     def texts(self):
@@ -424,7 +426,7 @@ class GateWording(unittest.TestCase):
 
     def test_nothing_tells_an_agent_to_run_the_full_gate(self):
         texts = self.texts()
-        self.assertGreaterEqual(len(texts), 13)  # something was collected: 6 named files and 7 roles
+        self.assertGreaterEqual(len(texts), 15)  # something was collected: 8 named files and 7 roles
         for name, text in texts.items():
             with self.subTest(name):
                 self.assertIsNone(self.BANNED.search(text), self.BANNED.search(text))
@@ -530,7 +532,16 @@ class ReportContract(unittest.TestCase):
     """Issue #121: one report contract per role file, replacing the old shared-header sentence, with every mandatory
     field and the gate and evidence rules unchanged."""
 
-    PARTS = ("STATUS: done | partly done | blocked", "default 12 lines", "5 lines", "`NEEDS:`", "exit code")
+    PARTS = (
+        "STATUS: done | partly done | blocked",
+        "default 12 lines",
+        "counts free text only",
+        "Exempt from the cap and never dropped",
+        "every field of this role's report format",
+        "5 lines",
+        "`NEEDS:`",
+        "exit code",
+    )
     OLD = "The header is shared by every role so the lead can log it"
     FIELDS = ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "OTHER GATES:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:")
 
@@ -563,6 +574,7 @@ class ReportContract(unittest.TestCase):
     def test_brief_template_states_the_cap(self):
         text = (ROOT / "templates/brief.md").read_text(encoding="utf-8")
         self.assertIn("default 12 lines", text)
+        self.assertIn("lines of free text", text)
         self.assertIn("NEEDS", text)
         self.assertIn("Evidence the report must carry (gate exit code, red evidence, revert check", text)
 

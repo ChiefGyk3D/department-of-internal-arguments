@@ -159,12 +159,28 @@ class ResearchAndRoles(unittest.TestCase):
             "empty reason": "research: n/a - \n",
             "unknown form": "research: maybe\n",
             "only in a code fence": "```\n" + good + "```\n",
+            "only in a tilde fence": "~~~\n" + good + "~~~\n",
+            "only in an indented fence": "   ```\n" + good + "   ```\n",
+            "no space after the colon": "research:n/a - reason\n",
+            "two spaces after the colon": "research:  n/a - reason\n",
+            "no space and a valid line": good + "research:n/a - reason\n",
         }
         for label, text in cases.items():
             with self.subTest(label):
                 self.assertTrue(validate.research_line_errors(text), label)
         for ok in (good, "research: ladder - prior art, vendor docs page, live API\n"):
             self.assertEqual(validate.research_line_errors(ok), [])
+
+    def test_spend_line_fences_and_spacing_bite_too(self):
+        free = "spend: none - free-only\n"
+        for label, text in {
+            "tilde fence": "~~~\n" + free + "~~~\n",
+            "indented fence": "  ```\n" + free + "  ```\n",
+            "no space": "spend:none - free-only\n",
+        }.items():
+            with self.subTest(label):
+                self.assertTrue(validate.spend_line_errors(text), label)
+        self.assertEqual(validate.spend_line_errors(free), [])
 
     def test_template_lists_every_role(self):
         data = em.read_pins(ROOT / em.EXPORT_PATH)

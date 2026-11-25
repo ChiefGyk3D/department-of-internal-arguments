@@ -194,17 +194,42 @@ SPEND_FREE = "none - free-only"
 SPEND_PAID_RE = re.compile(r"paid - approval in the human message at [^,\s][ -~]*?, cap [0-9]+(?:\.[0-9]{1,2})? USD")
 
 
+FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def policy_lines(text, key):
+    """Lines of the text that start with `key:` at line start, outside Markdown code fences (``` or ~~~, indented up
+    to three spaces). A displayed example in a fence is not the operative line."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = FENCE_RE.match(line)
+        if m:
+            if fence is None:
+                fence = m.group(1)[0] * 3
+            elif m.group(1).startswith(fence) and not line.strip().strip(fence[0]):
+                fence = None
+            continue
+        if fence is None and line.startswith(f"{key}:"):
+            out.append(line)
+    return out
+
+
+def _policy_value(text, key):
+    """(value, error): the one `key: value` line's value after exactly one space, or an error string."""
+    lines = policy_lines(text, key)
+    if len(lines) != 1:
+        return None, f"expected exactly one `{key}:` line at line start, found {len(lines)}"
+    line = lines[0]
+    if not line.startswith(f"{key}: ") or line[len(key) + 2 :][:1] in ("", " "):
+        return None, f"`{key}:` needs exactly one space after the colon and then its value"
+    return line[len(key) + 2 :], None
+
+
 def spend_line_errors(text):
     """Problems with the `spend:` line of a brief (empty list when there is exactly one valid line)."""
-    lines, fenced = [], False
-    for line in text.split("\n"):
-        if line.startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("spend:"):
-            lines.append(line)
-    if len(lines) != 1:
-        return [f"expected exactly one `spend:` line at line start, found {len(lines)}"]
-    value = lines[0][len("spend:") :].removeprefix(" ")
+    value, err = _policy_value(text, "spend")
+    if err:
+        return [err]
     if value == SPEND_FREE or SPEND_PAID_RE.fullmatch(value):
         return []
     paid = "paid - approval in the human message at <time>, cap <n> USD"
@@ -218,15 +243,9 @@ RESEARCH_RE = re.compile(r"(?:n/a|ladder) - \S[ -~]*")
 
 def research_line_errors(text):
     """Problems with the `research:` line of a brief (empty list when there is exactly one valid line)."""
-    lines, fenced = [], False
-    for line in text.split("\n"):
-        if line.startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("research:"):
-            lines.append(line)
-    if len(lines) != 1:
-        return [f"expected exactly one `research:` line at line start, found {len(lines)}"]
-    value = lines[0][len("research:") :].removeprefix(" ")
+    value, err = _policy_value(text, "research")
+    if err:
+        return [err]
     if RESEARCH_RE.fullmatch(value):
         return []
     return [f"`research:` value {value!r} is neither 'n/a - <reason>' nor 'ladder - <the sources it follows>'"]
@@ -239,24 +258,64 @@ SKIP_PARTS = {".git", "__pycache__"}
 
 _FM_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 _FM_PLAIN_BAD_START = set("[]{},&*!|>'\"%@`#")
+# Plain scalars a YAML loader resolves to something other than a string (null, bool, int, float, timestamp, merge and
+# value tags). The patterns follow PyYAML's resolver (YAML 1.1), which is the wider reading, so a value safe under it
+# is a string under the 1.2 loaders too. A test compares this check with PyYAML on a corpus.
+_FM_NON_STRING_RES = tuple(
+    re.compile(p)
+    for p in (
+        r"~|null|Null|NULL",
+        r"yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF",
+        r"[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+        r"[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?"
+        r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+        r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?"
+        r"(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?",
+        r"<<|=",
+        r"[-+]?[0-9][0-9_]*(?:[eE][-+]?[0-9]+)",  # `1e3`: a float to some loaders
+    )
+)
+_FM_DQ_ESCAPES = set('0abt\tnvfre "/\\N_LP')
 
 
-def _fm_value_error(value):
-    """Why a front-matter value is not a valid YAML 1.2 scalar on one line, or None. Flat `key: value` subset only."""
+def _fm_double_quoted_error(value):
+    """A YAML double-quoted scalar on one line: one closing quote at the end, only YAML escapes inside."""
+    i, n = 1, len(value)
+    while i < n:
+        c = value[i]
+        if c == '"':
+            return None if i == n - 1 else "a double-quoted value has text after its closing quote"
+        if c == "\\":
+            i += 1
+            if i >= n:
+                break
+            e = value[i]
+            width = {"x": 2, "u": 4, "U": 8}.get(e)
+            if width:
+                if not re.fullmatch(rf"[0-9a-fA-F]{{{width}}}", value[i + 1 : i + 1 + width]):
+                    return f"a double-quoted value has a bad \\{e} escape"
+                i += width
+            elif e not in _FM_DQ_ESCAPES:
+                return f"a double-quoted value has an unknown escape \\{e}"
+        i += 1
+    return "a double-quoted value must end with its quote"
+
+
+def _fm_value_error(key, value):
+    """Why a front-matter value is not a YAML string on one line, or None. Flat `key: value` subset only."""
     if value == "":
-        return None
+        return "an empty value is null, not a string; quote it"
     if value[0] == '"':
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return "a double-quoted value must be one complete, validly escaped string"
-        return None if isinstance(decoded, str) else "a double-quoted value must be a string"
+        return _fm_double_quoted_error(value)
     if value[0] == "'":
         inner = value[1:-1] if len(value) > 1 and value[-1] == "'" else None
         if inner is None or re.search(r"(?<!')'(?!')", inner.replace("''", "")):
             return "a single-quoted value must end with its quote and double any quote inside"
         return None
-    if value[0] == "[":  # a flow sequence of quoted strings, as the Copilot `tools:` line is
+    if value[0] == "[":  # a flow sequence of quoted strings; only the `tools` list of the Copilot agents is one
+        if key != "tools":
+            return "only `tools` may be a list; every other value must be a string"
         try:
             decoded = json.loads(value)
         except json.JSONDecodeError:
@@ -269,6 +328,8 @@ def _fm_value_error(value):
         return "a plain value may not contain ': ' or ' #' or end with ':'; quote it"
     if "\t" in value:
         return "a plain value may not contain a tab"
+    if any(r.fullmatch(value) for r in _FM_NON_STRING_RES):
+        return "a YAML loader reads this plain value as null, a boolean, a number or a date, not a string; quote it"
     return None
 
 
@@ -291,7 +352,7 @@ def strict_frontmatter_errors(text, label):
         if key in seen:
             errors.append(f"{label}: front matter key {key!r} is repeated")
         seen.add(key)
-        problem = _fm_value_error(value.strip(" "))
+        problem = _fm_value_error(key, value.strip(" "))
         if problem:
             errors.append(f"{label}: front matter {key!r}: {problem}")
     return errors

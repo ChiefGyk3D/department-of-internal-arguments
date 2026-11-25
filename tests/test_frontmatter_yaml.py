@@ -55,11 +55,15 @@ class StrictCheckBites(unittest.TestCase):
         self.assertTrue(validate.strict_frontmatter_errors("---\nname: x\n  nested: y\n---\n", "f"))
         self.assertTrue(validate.strict_frontmatter_errors("no front matter\n", "f"))
 
+    def test_only_tools_may_be_a_list(self):
+        ok = '---\nname: "x"\ntools: ["a", "b"]\n---\n'
+        self.assertEqual(validate.strict_frontmatter_errors(ok, "f"), [])
+        self.assertTrue(errors('["a", "b"]'))  # a list as a description is not a string
+
     def test_good_values_pass(self):
         for value in (
             '"Rules for Linux work: each plan names a target"',
             "'single: quoted'",
-            '["a", "b"]',
             "plain words, commas ok",
             "a-b_c.d",
         ):
