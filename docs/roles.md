@@ -19,7 +19,7 @@ The sources are [roles/implementer.md](../roles/implementer.md), [roles/reviewer
 ```
 roles/       canonical role Markdown (frontmatter: name, description, tier, tools)
 packs/       one directory per pack, PACK.md inside (frontmatter: name, description, updated)
-policies/    four policies, embedded in every generated agent
+policies/    four policies; three are embedded in every generated agent, model routing is for the lead and the exporter
 fragments/   text shared by several roles (report header, never-weaken list), spliced in by {{fragment:NAME}} lines
 templates/   lead, brief, handoff, adr, copilot-instructions
 evals/       behavioral exercises, the pilot summary, the log schema and a synthetic example log
