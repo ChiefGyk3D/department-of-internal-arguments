@@ -25,7 +25,7 @@ model: sonnet
 - Domain packs to load (see [Packs](packs.md)), or none. The report must say which it loaded.
 - Local model step for text-only drafts, or `n/a` with a reason.
 - Data class and what must not appear (hostnames, addresses, serials, callsigns, grid squares, employer, secrets).
-- Gate command: the full gate, exactly as CI runs it.
+- Targeted checks: the tests and lint that cover the change, run locally. CI runs the full gate and is the judge; the brief names the full local suite only when it is wanted.
 - Stop conditions: ambiguous scope, a check that would have to be weakened, security-sensitive code the plan did not review. The agent returns its report instead of guessing.
 - Required approvals: the agent never pushes, merges, tags or releases; the human's approval is recorded in the human's own message, not the brief.
 - Evidence the report must carry, and the report path or return format.

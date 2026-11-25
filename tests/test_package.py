@@ -400,6 +400,51 @@ class Install(unittest.TestCase):
             install(d, "everything")
 
 
+class GateWording(unittest.TestCase):
+    """Issue #121: targeted checks locally, CI is the judge; no text tells an agent to run the full gate."""
+
+    SOURCES = (
+        "policies/quality-gates.md",
+        "templates/brief.md",
+        "templates/copilot-instructions.md",
+        "docs/writing-a-brief.md",
+        "docs/roles.md",
+        "packs/python-untrusted-input/PACK.md",
+    )
+    BANNED = re.compile(
+        r"(?i)(?<!CI )\b(?:run|runs|running) (?:the )?(?:repo(?:sitory)?'s )?full gate\b(?! unless)"
+        r"|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
+    )
+
+    def texts(self):
+        paths = [ROOT / n for n in self.SOURCES] + sorted((ROOT / "roles").glob("*.md"))
+        return {p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8") for p in paths}
+
+    def test_nothing_tells_an_agent_to_run_the_full_gate(self):
+        texts = self.texts()
+        self.assertGreaterEqual(len(texts), 13)  # something was collected: 6 named files and 7 roles
+        for name, text in texts.items():
+            with self.subTest(name):
+                self.assertIsNone(self.BANNED.search(text), self.BANNED.search(text))
+
+    def test_policy_says_targeted_checks_and_ci_is_the_judge(self):
+        text = (ROOT / "policies/quality-gates.md").read_text(encoding="utf-8")
+        self.assertIn("targeted checks", text)
+        self.assertIn("CI is the judge", text)
+
+    def test_the_ban_bites(self):
+        for bad in (
+            "run the repo's FULL gate",
+            "runs the full gate after",
+            "exactly as CI runs it",
+            "a narrower subset",
+            "not a subset",
+        ):
+            self.assertTrue(self.BANNED.search(bad), bad)
+        for fine in ("You do not run the full gate unless the brief asks", "CI runs the full gate and is the judge"):
+            self.assertIsNone(self.BANNED.search(fine), fine)
+
+
 class Export(unittest.TestCase):
     def test_prompt_has_all_policies_one_role_and_chosen_packs(self):
         p = build("reviewer", ["threat-model"])
