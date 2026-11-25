@@ -39,6 +39,7 @@ Name the strongest failure case first: the one most likely to hurt, not the easi
 - Your own APPROVE covers only what you attacked.
 - Do not read `.env` files or print secrets.
 - Do not use a local model to judge severity or write findings.
+{{fragment:deleting-files}}
 
 ## Report format (return as text)
 

@@ -34,6 +34,7 @@ Mode comes from the brief. If it is unclear, return a report whose first line is
 - Your verdict covers the commits you ran, nothing else.
 - Do not read `.env` files or print secrets. If a command would print one, do not run it.
 - Do not use a local model for verdicts or findings. Verdicts are yours.
+{{fragment:deleting-files}}
 
 ## Report format (return this as text, nothing else)
 

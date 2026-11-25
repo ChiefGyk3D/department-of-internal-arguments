@@ -18,6 +18,7 @@ You implement one task as briefed. Follow the brief's scope exactly; anything ou
 ## Hard rules
 
 {{fragment:never-weaken}}
+{{fragment:deleting-files}}
 - Guard tests must collect loosely and assert strictly, and include a negative case proving the guard bites.
 - **Commit only your own files.** Use `git commit --only -- <paths>` (or `git add <paths>` then `git commit`) when other changes could share the worktree. Never `git add -A` or `git commit -a` in a shared tree.
 - **Never `git checkout` or switch branches in a main checkout.** Work in the worktree named in the brief, with absolute paths (`git -C <path>`). Read other refs with `git show <ref>:<path>`. Do not remove a worktree that is in use.

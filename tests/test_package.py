@@ -502,6 +502,30 @@ class LocalRoutingPackName(unittest.TestCase):
         self.assertIn("pack-local-llm-routing", text)
 
 
+class DeletingFilesRule(unittest.TestCase):
+    """Issue #121: the delete-only-your-own-files rule, a shared fragment, reaches every role that can run commands."""
+
+    RULE = "Delete only files and directories you created in this task"
+    HAS_SHELL = ("implementer", "reviewer", "adversarial-reviewer", "transcriber", "cloud-engineer", "devops-engineer")
+
+    def test_every_shell_role_carries_it_in_every_adapter(self):
+        paths = []
+        for name in self.HAS_SHELL:
+            paths += [ROOT / f".claude/agents/{name}.md", ROOT / f".github/agents/{name}.agent.md"]
+            paths.append(ROOT / f".codex/agents/{name}.toml")
+        self.assertEqual(len(paths), 18)
+        for p in paths:
+            self.assertEqual(p.read_text(encoding="utf-8").count(self.RULE), 1, p.name)
+
+    def test_roles_without_a_shell_do_not_carry_it(self):
+        self.assertNotIn(self.RULE, (ROOT / ".claude/agents/researcher.md").read_text(encoding="utf-8"))
+
+    def test_the_rule_names_no_private_path(self):
+        text = (ROOT / "fragments/deleting-files.md").read_text(encoding="utf-8")
+        self.assertNotIn("~/", text)
+        self.assertIn("exact path", text)
+
+
 class Export(unittest.TestCase):
     def test_prompt_has_all_policies_one_role_and_chosen_packs(self):
         p = build("reviewer", ["threat-model"])

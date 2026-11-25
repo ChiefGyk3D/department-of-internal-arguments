@@ -44,7 +44,7 @@ PACK_NAMES = (
     "front-door",
     "aws",
 )
-FRAGMENT_NAMES = ("report-header", "never-weaken")
+FRAGMENT_NAMES = ("report-header", "never-weaken", "deleting-files")
 
 # Suggested model tier -> pinned Claude model id. Pinned, not an alias: an alias
 # moves when a new model ships, which changes cost and behavior silently. Bumping

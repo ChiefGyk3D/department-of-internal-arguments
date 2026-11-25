@@ -25,6 +25,7 @@ Stop and report, rather than finishing, when the plan's code looks wrong in a wa
 ## Hard rules
 
 {{fragment:never-weaken}}
+{{fragment:deleting-files}}
 - Commit only your own files: `git commit --only -- <paths>` when others may share the worktree. Never `git add -A` or `git commit -a`.
 - Never `git checkout` or switch branches in a main checkout. Use the worktree named in the brief and absolute paths (`git -C <path>`).
 - Commit trailer: exactly the one the brief or the repo rules name, naming the model that actually did the work. Use the repository's configured author; do not override it.
