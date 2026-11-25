@@ -30,7 +30,7 @@ STRING = (
 def real_type_is_string(value):
     try:
         data = yaml.safe_load(f'name: "x"\ndescription: {value}\n')
-    except (yaml.YAMLError, ValueError):  # PyYAML raises ValueError for an out-of-range code point
+    except (yaml.YAMLError, ValueError, OverflowError):  # PyYAML raises these for an out-of-range code point
         return False
     return isinstance(data, dict) and isinstance(data.get("description"), str)
 
