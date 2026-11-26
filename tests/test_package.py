@@ -889,6 +889,19 @@ class AmericanSpelling(unittest.TestCase):
         re.IGNORECASE,
     )
     DIRS = ("docs", "packs", "policies", "fragments", "templates", "roles", "evals")
+    # A URL path is not prose: a cited page keeps its publisher's spelling. Only https URLs are removed.
+    URL = re.compile(r"https://[^\s)>\]\"'`,]+")
+
+    def prose(self, line):
+        return self.URL.sub("", line)
+
+    def test_the_guard_ignores_urls_but_not_prose(self):
+        word = "organis" + "ations"
+        url_line = f"(https://example.test/for-{word}/page, read 2026-11-25)"
+        self.assertIsNotNone(self.BRITISH.search(url_line))  # the raw line would trip the pattern
+        self.assertIsNone(self.BRITISH.search(self.prose(url_line)))
+        self.assertIsNotNone(self.BRITISH.search(self.prose(f"{url_line} and the {word} agree")))
+        self.assertIsNotNone(self.BRITISH.search(self.prose(f"http://example.test/x {word}")))  # only https is removed
 
     def files(self):
         found = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "SECURITY.md"]
@@ -917,7 +930,7 @@ class AmericanSpelling(unittest.TestCase):
             f"{f.relative_to(ROOT)}:{n}: {m.group(0)}"
             for f in files
             for n, line in enumerate(f.read_text().splitlines(), 1)
-            for m in self.BRITISH.finditer(line)
+            for m in self.BRITISH.finditer(self.prose(line))
         ]
         self.assertEqual(hits, [])
 

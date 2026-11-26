@@ -28,6 +28,12 @@ Packs are the domain knowledge you name in a brief when the task needs it. A pac
 - [grc-controls](../packs/grc-controls/PACK.md): pilot pack; a control table with requirement text quoted from the publisher's page with URL and date, evidence rows, risk and exception registers with owner and expiry, stated sampling, SELF-ASSESSMENT labeling, no legal advice, and public compliance claims held for the owner.
 - [delivery-business-mgmt](../packs/delivery-business-mgmt/PACK.md): pilot pack; owner, date and next action on every item, a capacity ceiling, a critical path computed by a short script, RAID and the top three risks, cost gates up front, honest status with stale items, Scrum and DORA wording as the publishers give it, and no approvals by the planner.
 
+- [ad-disclosure](../packs/ad-disclosure/PACK.md): Records commercial connections and places clear disclosures close to the related claim.
+- [marketing-grc](../packs/marketing-grc/PACK.md): Reports evidence found or missing without stating that the work is compliant.
+- [audience-data-privacy](../packs/audience-data-privacy/PACK.md): Records audience data, purpose, retention, and whether privacy claims match the code.
+- [platform-data-terms](../packs/platform-data-terms/PACK.md): Tracks platform caching and display rules, including who reviewed each rule and when.
+- [media-kit-claims](../packs/media-kit-claims/PACK.md): Requires a source, date, floor, and era mark for every public number, with no bought or inflated metrics.
+
 The five media packs (`media-dispatch` first) are generic and public, with placeholders only; see [the media facts file](overlay-and-ownership.md#media-team-facts-file) for the private facts they expect.
 
 On Claude Code a pack installs as a skill named `pack-<name>`. Copilot has no pack loader, so paste the pack into the brief or use the exporter on the [Install](install.md) page. Packs are named in the brief; see [Writing a brief](writing-a-brief.md).
