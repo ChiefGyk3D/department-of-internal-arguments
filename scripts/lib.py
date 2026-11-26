@@ -53,6 +53,11 @@ PACK_NAMES = (
     "delivery-business-mgmt",
     "org-operating-model",
     "org-dispatch",
+    "ad-disclosure",
+    "marketing-grc",
+    "audience-data-privacy",
+    "platform-data-terms",
+    "media-kit-claims",
 )
 FRAGMENT_NAMES = ("report-header", "never-weaken", "deleting-files", "report-contract")
 

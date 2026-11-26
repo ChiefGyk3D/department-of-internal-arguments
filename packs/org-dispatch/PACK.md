@@ -45,6 +45,9 @@ A person says a title ("SOC analyst", "project manager") or a task. The router a
 | Systems administrator | OP | `linux-platform` | commands are handed to the human |
 | DevOps engineer | OP | `gha-security-dast` | CI changes go as a diff to the implementer |
 | Software engineer, developer | EN | `python-untrusted-input`, `implementer-self-check` | the reviewer is a separate dispatch |
+| Marketing or campaign manager, advertising | PL + AS | `marketing-grc`, `ad-disclosure`, `media-kit-claims` | the human approves every public claim |
+| Sponsorship or affiliate manager | AS + PL | `ad-disclosure`, `marketing-grc`, `media-kit-claims` | a connection with no register row is not published |
+| Analytics or audience data privacy | AN + AS | `audience-data-privacy`, `platform-data-terms`, `marketing-grc` | a lawyer reads the privacy page |
 
 Planned, not built: `incident-response`, `appsec-supplychain`, `itsm-operations`, `writing-enablement`, `reliability-recovery`, `software-quality`, `architecture-method`.
 
@@ -52,8 +55,8 @@ Planned, not built: `incident-response`, `appsec-supplychain`, `itsm-operations`
 
 - The router decides what to load, not whether to do the work. It never approves, never loads a pack the human did not allow, and never raises a tool grant.
 - Active security testing needs ownership, techniques, a time window and stop conditions in the brief before any pack is loaded for it.
-- A request that touches the media or radio packs goes to `media-dispatch` or `rf-emcomm`, not here.
-- The table lists 20 titles; the full design has 49. A title not listed falls under rule 8.
+- A request that touches the media or radio packs goes to `media-dispatch` or `rf-emcomm`, not here, except marketing, advertising, sponsorship, affiliate and audience data privacy work, which the three rows above route.
+- The table lists 23 titles; the full design has 49. A title not listed falls under rule 8.
 
 ## How to verify (before you hand it back)
 
