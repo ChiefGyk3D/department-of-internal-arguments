@@ -14,7 +14,13 @@ A finding is a heading such as `### High - title` (hyphen, en dash, em dash or c
 findings block, so findings are deduplicated on severity and normalized title; the first line number is kept. Held
 wins over everything else: a held review is listed with any findings it did show but is never clean.
 
-The input is read as untrusted data: one regular file, no symlink, bounded size, invalid UTF-8 replaced. Output never
+Only the final message is judged for HELD markers, the findings section and the clean statement: the text after the
+last `tokens used` line and its count line, up to a wrapper marker line (`exit=N status=ok`); without a `tokens used`
+line, the last 8 KiB. The echoed prompt and the transcript never decide the verdict. Findings come from the final
+message first and from the whole file only when it has none. No final message is HELD.
+
+The input is read as untrusted data: one regular file, no symlink, invalid UTF-8 replaced, at most the last 1 MiB read
+(a larger file is truncated from the front and the verdict line says so). Output never
 echoes a finding body or the text that triggered HELD; only fixed reason strings and titles capped at 200 characters
 with control characters removed. Standard library only."""
 
@@ -30,13 +36,35 @@ SEVERITIES = ("critical", "high", "medium", "low", "info")
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_HELD = 0, 1, 2, 3
 
 # A separator after the severity: hyphen, en dash, em dash or colon.
+SEV = r"(?:Critical|High|Medium|Low|Info(?:rmational)?)"
+DASHES = "-–—:"
+# A finding heading: optional numbering, bold or bracket markers, the severity, a separator (hyphen, en dash, em dash,
+# colon, or a closing bracket or bold marker), then the title. A bare "### High level overview" is not a finding.
 FINDING_RE = re.compile(
-    r"^[ \t]{0,3}#{2,6}[ \t]*(Critical|High|Medium|Low|Info(?:rmational)?)[ \t]*[-–—:]+[ \t]*(.*)$", re.I
+    r"^[ \t]{0,3}#{2,6}[ \t]*(?:\d+(?:\.\d+)*[.)]?[ \t]+)?(?:\*\*|__)?[\[(]?(" + SEV + r")\b"
+    r"(?P<sep>[ \t]*[" + DASHES + r"]*(?:[\])]|\*\*|__)*[ \t]*[" + DASHES + r"]*[ \t]*)(?P<title>.*)$",
+    re.I,
 )
 SECTION_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*(?:\*\*)?(?:findings|verdict|summary of findings)\b", re.I)
+# One explicit statement that rules out BOTH Critical and High ("No Critical or High findings", "no Critical and no
+# High", "no High or Critical"); "no High" alone or "no Critical" alone is not enough. Trailing text is allowed.
+_JOIN = r"[ \t]*(?:,|/|&|\bor\b|\band\b)[ \t]*(?:no[ \t]+)?"
 CLEAN_RE = re.compile(
-    r"\bno[ \t]+(?:critical|high)(?:[ \t]*(?:,|/|or|and|&)[ \t]*(?:critical|high))?(?:[ \t]+severity)?[ \t]+"
-    r"(?:findings?|issues?|vulnerabilit(?:y|ies))\b",
+    r"\bno[ \t]+(?:\*\*|__)?(?:critical(?:\*\*|__)?"
+    + _JOIN
+    + r"(?:\*\*|__)?high|high(?:\*\*|__)?"
+    + _JOIN
+    + r"(?:\*\*|__)?critical)(?![\w-])",
+    re.I,
+)
+# A critical or high word in a severity position on a line that is not a recognized finding heading: bold or bracketed,
+# `severity: high`, a table cell, a list item or a line that begins with the word and a separator.
+SEVERITY_MENTION_RE = re.compile(
+    r"(?:\*\*|__)[ \t]*(?:critical|high)\b|\[[ \t]*(?:critical|high)[ \t]*\]"
+    r"|severity[ \t]*[:=][ \t]*\W{0,4}(?:critical|high)\b"
+    r"|\|[ \t]*\W{0,4}(?:critical|high)\W{0,4}[ \t]*\|"
+    r"|^[ \t>]*(?:[-*+]|\d+[.)])[ \t]+\W{0,4}(?:critical|high)\b"
+    r"|^[ \t>#]*\W{0,4}(?:critical|high)\W{0,2}[ \t]*[" + DASHES + r"][ \t]",
     re.I,
 )
 # Fixed reason -> pattern. The reason is printed; the matched text never is.
@@ -71,55 +99,107 @@ def clean_title(raw):
     return text[:TITLE_MAX]
 
 
-def parse(text):
-    """Return (findings, section_present, clean_statement, held_reasons). Findings: [(severity, title, line)]."""
+TOKENS_RE = re.compile(r"^[ \t]*tokens[ \t]+used[ \t]*$", re.I)
+COUNT_RE = re.compile(r"^[ \t]*[0-9][0-9,._ ]*[ \t]*$")
+WRAPPER_RE = re.compile(r"^[ \t]*exit=\S*[ \t]+status=\S*[ \t]*$", re.I)
+FALLBACK_BYTES = 8 * 1024
+
+
+def final_segment(text):
+    """Return (line offset, segment text): the final message only. A real output is the echoed prompt, the model
+    transcript, a `tokens used` line with a count line, the final message and a wrapper marker line. Markers in the
+    prompt or transcript must not decide the verdict, so only the text after the last `tokens used` line and its
+    count line, up to the wrapper marker, is judged. Without that line, the last 8 KiB is used."""
+    lines = text.splitlines()
+    last = max((i for i, ln in enumerate(lines) if TOKENS_RE.match(ln)), default=None)
+    if last is None:
+        start = 0
+        size = 0
+        for i in range(len(lines) - 1, -1, -1):
+            size += len(lines[i]) + 1
+            if size > FALLBACK_BYTES:
+                start = i + 1
+                break
+    else:
+        start = last + 1
+        if start < len(lines) and COUNT_RE.match(lines[start]):
+            start += 1
+    seg = [ln for ln in lines[start:] if not WRAPPER_RE.match(ln)]
+    return start, "\n".join(seg)
+
+
+def finding_match(line):
+    m = FINDING_RE.match(line)
+    if m and (m.group("sep").strip() or m.group("title") == ""):
+        return m
+    return None
+
+
+def parse_findings(text, offset=0):
+    """Findings [(severity, title, line)] deduplicated on severity and title, first line kept."""
     findings, seen = [], set()
-    section = clean_statement = False
-    for number, line in enumerate(text.splitlines(), 1):
-        m = FINDING_RE.match(line)
+    for number, line in enumerate(text.splitlines(), 1 + offset):
+        m = finding_match(line)
         if m:
             sev = m.group(1).lower()
             sev = "info" if sev.startswith("info") else sev
-            title = clean_title(m.group(2))
+            title = clean_title(m.group("title"))
             key = (sev, re.sub(r"\W+", " ", title).strip().lower())
             if key not in seen:
                 seen.add(key)
                 findings.append((sev, title, number))
-            section = True
-            continue
-        if SECTION_RE.match(line):
-            section = True
-        if CLEAN_RE.search(line):
-            clean_statement = True
-    held = [reason for reason, pat in HELD_PATTERNS if pat.search(text)]
-    return findings, section, clean_statement, held
+    return findings
+
+
+def parse(text):
+    """Return (findings, section, clean_statement, held, has_final, stray). Findings come from the
+    final-message segment, and from the whole file only when the segment has none; the section, the clean statement
+    and the held markers are judged in the segment only."""
+    offset, seg = final_segment(text)
+    findings = parse_findings(seg, offset)
+    if not findings:
+        findings = parse_findings(text)
+    section = any(finding_match(ln) or SECTION_RE.match(ln) for ln in seg.splitlines())
+    clean_statement = any(CLEAN_RE.search(ln) for ln in seg.splitlines())
+    held = [reason for reason, pat in HELD_PATTERNS if pat.search(seg)]
+    stray = any(
+        SEVERITY_MENTION_RE.search(ln) and not finding_match(ln) and not CLEAN_RE.search(ln) for ln in seg.splitlines()
+    )
+    return findings, section, clean_statement, held, bool(seg.strip()), stray
 
 
 def read_review(path):
-    """Read one regular, non-symlink file of at most MAX_BYTES. Raises OSError or ValueError otherwise."""
+    """Read one regular, non-symlink file; a file over MAX_BYTES is read from its last MAX_BYTES (the final message
+    is at the end). Returns (text, truncated). Raises OSError or ValueError otherwise."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(path, flags)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             raise ValueError("not a regular file")
+        truncated = st.st_size > MAX_BYTES
         with os.fdopen(fd, "rb", closefd=False) as f:
-            data = f.read(MAX_BYTES + 1)
+            if truncated:
+                f.seek(st.st_size - MAX_BYTES)
+            data = f.read(MAX_BYTES)
     finally:
         os.close(fd)
-    if len(data) > MAX_BYTES:
-        raise ValueError("file too large")
-    return data.decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace"), truncated
 
 
 def verdict(text):
     """Return (name, exit code, reason or None, findings)."""
-    findings, section, clean_statement, held = parse(text)
+    findings, section, clean_statement, held, has_final, stray = parse(text)
     if not text.strip():
         return "HELD", EXIT_HELD, "empty output", findings
+    if not has_final:
+        return "HELD", EXIT_HELD, "no final message", findings
     if held:
         return "HELD", EXIT_HELD, held[0], findings
     if findings:
         return "FINDINGS", EXIT_FINDINGS, None, findings
+    if section and clean_statement and stray:
+        return "HELD", EXIT_HELD, "severity mention outside a recognized finding heading", findings
     if section and clean_statement:
         return "CLEAN", EXIT_CLEAN, None, findings
     if not section:
@@ -133,19 +213,20 @@ def main(argv=None):
         print("usage: review_verdict.py REVIEW_FILE", file=sys.stderr)
         return EXIT_USAGE
     try:
-        text = read_review(argv[0])
+        text, truncated = read_review(argv[0])
     except (OSError, ValueError) as e:
         print(f"review_verdict: cannot read input: {type(e).__name__}", file=sys.stderr)
         return EXIT_USAGE
     name, code, reason, findings = verdict(text)
     counts = {s: sum(1 for f in findings if f[0] == s) for s in SEVERITIES}
     tally = " ".join(f"{s}={n}" for s, n in counts.items())
+    note = " [input truncated to its last 1 MiB; line numbers count from the cut]" if truncated else ""
     if name == "CLEAN":
-        print("VERDICT: CLEAN no Critical or High findings stated")
+        print(f"VERDICT: CLEAN no Critical or High findings stated{note}")
     elif name == "FINDINGS":
-        print(f"VERDICT: FINDINGS {tally} (unique {len(findings)})")
+        print(f"VERDICT: FINDINGS {tally} (unique {len(findings)}){note}")
     else:
-        print(f"VERDICT: HELD {reason} (never a clean review) {tally}")
+        print(f"VERDICT: HELD {reason} (never a clean review) {tally}{note}")
     if findings:
         print(f"{'SEVERITY':<9} {'LINE':>5}  TITLE")
         for sev, title, number in findings:

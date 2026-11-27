@@ -144,13 +144,169 @@ class Held(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+def real_shape(prompt, transcript, final, wrapper="exit=0 status=ok"):
+    """Synthetic output shaped like a real run: echoed prompt, transcript, final message twice around `tokens used`."""
+    return f"{prompt}\ncodex\nexec\n{transcript}\n{final}\ntokens used\n12,345\n{final}\n{wrapper}\n"
+
+
+MARKER_PROMPT = (
+    "Review this parser. If the scan did not start, or you see a flagged for possible cybersecurity risk cutoff,\n"
+    "or a hardware key error, or x is not a function, say so. Also mention terminal failure.\n"
+)
+
+
+class RealShape(unittest.TestCase):
+    def test_valid_review_whose_prompt_and_transcript_hold_marker_words_is_findings(self):
+        text = real_shape(
+            MARKER_PROMPT, "thinking: the tool is not a function here, did not start earlier", FINDINGS_BLOCK
+        )
+        code, out = run(text)
+        self.assertEqual(code, 1, out)
+        first = out.splitlines()[0]
+        self.assertIn("high=1", first)
+        self.assertIn("medium=1", first)
+        self.assertIn("low=1", first)
+
+    def test_valid_clean_review_with_marker_words_in_the_prompt_is_clean(self):
+        code, out = run(real_shape(MARKER_PROMPT, "commentary", CLEAN))
+        self.assertEqual(code, 0, out)
+
+    def test_duplicated_final_message_is_counted_once(self):
+        code, out = run(real_shape("prompt", "commentary", FINDINGS_BLOCK))
+        self.assertEqual(code, 1)
+        self.assertIn("(unique 3)", out)
+        rows = [ln for ln in out.splitlines() if "Synthetic widget" in ln]
+        self.assertEqual(len(rows), 1)
+
+    def test_held_review_whose_final_message_says_the_scan_could_not_start(self):
+        final = "The scan could not start, so the review stopped. No result."
+        code, out = run(real_shape("prompt", "commentary", final))
+        self.assertEqual(code, 3, out)
+        self.assertIn("failed to start", out)
+
+    def test_held_even_when_the_transcript_had_findings_headings_only(self):
+        final = "The scan could not start, so the review stopped."
+        code, _ = run(real_shape("prompt", FINDINGS_BLOCK, final))
+        self.assertEqual(code, 3)
+
+    def test_findings_in_transcript_only_fall_back_when_final_message_has_none(self):
+        code, out = run(real_shape("prompt", FINDINGS_BLOCK, "All done."))
+        self.assertEqual(code, 1, out)
+
+    def test_clean_statement_in_the_transcript_alone_is_not_clean(self):
+        code, _ = run(real_shape("prompt", CLEAN, "Done."))
+        self.assertEqual(code, 3)
+
+    def test_tokens_used_with_no_final_message_is_held(self):
+        code, out = run("prompt\ncodex\ntokens used\n12,345\nexit=0 status=ok\n")
+        self.assertEqual(code, 3)
+        self.assertIn("no final message", out)
+
+    def test_wrapper_marker_is_not_part_of_the_final_message(self):
+        code, out = run("prompt\ntokens used\n9\nexit=0 status=ok\n")
+        self.assertEqual(code, 3)
+        self.assertIn("no final message", out)
+
+    def test_markers_in_the_last_8_kib_fallback_without_tokens_line(self):
+        pad = "filler line of synthetic text\n" * 2000
+        code, _ = run("did not start\n" + pad + CLEAN)
+        self.assertEqual(code, 0)
+        code, _ = run(pad + CLEAN + "\nthe scan did not start\n")
+        self.assertEqual(code, 3)
+
+
+class CleanIsStrict(unittest.TestCase):
+    def test_no_high_alone_or_no_critical_alone_is_held(self):
+        for stmt in ("No High findings.", "No Critical findings.", "There are no high issues."):
+            with self.subTest(stmt=stmt):
+                code, _ = run(f"## Findings\n\n{stmt}\n")
+                self.assertEqual(code, 3)
+
+    def test_accepted_clean_phrasings(self):
+        for stmt in (
+            "No Critical or High findings.",
+            "No Critical and no High issues found.",
+            "no Critical, no High",
+            "No High or Critical findings were found in the synthetic parser.",
+            "No **Critical** or **High** findings.",
+        ):
+            with self.subTest(stmt=stmt):
+                code, out = run(f"## Findings\n\n{stmt}\n")
+                self.assertEqual(code, 0, out)
+
+    def test_high_in_a_table_row_with_a_no_critical_statement_is_held(self):
+        text = "## Findings\n\nNo Critical findings.\n\n| Severity | Title |\n| --- | --- |\n| High | Synthetic gap |\n"
+        code, _ = run(text)
+        self.assertEqual(code, 3)
+
+    def test_unrecognized_severity_positions_hold_a_clean_statement(self):
+        for line in (
+            "**High**: synthetic thing",
+            "[Critical] synthetic thing",
+            "Severity: High",
+            "- High: synthetic thing",
+            "1. Critical synthetic thing",
+            "| Critical | synthetic |",
+            "High — synthetic thing",
+        ):
+            with self.subTest(line=line):
+                code, out = run(f"{CLEAN}\n{line}\n")
+                self.assertEqual(code, 3, out)
+                self.assertIn("outside a recognized finding heading", out)
+
+    def test_plain_prose_with_the_word_high_stays_clean(self):
+        code, _ = run(CLEAN + "\nThe loader has a high degree of reuse. Critical path reviewed.\n")
+        self.assertEqual(code, 0)
+
+
+class HeadingVariants(unittest.TestCase):
+    def test_variants_are_findings(self):
+        for head in (
+            f"### **High** {DASH} Synthetic bold",
+            "### **High:** Synthetic bold colon",
+            "### [High] Synthetic bracket",
+            "### 1. High - Synthetic numbered",
+            "## 2) Medium – Synthetic en dash",
+            "#### Critical: Synthetic colon",
+            "### (Low) Synthetic paren",
+        ):
+            with self.subTest(head=head):
+                code, out = run(f"## Findings\n\nNo Critical or High findings.\n\n{head}\n")
+                self.assertEqual(code, 1, out)
+                self.assertIn("Synthetic", out)
+
+    def test_bold_heading_high_is_findings_with_a_clean_looking_statement(self):
+        code, out = run(CLEAN + f"\n### **High** {DASH} Synthetic late\n")
+        self.assertEqual(code, 1)
+        self.assertIn("high=1", out)
+
+    def test_a_bare_heading_that_only_starts_with_a_severity_word_is_not_a_finding(self):
+        code, out = run(CLEAN + "\n### High level overview\n")
+        self.assertEqual(code, 0, out)
+
+
+class LargeFile(unittest.TestCase):
+    def test_file_over_the_cap_is_read_from_its_end_and_noted(self):
+        pad = ("synthetic transcript line\n" * 60000)[: rv.MAX_BYTES + 5000]
+        text = "did not start\n" + pad + "\ntokens used\n9\n" + FINDINGS_BLOCK
+        self.assertGreater(len(text.encode()), rv.MAX_BYTES)
+        code, out = run(text)
+        self.assertEqual(code, 1, out)
+        self.assertIn("truncated", out.splitlines()[0])
+        self.assertIn("high=1", out.splitlines()[0])
+
+    def test_small_file_has_no_truncation_note(self):
+        _, out = run(FINDINGS_BLOCK)
+        self.assertNotIn("truncated", out)
+
+
 class Unreadable(unittest.TestCase):
     def test_missing_file(self):
         with tempfile.TemporaryDirectory() as d:
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(rv.main([str(Path(d) / "nope")]), 2)
 
-    def test_directory_symlink_fifo_and_oversize(self):
+    def test_directory_symlink_fifo_and_unreadable_oversize_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             real = d / "real.txt"
@@ -163,7 +319,7 @@ class Unreadable(unittest.TestCase):
                 self.assertEqual(rv.main([str(d)]), 2)
                 self.assertEqual(rv.main([str(d / "link.txt")]), 2)
                 self.assertEqual(rv.main([str(d / "fifo")]), 2)
-                self.assertEqual(rv.main([str(big)]), 2)
+                self.assertEqual(rv.main([str(big)]), 3)
                 self.assertEqual(rv.main([str(real)]), 0)
 
     def test_usage_errors_exit_2(self):
