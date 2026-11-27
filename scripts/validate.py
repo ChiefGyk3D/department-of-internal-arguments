@@ -46,6 +46,7 @@ RUNNERS = {
     "devops-engineer",
     "cybersecurity-blue",
     "grc-analyst",
+    "linux-sysadmin",
 }  # all must be able to run commands
 
 # Built from pieces so this file does not trip the sweep it implements. Word-bounded so a
@@ -289,6 +290,48 @@ GRC_ANALYST_SECTIONS = (
     "RISKS:",
     "EXCEPTIONS:",
     "AUDIT TRAIL:",
+    "SECRETS:",
+    "HANDOFFS:",
+    "OPEN:",
+)
+# The linux-sysadmin's rules and report sections (issue #91); a rule that silently disappears from the role
+# must fail the gate. Phrases are exact text from roles/linux-sysadmin.md.
+LINUX_SYSADMIN_RULES = {
+    "load linux-platform": "Load the `linux-platform` pack for every task.",
+    "read the system first": "Read the system before you plan.",
+    "diagnose before change": "Diagnose before you change.",
+    "name the distribution family": "Name the distribution family.",
+    "packages simulate first": "Packages: simulate first.",
+    "kernel keep previous": "keep the running kernel and the previous one installed",
+    "systemd drop-in": "change a unit with a drop-in, not by editing the vendor's file.",
+    "udev local rules": "put local rules in the local rules directory",
+    "firewall check first": "Firewall: check the ruleset for validity before it is applied.",
+    "firewall timed rollback": "without a timed rollback",
+    "stable device identifiers": "name every device by a stable identifier",
+    "backups need a restore test": "a backup that has not been restored is unproven.",
+    "complete plan": "Every plan is complete or it is not ready",
+    "rollback before change": "Write the rollback before the change.",
+    "done means observed": "Done means observed.",
+    "sources not memory": "Sources, not memory.",
+    "read-only by default": "**Read-only by default.**",
+    "privileged commands are the maintainer's": "Privileged and state-changing commands are the maintainer's to run.",
+    "denial is not permission": "A denied command or hook is not permission",
+    "no edit hands code off": "You have no edit capability.",
+    "adversarial review handoff": "also goes to the `adversarial-reviewer`",
+    "will not do": "## What you will not do",
+    "no privileged command": "Run a privileged or state-changing command yourself.",
+    "approval of the exact plan": "without the maintainer's approval of the exact plan",
+    "no backup claim": "Say a backup is good without a restore test.",
+}
+LINUX_SYSADMIN_SECTIONS = (
+    "TASK:",
+    "SYSTEM:",
+    "DIAGNOSIS:",
+    "PLAN:",
+    "BLAST RADIUS:",
+    "ROLLBACK:",
+    "COMMANDS:",
+    "POST-CHANGE CHECKS:",
     "SECRETS:",
     "HANDOFFS:",
     "OPEN:",
@@ -696,6 +739,16 @@ def role_errors(r):
             require(phrase in r["body"], f"grc-analyst lacks the {rule} rule ({phrase!r})")
         for section in GRC_ANALYST_SECTIONS:
             require(section in r["body"], f"grc-analyst report lacks {section}")
+    if n == "linux-sysadmin":
+        require(r.get("tier") == "standard", "linux-sysadmin must be tier standard")
+        require(
+            not {"edit", "web"} & set(tools or []),
+            "linux-sysadmin is read-only on the repository: no edit or web capability",
+        )
+        for rule, phrase in LINUX_SYSADMIN_RULES.items():
+            require(phrase in r["body"], f"linux-sysadmin lacks the {rule} rule ({phrase!r})")
+        for section in LINUX_SYSADMIN_SECTIONS:
+            require(section in r["body"], f"linux-sysadmin report lacks {section}")
     if n in ORG_ROLE_RULES:
         require(r.get("tier") == "standard", f"{n} must be tier standard")
         banned = {"edit", "web", "shell"} if n in ORG_ROLE_NO_SHELL else {"edit", "web"}
@@ -853,7 +906,7 @@ def validate(root=ROOT):
 
     try:
         roles = load_roles(root)
-        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the twelve roles")
+        require({r["name"] for r in roles} == set(ROLE_NAMES), "roles/ must hold exactly the thirteen roles")
         for r in roles:
             errors.extend(role_errors(r))
         require({r["name"]: r["tier"] for r in roles}.get("transcriber") == "cheap", "transcriber must be tier cheap")

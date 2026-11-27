@@ -463,7 +463,7 @@ class RoleFileTrim(unittest.TestCase):
 
     def test_role_files_carry_no_lead_addressed_routing_text(self):
         files = self.agent_files()
-        self.assertEqual(len(files), 36)
+        self.assertEqual(len(files), 39)
         for f in files:
             text = f.read_text(encoding="utf-8")
             for needle in self.LEAD_ONLY:
@@ -562,7 +562,7 @@ class ReportContract(unittest.TestCase):
 
     def test_every_role_file_has_the_contract_once_and_no_old_sentence(self):
         files = self.files()
-        self.assertEqual(len(files), 36)
+        self.assertEqual(len(files), 39)
         for f in files:
             text = f.read_text(encoding="utf-8")
             self.assertEqual(text.count("**Report contract.**"), 1, f.name)
