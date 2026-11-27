@@ -1,35 +1,58 @@
 """Build a clean review export from a git ref, and the next-round prompt for a review.
 
-export: `git archive` of a ref into a new empty directory, agent and instruction files removed, plus CHANGE.diff
-(the diff against a base ref). Refuses before writing anything: a non-empty output directory, an output path
-inside the repository, a symlink that escapes the export, a kept file over the size cap. Prints a manifest.
+export: the tree of a ref, read with `git ls-tree` so no .gitattributes rule applies, into a new empty
+directory, agent and instruction files removed (case-insensitive), plus CHANGE.diff (the diff against a base
+ref). Refuses before writing anything: a non-empty output directory, an output path inside the repository, a
+symlink that escapes the export or passes through another symlink, a kept file over the size cap. A failure
+while writing removes what was written. Prints a manifest.
 
 next-prompt: appends a fixed header and the previous round's findings file to a base prompt file. The base prompt
 is copied byte for byte; no tier, model or flag is read, written or named. Standard library only; it runs git
 and nothing else."""
 
 import argparse
-import io
-import posixpath
+import os
+import shutil
 import subprocess
 import sys
-import tarfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+# Agent and instruction files. Names without a slash match at any depth; all matching is case-insensitive.
+# Editor settings are kept unless they are agent files: `.vscode/mcp.json` goes, `.vscode/settings.json` and `.idea`
+# stay (editor state, not agent instructions); `.zed` goes (its settings carry the assistant's rules and servers).
 DEFAULT_STRIP = (
     ".codex",
     ".agents",
     ".claude",
     ".cursor",
-    ".windsurf",
-    ".gemini",
-    ".github/agents",
-    ".github/copilot-instructions.md",
     ".cursorrules",
+    ".windsurf",
     ".windsurfrules",
+    ".gemini",
+    ".clinerules",
+    ".roo",
+    ".roomodes",
+    ".aider*",
+    ".continue",
+    ".zed",
+    ".junie",
+    ".aiassistant",
+    ".kiro",
+    ".amazonq",
+    ".goosehints",
+    ".mcp.json",
+    ".vscode/mcp.json",
+    ".github/agents",
+    ".github/chatmodes",
+    ".github/instructions",
+    ".github/prompts",
+    ".github/copilot-instructions.md",
+    "AGENT.md",
     "AGENTS.md",
+    "AGENTS.override.md",
     "CLAUDE.md",
+    "CLAUDE.local.md",
     "GEMINI.md",
 )
 DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -70,9 +93,11 @@ def _resolve_ref(repo, ref):
 
 def _stripped(path, patterns):
     """True when path (posix, relative) is a pattern, lies under one, or has a component matching a
-    slash-free pattern."""
+    slash-free pattern. Case-insensitive."""
+    path = path.casefold()
     parts = path.split("/")
     for pat in patterns:
+        pat = pat.casefold()
         if "/" in pat:
             if path == pat or path.startswith(pat + "/"):
                 return True
@@ -85,9 +110,9 @@ def _exclude_specs(patterns):
     specs = []
     for pat in patterns:
         if "/" in pat:
-            specs += [f":(exclude,glob){pat}", f":(exclude,glob){pat}/**"]
+            specs += [f":(exclude,top,glob,icase){pat}", f":(exclude,top,glob,icase){pat}/**"]
         else:
-            specs += [f":(exclude,glob)**/{pat}", f":(exclude,glob)**/{pat}/**"]
+            specs += [f":(exclude,top,glob,icase)**/{pat}", f":(exclude,top,glob,icase)**/{pat}/**"]
     return specs
 
 
@@ -104,78 +129,137 @@ def _check_out(repo, out):
     return out
 
 
-def _escapes(member_name, target):
-    if target.startswith("/") or "\\" in target:
-        return True
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(member_name), target))
-    return resolved == ".." or resolved.startswith("../") or resolved.startswith("/")
+def _link_problem(name, target, links):
+    """Why the symlink `name` -> `target` is not allowed, or None. Resolved against the kept links: a target
+    that passes through another symlink, climbs out of the tree or is absolute is refused, so a chain of links
+    cannot leave the export however the parts compose."""
+    if not target or target.startswith("/") or "\\" in target or "\0" in target:
+        return "escapes the export"
+    cur = name.split("/")[:-1]
+    comps = [c for c in target.split("/") if c not in ("", ".")]
+    for i, comp in enumerate(comps):
+        if comp == "..":
+            if not cur:
+                return "escapes the export"
+            cur.pop()
+            continue
+        cur.append(comp)
+        if i < len(comps) - 1 and "/".join(cur).casefold() in links:
+            return "passes through another symlink"
+    return None
+
+
+def _verify_links(out, links):
+    """After writing: every created link must resolve to a place under the output directory."""
+    root = os.path.realpath(out)
+    for rel in links:
+        real = os.path.realpath(os.path.join(out, rel))
+        if real != root and not real.startswith(root + os.sep):
+            raise Refused(f"symlink {rel} resolves outside the export")
+
+
+def _tree(repo, head):
+    """(mode, sha, size, path) for every blob in the tree. Built from the tree itself, so no .gitattributes
+    rule (export-ignore, export-subst, eol, filters) is applied."""
+    raw = _git(repo, "ls-tree", "-r", "-z", "-l", "--full-tree", head, binary=True)
+    rows = []
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        meta, _, path = rec.partition(b"\t")
+        mode, kind, sha, size = meta.decode("ascii").split()
+        rows.append((mode, kind, sha, size, os.fsdecode(path)))
+    return rows
+
+
+def _cleanup(out, existed):
+    if not existed:
+        shutil.rmtree(out, ignore_errors=True)
+        return
+    for child in out.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def export(repo, ref, out, base=None, paths=(), strip=DEFAULT_STRIP, max_file_bytes=DEFAULT_MAX_FILE_BYTES):
-    """Write the export and return {"files": n, "bytes": n}. Raises Refused before writing on any problem."""
+    """Write the export and return {"files": n, "bytes": n}. Raises Refused before writing on any problem;
+    a failure while writing removes what was written."""
     repo = Path(repo)
     out = _check_out(repo, out)
     head = _resolve_ref(repo, ref)
     base_sha = _resolve_ref(repo, base) if base else None
     strip = tuple(strip)
 
-    archive = _git(repo, "archive", "--format=tar", head, binary=True)
     diff = b""
     if base_sha:
-        specs = [*paths, *_exclude_specs(strip)] if paths else [".", *_exclude_specs(strip)]
+        specs = [f":(top,literal){p}" for p in paths] or [":(top)"]
+        # --text: the diff shows content whatever a -diff or binary attribute says; no renames, no drivers
         diff = _git(
-            repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", base_sha, head, "--", *specs, binary=True
+            repo,
+            *("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--text"),
+            base_sha,
+            head,
+            "--",
+            *specs,
+            *_exclude_specs(strip),
+            binary=True,
         )
         if len(diff) > max_file_bytes:
             raise Refused(f"{DIFF_NAME} is {len(diff)} bytes, over the size cap of {max_file_bytes}")
 
     keep = []
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tf:
-        for m in tf.getmembers():
-            name = m.name.rstrip("/")
-            if not name or name == "pax_global_header":
-                continue
-            if name.startswith("/") or ".." in name.split("/"):
-                raise Refused(f"unsafe path {name!r} in archive")
-            if _stripped(name, strip):
-                continue
-            if m.isdir():
-                keep.append((m, None))
-            elif m.isfile():
-                if m.size > max_file_bytes:
-                    raise Refused(f"{name} is {m.size} bytes, over the size cap of {max_file_bytes}")
-                if name == DIFF_NAME and base_sha:
-                    raise Refused(f"the repository already has a file named {DIFF_NAME}")
-                keep.append((m, tf.extractfile(m).read()))
-            elif m.issym():
-                if _escapes(name, m.linkname):
-                    raise Refused(f"symlink {name} -> {m.linkname} escapes the export")
-                keep.append((m, None))
-            else:
-                raise Refused(f"{name} is a special file (hard link or device); not exported")
+    for mode, kind, sha, size, name in _tree(repo, head):
+        if name.startswith("/") or ".." in name.split("/"):
+            raise Refused(f"unsafe path {name!r} in the tree")
+        if _stripped(name, strip):
+            continue
+        if kind != "blob" or mode not in ("100644", "100755", "120000"):
+            raise Refused(f"{name} is a submodule or special entry; not exported")
+        if int(size) > max_file_bytes:
+            raise Refused(f"{name} is {size} bytes, over the size cap of {max_file_bytes}")
+        if name == DIFF_NAME and base_sha:
+            raise Refused(f"the repository already has a file named {DIFF_NAME}")
+        keep.append((mode, sha, name))
 
-    out.mkdir(parents=True, exist_ok=True)
+    links = {name.casefold() for mode, _, name in keep if mode == "120000"}
+    blobs = {}
+    for mode, sha, name in keep:
+        data = _git(repo, "cat-file", "blob", sha, binary=True)
+        blobs[name] = data
+        if mode == "120000":
+            target = os.fsdecode(data)
+            problem = _link_problem(name, target, links)
+            if problem:
+                raise Refused(f"symlink {name} -> {target} {problem}")
+
+    existed = out.exists()
     files = total = 0
-    for m, data in keep:
-        name = m.name.rstrip("/")
-        dest = out / name
-        if m.isdir():
-            dest.mkdir(parents=True, exist_ok=True)
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if m.issym():
-            dest.symlink_to(m.linkname)
+    made = []
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        for mode, _, name in keep:
+            dest = out / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            data = blobs[name]
+            if mode == "120000":
+                dest.symlink_to(os.fsdecode(data))
+                made.append(name)
+            else:
+                dest.write_bytes(data)
+                dest.chmod(0o755 if mode == "100755" else 0o644)
+                total += len(data)
             files += 1
-            continue
-        dest.write_bytes(data)
-        dest.chmod(0o755 if m.mode & 0o111 else 0o644)
-        files += 1
-        total += len(data)
-    if base_sha:
-        with (out / DIFF_NAME).open("xb") as f:
-            f.write(diff)
-        files += 1
-        total += len(diff)
+        if base_sha:
+            with (out / DIFF_NAME).open("xb") as f:
+                f.write(diff)
+            files += 1
+            total += len(diff)
+        _verify_links(out, made)
+    except BaseException:
+        _cleanup(out, existed)
+        raise
     return {"files": files, "bytes": total}
 
 

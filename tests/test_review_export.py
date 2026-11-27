@@ -179,6 +179,135 @@ class Refusals(Base):
         self.assertIn("CHANGE.diff", self.refused(self.repo, head, self.out, base=self.base))
 
 
+class Hardening(Base):
+    """Issue #138 security review: link composition, case, denylist breadth, attributes."""
+
+    def refused(self, head):
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out)
+        return str(cm.exception)
+
+    def test_link_through_an_earlier_link_that_leaves_the_export_is_refused(self):
+        # a/b/c -> ../.. is the root; x -> a/b/c/.. looks inside lexically but is the parent of the root
+        (self.repo / "a" / "b").mkdir(parents=True)
+        os.symlink("../..", self.repo / "a" / "b" / "c")
+        os.symlink("a/b/c/..", self.repo / "x")
+        head = commit(self.repo, "composed")
+        self.assertIn("symlink", self.refused(head))
+        self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_link_that_passes_through_another_link_is_refused_even_when_it_stays_inside(self):
+        os.symlink("src", self.repo / "d")
+        os.symlink("d/app.py", self.repo / "e")
+        head = commit(self.repo, "through")
+        self.assertIn("passes through", self.refused(head))
+
+    def test_link_to_a_link_target_is_allowed(self):
+        os.symlink("app.py", self.repo / "src" / "l1")
+        os.symlink("l1", self.repo / "src" / "l2")
+        head = commit(self.repo, "chain")
+        rx.export(self.repo, head, self.out)
+        self.assertTrue((self.out / "src" / "l2").is_symlink())
+
+    def test_final_link_check_failure_removes_everything_written(self):
+        real = rx._verify_links
+
+        def boom(out, links):
+            raise rx.Refused("simulated escape")
+
+        rx._verify_links = boom
+        self.addCleanup(setattr, rx, "_verify_links", real)
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, self.head, self.out)
+        self.assertFalse(self.out.exists())
+        self.out.mkdir()
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, self.head, self.out)
+        self.assertTrue(self.out.is_dir())
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_verify_links_catches_a_link_that_resolves_outside(self):
+        out = self.tmp / "v"
+        out.mkdir()
+        os.symlink("../repo", out / "bad")
+        with self.assertRaises(rx.Refused):
+            rx._verify_links(out, ["bad"])
+        os.unlink(out / "bad")
+        (out / "f").write_text("x")
+        os.symlink("f", out / "ok")
+        rx._verify_links(out, ["ok"])
+
+    def test_strip_matching_ignores_case(self):
+        write(self.repo, "Agents.md", "a\n")
+        write(self.repo, "docs/CLAUDE.MD", "a\n")
+        write(self.repo, ".Claude/x.md", "a\n")
+        write(self.repo, ".GitHub/Agents/y.md", "a\n")
+        head = commit(self.repo, "cases")
+        rx.export(self.repo, head, self.out, base=self.base)
+        got = self.files(self.out)
+        self.assertEqual(got, ["CHANGE.diff", "README.md", "src/app.py", "src/other.py"])
+        diff = (self.out / "CHANGE.diff").read_text().lower()
+        for leaked in ("agents", "claude"):
+            self.assertNotIn(leaked, diff)
+
+    def test_default_denylist_covers_the_known_agent_files(self):
+        names = [
+            ".mcp.json",
+            "CLAUDE.local.md",
+            ".vscode/mcp.json",
+            ".github/instructions/a.md",
+            ".github/prompts/a.md",
+            ".github/chatmodes/a.md",
+            ".clinerules",
+            ".roo/rules.md",
+            ".aider.conf.yml",
+            ".aiderignore",
+            ".continue/config.json",
+            ".zed/settings.json",
+            ".junie/guidelines.md",
+            ".kiro/steering.md",
+            ".amazonq/rules.md",
+            "AGENT.md",
+            "AGENTS.override.md",
+            "deep/er/GEMINI.md",
+        ]
+        for n in names:
+            write(self.repo, n)
+        write(self.repo, ".vscode/settings.json", "{}\n")  # editor settings, not agent files: kept
+        head = commit(self.repo, "denylist")
+        rx.export(self.repo, head, self.out)
+        got = self.files(self.out)
+        self.assertEqual(got, [".vscode/settings.json", "README.md", "src/app.py", "src/other.py"])
+
+    def test_export_ignores_gitattributes_and_agrees_with_the_diff(self):
+        write(self.repo, ".gitattributes", "src/other.py export-ignore\nsrc/sub.py export-subst\nsrc/bin.dat -diff\n")
+        write(self.repo, "src/sub.py", "v = '$Format:%H$'\n")
+        write(self.repo, "src/bin.dat", "line\n")
+        head = commit(self.repo, "attrs")
+        rx.export(self.repo, head, self.out, base=self.base)
+        self.assertTrue((self.out / "src/other.py").is_file())  # export-ignore not applied
+        self.assertEqual((self.out / "src/sub.py").read_text(), "v = '$Format:%H$'\n")  # no substitution
+        diff = (self.out / "CHANGE.diff").read_text()
+        for f in ("src/other.py", "src/sub.py"):
+            self.assertIn(f, diff)
+        self.assertIn("+line", diff)  # the -diff attribute does not hide the content
+        self.assertIn("$Format:%H$", diff)
+
+    def test_modes_are_kept_from_the_tree(self):
+        write(self.repo, "run.sh", "#!/bin/sh\n")
+        os.chmod(self.repo / "run.sh", 0o755)
+        head = commit(self.repo, "exec")
+        rx.export(self.repo, head, self.out)
+        self.assertTrue(os.access(self.out / "run.sh", os.X_OK))
+        self.assertFalse(os.access(self.out / "README.md", os.X_OK))
+
+    def test_odd_names_round_trip(self):
+        write(self.repo, "sp ace/newé.txt", "n\n")
+        head = commit(self.repo, "names")
+        rx.export(self.repo, head, self.out)
+        self.assertIn("sp ace/newé.txt", self.files(self.out))
+
+
 class NextPrompt(unittest.TestCase):
     BASE = "Review src/app.py at <head> against <base>.\n\n  Keep  my   spacing.\n"
     FIND = "F1 High: input x breaks y\nF2 Low: typo\n"
