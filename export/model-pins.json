@@ -27,6 +27,7 @@
     "devops-engineer": "standard",
     "grc-analyst": "standard",
     "implementer": "standard",
+    "linux-sysadmin": "standard",
     "planner": "standard",
     "researcher": "standard",
     "reviewer": "standard",
@@ -53,6 +54,7 @@
         "devops-engineer",
         "grc-analyst",
         "implementer",
+        "linux-sysadmin",
         "planner",
         "researcher",
         "reviewer"

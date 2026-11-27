@@ -88,6 +88,7 @@ class Content(unittest.TestCase):
                 "devops-engineer",
                 "grc-analyst",
                 "implementer",
+                "linux-sysadmin",
                 "planner",
                 "researcher",
                 "reviewer",

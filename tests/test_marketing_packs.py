@@ -176,8 +176,8 @@ BRITISH = re.compile(r"\b(?:behaviour|colour|authoris\w*|defence|organis\w*|reco
 # The owner-approved wording (owner answer 2026-11-25, "Approve as written"), applied verbatim.
 APPROVED = {
     "README.md": [
-        "This repository defines twelve roles and thirty-one packs for AI coding assistants. The five newest packs are "
-        "marketing and advertising pilots with predicted effects and measurement targets."
+        "This repository defines thirteen roles and thirty-one packs for AI coding assistants. "
+        "The five newest packs are marketing and advertising pilots with predicted effects and measurement targets."
     ],
     "docs/what-and-why.md": [
         "Organizations need more than coding work. Marketing and advertising also require records, evidence, and "
@@ -347,12 +347,13 @@ class Registry(unittest.TestCase):
     def test_no_new_role(self):
         from lib import ROLE_NAMES
 
-        twelve = {
+        thirteen = {
             "reviewer", "adversarial-reviewer", "implementer", "transcriber", "researcher",
-            "cloud-engineer", "devops-engineer", "cybersecurity-blue", "grc-analyst", "analyst", "assessor", "planner",
+            "cloud-engineer", "devops-engineer", "cybersecurity-blue", "grc-analyst", "linux-sysadmin",
+            "analyst", "assessor", "planner",
         }  # fmt: skip
-        self.assertEqual(set(ROLE_NAMES), twelve)
-        self.assertEqual({p.stem for p in (ROOT / "roles").glob("*.md")} - {"README"}, twelve)
+        self.assertEqual(set(ROLE_NAMES), thirteen)
+        self.assertEqual({p.stem for p in (ROOT / "roles").glob("*.md")} - {"README"}, thirteen)
 
     def test_generated_outputs_exist(self):
         for p in PACKS:

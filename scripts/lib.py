@@ -25,6 +25,7 @@ ROLE_NAMES = (
     "devops-engineer",
     "cybersecurity-blue",
     "grc-analyst",
+    "linux-sysadmin",
     "analyst",
     "assessor",
     "planner",
