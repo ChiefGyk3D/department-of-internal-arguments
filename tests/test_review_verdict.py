@@ -275,7 +275,7 @@ class CleanIsStrict(unittest.TestCase):
             with self.subTest(line=line):
                 code, out = run(f"{CLEAN}\n{line}\n")
                 self.assertEqual(code, 3, out)
-                self.assertIn("outside a recognized finding heading", out)
+                self.assertRegex(out, "outside a recognized finding heading|after the clean statement")
 
     def test_plain_prose_with_the_word_high_stays_clean(self):
         code, _ = run(CLEAN + "\nThe loader has a high degree of reuse. Critical path reviewed.\n")
@@ -304,7 +304,7 @@ class HeadingVariants(unittest.TestCase):
         self.assertIn("high=1", out)
 
     def test_a_bare_heading_that_only_starts_with_a_severity_word_is_not_a_finding(self):
-        code, out = run(CLEAN + "\n### High level overview\n")
+        code, out = run("## Findings\n\n### High level overview\n\nNo Critical or High findings.\n")
         self.assertEqual(code, 0, out)
 
 
@@ -321,6 +321,97 @@ class LargeFile(unittest.TestCase):
     def test_small_file_has_no_truncation_note(self):
         _, out = run(FINDINGS_BLOCK)
         self.assertNotIn("truncated", out)
+
+
+class NeverStartedWording(unittest.TestCase):
+    def test_variants_hold_a_clean_statement(self):
+        for phrase in (
+            "the scan never started",
+            "the scan has not started",
+            "the scan was not started",
+            "the scan never got started",
+            "the scan did not run",
+            "the scan could not run",
+            "the scan never ran",
+            "the scan failed to run",
+            "unable to start the scan",
+            "the scan couldn't start",
+        ):
+            with self.subTest(phrase=phrase):
+                code, out = run(f"{CLEAN}\n{phrase}\n")
+                self.assertEqual(code, 3, out)
+                self.assertIn("failed to start", out)
+
+    def test_variant_beside_findings_is_a_note(self):
+        code, out = run(FINDINGS_BLOCK + "\nThe scan never started.\n")
+        self.assertEqual(code, 1)
+        self.assertIn("note:", out.splitlines()[0])
+
+
+class CleanOnlyAfterTheHeading(unittest.TestCase):
+    def test_statement_before_the_findings_heading_is_not_clean(self):
+        code, out = run("No Critical or High findings.\n\n## Findings\n\nLooked around.\n")
+        self.assertEqual(code, 3)
+        self.assertIn("without a no-Critical-or-High statement", out)
+
+    def test_a_later_heading_after_the_clean_block_is_held(self):
+        code, out = run(CLEAN + "\n## More\n\nAnything at all.\n")
+        self.assertEqual(code, 3, out)
+        self.assertIn("after the clean statement", out)
+
+    def test_a_later_finding_heading_after_the_clean_block_is_not_clean(self):
+        code, _ = run(CLEAN + f"\n### Medium {DASH} Synthetic late\n")
+        self.assertEqual(code, 1)
+
+    def test_later_severity_mentions_are_held(self):
+        for tail in ("High", "**Critical** thing", "Severity: Critical", "high severity gap", "- High: x", "| High |"):
+            with self.subTest(tail=tail):
+                code, out = run(f"{CLEAN}\n{tail}\n")
+                self.assertEqual(code, 3, out)
+
+    def test_truncated_final_block_with_an_open_code_fence_is_held(self):
+        code, out = run(CLEAN + "\n```\nstack trace cut off here\n")
+        self.assertEqual(code, 3, out)
+        self.assertIn("truncated", out)
+
+    def test_balanced_fence_and_plain_text_after_clean_stay_clean(self):
+        code, out = run(CLEAN + "\nNot covered: the synthetic installer.\n```\nok\n```\n")
+        self.assertEqual(code, 0, out)
+
+    def test_a_clean_block_then_a_second_clean_statement_is_still_clean(self):
+        code, _ = run(CLEAN + "\nNo Critical or High findings, confirmed.\n")
+        self.assertEqual(code, 0)
+
+
+class PathComponents(unittest.TestCase):
+    def test_symlinked_parent_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "real").mkdir()
+            (d / "real" / "r.txt").write_text(CLEAN)
+            (d / "link").symlink_to(d / "real")
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rv.main([str(d / "link" / "r.txt")]), 2)
+                self.assertEqual(rv.main([str(d / "real" / "r.txt")]), 0)
+
+    def test_dotdot_components_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "sub").mkdir()
+            (d / "r.txt").write_text(CLEAN)
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rv.main([str(d / "sub" / ".." / "r.txt")]), 2)
+
+    def test_relative_path_in_a_real_directory_works(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "r.txt").write_text(CLEAN)
+            old = os.getcwd()
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(rv.main(["r.txt"]), 0)
+            finally:
+                os.chdir(old)
 
 
 class Unreadable(unittest.TestCase):

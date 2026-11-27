@@ -17,7 +17,8 @@ cutoff, authentication or failed-scan marker is also present); a clean statement
 
 Only the final message is judged for HELD markers, the findings section and the clean statement: the text after the
 last `tokens used` line and its count line, up to a wrapper marker line (`exit=N status=ok`); without a `tokens used`
-line, the last 8 KiB. The echoed prompt and the transcript never decide the verdict. Findings come from the final
+line, the last 8 KiB. A clean statement counts only after the findings heading, with no later heading, finding,
+severity mention or unclosed code fence (a cut-off block). A symlink or `..` in any path component is refused. The echoed prompt and the transcript never decide the verdict. Findings come from the final
 message first and from the whole file only when it has none. No final message is HELD.
 
 The input is read as untrusted data: one regular file, no symlink, invalid UTF-8 replaced, at most the last 1 MiB read
@@ -62,6 +63,7 @@ CLEAN_RE = re.compile(
 # `severity: high`, a table cell, a list item or a line that begins with the word and a separator.
 SEVERITY_MENTION_RE = re.compile(
     r"(?:\*\*|__)[ \t]*(?:critical|high)\b|\[[ \t]*(?:critical|high)[ \t]*\]"
+    r"|^[ \t>#*_]*(?:critical|high)[ \t*_:.]*$|\b(?:critical|high)[ \t]+severity\b|\bseverity[ \t]+(?:critical|high)\b"
     r"|severity[ \t]*[:=][ \t]*\W{0,4}(?:critical|high)\b"
     r"|\|[ \t]*\W{0,4}(?:critical|high)\W{0,4}[ \t]*\|"
     r"|^[ \t>]*(?:[-*+]|\d+[.)])[ \t]+\W{0,4}(?:critical|high)\b"
@@ -82,7 +84,10 @@ HELD_PATTERNS = (
         "scan or tool failed to start",
         re.compile(
             r"did[ \t]+not[ \t]+start|could[ \t]+not[ \t]+start|failed[ \t]+to[ \t]+start|terminal[ \t]+failure"
-            r"|is[ \t]+not[ \t]+a[ \t]+function",
+            r"|is[ \t]+not[ \t]+a[ \t]+function"
+            r"|never[ \t]+(?:got[ \t]+)?started|(?:has|have|was|were|is|are)[ \t]+not[ \t]+(?:been[ \t]+)?started"
+            r"|(?:did|could)(?:[ \t]+not|n't)[ \t]+(?:run|start)\b|never[ \t]+ran\b"
+            r"|(?:failed|unable)[ \t]+to[ \t]+(?:run|start)\b",
             re.I,
         ),
     ),
@@ -152,27 +157,69 @@ def parse_findings(text, offset=0):
     return findings
 
 
+HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]")
+
+
+def clean_block(lines):
+    """Return (clean statement present after the findings heading, reason the text after it is not trusted or None).
+    A statement before the heading does not count. After the statement, a heading, a finding or severity mention, or an
+    unclosed code fence (a cut-off final block) means the review is not a clean block."""
+    start = next((i for i, ln in enumerate(lines) if finding_match(ln) or SECTION_RE.match(ln)), None)
+    if start is None:
+        return False, None
+    said = next((i for i in range(start + 1, len(lines)) if CLEAN_RE.search(lines[i])), None)
+    if said is None:
+        return False, None
+    tail = lines[said + 1 :]
+    if sum(1 for ln in tail if ln.lstrip().startswith(("```", "~~~"))) % 2:
+        return True, "truncated final block (unclosed code fence)"
+    if any(HEADING_RE.match(ln) or finding_match(ln) or SEVERITY_MENTION_RE.search(ln) for ln in tail):
+        return True, "content after the clean statement could be a finding"
+    return True, None
+
+
 def parse(text):
-    """Return (findings, section, clean_statement, held, has_final, stray, seg_has_findings). Findings come from the
+    """Return (findings, section, clean, held, has_final, stray, seg_has_findings, tail_bad). Findings come from the
     final-message segment, and from the whole file only when the segment has none; the section, the clean statement
     and the held markers are judged in the segment only."""
     offset, seg = final_segment(text)
     seg_findings = parse_findings(seg, offset)
     findings = seg_findings or parse_findings(text)
     section = any(finding_match(ln) or SECTION_RE.match(ln) for ln in seg.splitlines())
-    clean_statement = any(CLEAN_RE.search(ln) for ln in seg.splitlines())
+    clean_statement, tail_bad = clean_block(seg.splitlines())
     held = [reason for reason, pat in HELD_PATTERNS if pat.search(seg)]
     stray = any(
         SEVERITY_MENTION_RE.search(ln) and not finding_match(ln) and not CLEAN_RE.search(ln) for ln in seg.splitlines()
     )
-    return findings, section, clean_statement, held, bool(seg.strip()), stray, bool(seg_findings)
+    return findings, section, clean_statement, held, bool(seg.strip()), stray, bool(seg_findings), tail_bad
+
+
+def open_no_symlinks(path):
+    """Open a file by walking its absolute path one component at a time with O_NOFOLLOW (and O_DIRECTORY for the
+    parents), so a symlink in ANY component is refused, not only the last. `..` components are refused too: the check
+    is about the path as given. A review file is local and trusted-shaped; a path through a symlink is an error."""
+    parts = os.path.abspath(os.fspath(path)).split(os.sep)
+    if ".." in os.fspath(path).split(os.sep):
+        raise ValueError("dot-dot component")
+    names = [p for p in parts if p]
+    if not names:
+        raise ValueError("not a file path")
+    base = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    dir_fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | base)
+    try:
+        for name in names[:-1]:
+            nxt = os.open(name, os.O_RDONLY | os.O_DIRECTORY | base, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = nxt
+        return os.open(names[-1], os.O_RDONLY | os.O_NONBLOCK | base, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def read_review(path):
-    """Read one regular, non-symlink file; a file over MAX_BYTES is read from its last MAX_BYTES (the final message
-    is at the end). Returns (text, truncated). Raises OSError or ValueError otherwise."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(path, flags)
+    """Read one regular file, no symlink in any path component; a file over MAX_BYTES is read from its last MAX_BYTES
+    (the final message is at the end). Returns (text, truncated). Raises OSError or ValueError otherwise."""
+    fd = open_no_symlinks(path)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -189,7 +236,7 @@ def read_review(path):
 
 def verdict(text):
     """Return (name, exit code, reason or None, findings)."""
-    findings, section, clean_statement, held, has_final, stray, seg_has_findings = parse(text)
+    findings, section, clean_statement, held, has_final, stray, seg_has_findings, tail_bad = parse(text)
     if not text.strip():
         return "HELD", EXIT_HELD, "empty output", findings
     if not has_final:
@@ -201,6 +248,8 @@ def verdict(text):
         return "HELD", EXIT_HELD, held[0], findings
     if findings:
         return "FINDINGS", EXIT_FINDINGS, None, findings
+    if section and clean_statement and tail_bad:
+        return "HELD", EXIT_HELD, tail_bad, findings
     if section and clean_statement and stray:
         return "HELD", EXIT_HELD, "severity mention outside a recognized finding heading", findings
     if section and clean_statement:
