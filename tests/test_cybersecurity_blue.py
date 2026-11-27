@@ -117,7 +117,7 @@ class RoleFile(unittest.TestCase):
         pages = ["NIST SP 800-61", "Wazuh rules", "Wazuh Active Response", "Wazuh configuration assessment", "CIS"]
         marks = [facts.index(n) for n in pages]
         self.assertEqual(marks, sorted(marks))
-        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)]):
+        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)], strict=True):
             with self.subTest(name):
                 self.assertRegex(facts[lo:hi], r"\bpage\b")
                 self.assertRegex(facts[lo:hi], r"\b(?:VERIFIED|INFERRED)\b")

@@ -81,10 +81,13 @@ class Content(unittest.TestCase):
             data["tiers"]["standard"]["roles"],
             [
                 "adversarial-reviewer",
+                "analyst",
+                "assessor",
                 "cloud-engineer",
                 "cybersecurity-blue",
                 "devops-engineer",
                 "implementer",
+                "planner",
                 "researcher",
                 "reviewer",
             ],
