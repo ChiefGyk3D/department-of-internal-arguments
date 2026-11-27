@@ -15,7 +15,10 @@ is copied byte for byte; no tier, model or flag is read, written or named. Stand
 and nothing else."""
 
 import argparse
+import hashlib
+import json
 import os
+import secrets
 import stat
 import subprocess
 import sys
@@ -65,6 +68,7 @@ DEFAULT_MAX_FILES = 20000
 DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_LINK_TARGET = 4096
 DIFF_NAME = "CHANGE.diff"
+MARKER_NAME = ".EXPORT-COMPLETE.json"
 
 # Allowlist of path shapes. A component may hold ASCII letters, digits and `._-+@` only (`+` for names such as
 # c++, `@` for scoped package directories; `=` and `,` are not needed and stay out). A leading dot is allowed only
@@ -144,11 +148,11 @@ def _git_capped(repo, *args, cap):
 
 def _resolve_ref(repo, ref):
     if not ref or ref.startswith("-"):
-        raise Refused(f"unknown ref {ref!r}")
+        raise Refused(f"unknown ref {_q(ref)}")
     try:
         return _git(repo, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").strip()
     except Refused as exc:
-        raise Refused(f"unknown ref {ref!r}") from exc
+        raise Refused(f"unknown ref {_q(ref)}") from exc
 
 
 def _key(p):
@@ -185,60 +189,27 @@ def _fold(name):
     return "".join(c for c in _skeleton(name) if c.isascii() and c.isalnum())
 
 
-# Non-ASCII characters are kept only from an explicit short list of scripts, found by Unicode name (the standard
-# library has no script property). Everything else (Cyrillic, Greek, Lisu, Cherokee, Coptic, Armenian,
-# mathematical and enclosed alphanumerics, fullwidth and halfwidth forms, ...) is refused, so no lookalike table
-# has to be complete. ASCII letters count as Latin.
-_SCRIPT_PREFIXES = (
-    ("LATIN", "LATIN"),
-    ("CJK UNIFIED IDEOGRAPH", "HAN"),
-    ("HIRAGANA", "HIRAGANA"),
-    ("KATAKANA", "KATAKANA"),
-    ("HANGUL", "HANGUL"),
-)
-_JAPANESE = frozenset({"HAN", "HIRAGANA", "KATAKANA"})
+# With the non-ASCII opt-in, only Latin is kept: every non-ASCII character must be a precomposed letter that
+# decomposes (NFD) to ONE ASCII letter plus at most two combining marks from U+0300-U+036F. No Han, kana, Hangul,
+# Cyrillic, Greek or any other script, no variation selector, no other combining mark, no format or unassigned
+# code point. This closes the class of script-classification and invisible-letter bypasses; repositories with
+# names in other scripts use --exclude-tree for those paths or rename them.
+MAX_MARKS = 2
 
 
-def _char_script(ch):
-    name = unicodedata.name(ch, "")
-    for prefix, script in _SCRIPT_PREFIXES:
-        if name.startswith(prefix):
-            return script
-    return None
-
-
-def _script_problem(c):
-    """With the non-ASCII opt-in. Every non-ASCII character is a combining mark or a letter of an allowed script:
-    Latin (only an ASCII letter plus marks, so é and ñ but not ı or ɑ), Han, Hiragana, Katakana, Hangul. One
-    script per component, except Han, Hiragana and Katakana together (Japanese). A component in a non-Latin script
-    holds no ASCII letter, apart from an ASCII alphanumeric extension after the last dot (`文書.md`)."""
-    scripts = set()
-    for ch in c:
-        if ch.isascii():
-            continue
-        if unicodedata.category(ch) in ("Mn", "Mc"):
-            continue
-        if not unicodedata.category(ch).startswith("L"):
-            return f"has the character U+{ord(ch):04X}, which is not a letter of an allowed script"
-        script = _char_script(ch)
-        if script is None:
-            return f"has the character U+{ord(ch):04X}, from a script outside the allowed ones"
-        if script == "LATIN":
-            decomposed = unicodedata.normalize("NFD", ch)
-            if not (decomposed[0].isascii() and decomposed[0].isalpha()):
-                return "has a Latin letter that is not an accented ASCII letter"
-        scripts.add(script)
-    other = scripts - {"LATIN"}
-    if not other:
+def _latin_problem(ch):
+    """Why the non-ASCII character `ch` is not an accented ASCII letter, or None."""
+    decomposed = unicodedata.normalize("NFD", ch)
+    marks = decomposed[1:]
+    if (
+        unicodedata.category(ch).startswith("L")
+        and decomposed[0].isascii()
+        and decomposed[0].isalpha()
+        and 0 < len(marks) <= MAX_MARKS
+        and all(0x0300 <= ord(m) <= 0x036F and unicodedata.category(m) == "Mn" for m in marks)
+    ):
         return None
-    if "LATIN" in scripts or not (other <= _JAPANESE or other == {"HANGUL"}):
-        return "mixes scripts in one component"
-    stem, dot, ext = c.rpartition(".")
-    if not dot or not (ext.isascii() and ext.isalnum() and len(ext) <= 10):
-        stem = c
-    if any(ch.isascii() and ch.isalpha() for ch in stem):
-        return "mixes scripts in one component"
-    return None
+    return f"has the character U+{ord(ch):04X}, which is not an accented ASCII letter"
 
 
 def _shape_problem(name, allow_nonascii=False, dot_allow=DEFAULT_DOT_ALLOW):
@@ -258,19 +229,16 @@ def _shape_problem(name, allow_nonascii=False, dot_allow=DEFAULT_DOT_ALLOW):
             return "has a component with `:` (stream or drive syntax)"
         if c.endswith("."):
             return "has a component ending in a dot"
+        if allow_nonascii and not c.isascii() and unicodedata.normalize("NFC", c) != c:
+            return "has a component that is not in NFC"
         for ch in c:
             if ch in SAFE_ASCII:
                 continue
             if ord(ch) < 128:
                 return f"has the character {ch!r}, outside the allowlist"
             if not allow_nonascii:
-                return "has a non-ASCII character; use --allow-nonascii-paths to permit letters"
-            if unicodedata.category(ch)[0] not in ("L", "M", "N"):
-                return f"has the character U+{ord(ch):04X}, which is not a letter, mark or digit"
-        if allow_nonascii and not c.isascii():
-            if unicodedata.normalize("NFC", c) != c:
-                return "has a component that is not in NFC"
-            problem = _script_problem(c)
+                return "has a non-ASCII character; --allow-nonascii-paths permits accented Latin letters only"
+            problem = _latin_problem(ch)
             if problem:
                 return problem
         if c.startswith(".") and _key(c) not in dots:
@@ -300,12 +268,12 @@ def _check_out(repo, out):
     top = Path(_git(repo, "rev-parse", "--show-toplevel").strip()).resolve()
     out = Path(out).expanduser().resolve()
     if out == top or top in out.parents:
-        raise Refused(f"output path {out} is inside the repository")
+        raise Refused(f"output path {_q(str(out))} is inside the repository")
     if out.exists():
         if not out.is_dir():
-            raise Refused(f"output path {out} is not a directory")
+            raise Refused(f"output path {_q(str(out))} is not a directory")
         if any(out.iterdir()):
-            raise Refused(f"output directory {out} is not empty")
+            raise Refused(f"output directory {_q(str(out))} is not empty")
     return out
 
 
@@ -326,6 +294,33 @@ def _link_problem(name, target, links):
         cur.append(comp)
         if i < len(comps) - 1 and _key("/".join(cur)) in links:
             return "passes through another symlink"
+    return None
+
+
+def _target_problem(name, target, strip, allow_nonascii, dot_allow, trees):
+    """The symlink target is text that a reader or a tool will follow, so it gets the same decisions as a path:
+    resolved lexically against the link's directory, every prefix of the result is checked against the strip list,
+    the excluded trees, the disguise checks and the shape allowlist (a dangling target included). Returns a reason
+    or None."""
+    cur = name.split("/")[:-1]
+    for comp in (c for c in target.split("/") if c not in ("", ".")):
+        if comp == "..":
+            if not cur:
+                return "escapes the export"
+            cur.pop()
+            continue
+        cur.append(comp)
+        path = "/".join(cur)
+        if (
+            _stripped(path, strip)
+            or _excluded(path, trees)
+            or _disguised(path, strip)
+            or _reduced_hit(path.split("/"), strip)
+        ):
+            return "points at a stripped, excluded or disguised path"
+        problem = _shape_problem(path, allow_nonascii, dot_allow)
+        if problem:
+            return f"has a target that {problem}"
     return None
 
 
@@ -389,10 +384,11 @@ def _rollback(root_fd, journal):
                 fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
                 fds.append(fd)
                 st = os.fstat(fd)
-                if (st.st_dev, st.st_ino) != journal.get("/".join(parts[: i + 1])):
+                entry = journal.get("/".join(parts[: i + 1]))
+                if entry is None or (st.st_dev, st.st_ino) != entry[:2]:
                     raise OSError("parent is not the directory that was created")
             st = os.lstat(parts[-1], dir_fd=fd)
-            if (st.st_dev, st.st_ino) != journal[rel]:
+            if (st.st_dev, st.st_ino) != journal[rel][:2]:
                 raise OSError("entry is not the one that was created")
             if stat.S_ISDIR(st.st_mode):
                 os.rmdir(parts[-1], dir_fd=fd)
@@ -481,7 +477,9 @@ def _excluded(name, trees):
     return any(name == t or name.startswith(t + "/") for t in trees)
 
 
-def _classify(rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shape, exclude_trees=()):
+def _classify(
+    rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shape, exclude_trees=(), allow_symlinks=False
+):
     """Split tree rows into (kept, dropped names). Dropped = stripped agent files and excluded trees (neither is
     shape-checked). With check_shape (the exported tree) any kept path outside the allowlist, a disguised agent
     name, a submodule or special entry or an oversized file refuses; without it (the base tree) only names are
@@ -501,6 +499,8 @@ def _classify(rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shap
                 raise Refused(f"path {_q(name)} is a disguised agent or instruction file name")
             if kind != "blob" or mode not in ("100644", "100755", "120000"):
                 raise Refused(f"{_q(name)} is a submodule or special entry; not exported")
+            if mode == "120000" and not allow_symlinks:
+                raise Refused(f"{_q(name)} is a symlink; symlinks are refused unless --allow-symlinks is given")
             if int(size) > max_file_bytes:
                 raise Refused(f"{_q(name)} is {size} bytes, over the size cap of {max_file_bytes}")
         elif _shape_problem(name, allow_nonascii, dot_allow) or _disguised(name, strip):
@@ -529,9 +529,9 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
-def _record(journal, rel, st):
+def _record(journal, rel, st, kind):
     if journal is not None:
-        journal[rel] = (st.st_dev, st.st_ino)
+        journal[rel] = (st.st_dev, st.st_ino, kind)
 
 
 def _open_parent(root_fd, parts, journal=None):
@@ -542,11 +542,11 @@ def _open_parent(root_fd, parts, journal=None):
     try:
         for i, comp in enumerate(parts):
             try:
-                os.mkdir(comp, 0o755, dir_fd=fd)
+                os.mkdir(comp, 0o700, dir_fd=fd)
             except FileExistsError:
                 pass
             else:
-                _record(journal, "/".join(parts[: i + 1]), os.lstat(comp, dir_fd=fd))
+                _record(journal, "/".join(parts[: i + 1]), os.lstat(comp, dir_fd=fd), "dir")
             fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
             fds.append(fd)
     except BaseException:
@@ -556,28 +556,136 @@ def _open_parent(root_fd, parts, journal=None):
     return fd, fds
 
 
-def _write_entry(root_fd, name, data, mode, journal=None):
-    """Create one file (O_EXCL, no symlink followed, mode set on the same descriptor) or one symlink, relative to
-    the output directory's descriptor. No path is resolved a second time after a check."""
+def _write_entry(root_fd, name, data, mode, journal=None, final=False):
+    """Create one file (O_EXCL, no symlink followed) or one symlink, relative to the staging directory's
+    descriptor. No path is resolved a second time after a check. Files are created mode 0600 (0700 when
+    executable) and get their final mode in `_finalize`, after the link count is verified; `final` sets it now."""
     *dirs, leaf = name.split("/")
     pfd, fds = _open_parent(root_fd, dirs, journal)
     try:
         if mode == "120000":
             os.symlink(os.fsdecode(data), leaf, dir_fd=pfd)
-            _record(journal, name, os.lstat(leaf, dir_fd=pfd))
+            _record(journal, name, os.lstat(leaf, dir_fd=pfd), "link")
             return
         fd = os.open(leaf, _FILE_FLAGS, 0o600, dir_fd=pfd)
         try:
-            _record(journal, name, os.fstat(fd))
+            _record(journal, name, os.fstat(fd), "exec" if mode == "100755" else "file")
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view) :]
-            os.fchmod(fd, 0o755 if mode == "100755" else 0o644)
+            if mode == "100755":
+                os.fchmod(fd, 0o700)
+            if final:
+                os.fchmod(fd, 0o755 if mode == "100755" else 0o644)
         finally:
             os.close(fd)
     finally:
         for f in fds:
             os.close(f)
+
+
+def _walk_to(root_fd, parts, journal):
+    """Open the directories along `parts` from the pinned root, no link followed, each checked against the journal
+    (a directory this export did not create, or that was swapped, raises OSError). Returns (fd, opened fds)."""
+    fds = []
+    fd = root_fd
+    try:
+        for i, comp in enumerate(parts):
+            fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
+            fds.append(fd)
+            st = os.fstat(fd)
+            entry = journal.get("/".join(parts[: i + 1]))
+            if entry is None or (st.st_dev, st.st_ino) != entry[:2]:
+                raise OSError("parent is not the directory that was created")
+    except BaseException:
+        for f in fds:
+            os.close(f)
+        raise
+    return fd, fds
+
+
+def _finalize(root_fd, journal):
+    """Just before publishing: every created file must still be the inode that was created and have exactly one
+    link (a hard link made elsewhere while it was written refuses), then files and directories get their final
+    modes. Everything is by descriptor and checked against the journal."""
+    for rel in sorted(journal):
+        dev, ino, kind = journal[rel]
+        parts = rel.split("/")
+        try:
+            pfd, fds = _walk_to(root_fd, parts[:-1], journal)
+        except OSError as exc:
+            raise Refused(f"{_q(rel)} is not where it was created") from exc
+        try:
+            if kind == "link":
+                st = os.lstat(parts[-1], dir_fd=pfd)
+            elif kind == "dir":
+                continue
+            else:
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=pfd)
+                try:
+                    st = os.fstat(fd)
+                    if (st.st_dev, st.st_ino) == (dev, ino) and st.st_nlink == 1:
+                        os.fchmod(fd, 0o755 if kind == "exec" else 0o644)
+                finally:
+                    os.close(fd)
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                raise Refused(f"{_q(rel)} is not the file that was created")
+            if st.st_nlink != 1:
+                raise Refused(f"{_q(rel)} has more than one link")
+        finally:
+            for f in fds:
+                os.close(f)
+    for rel in sorted((r for r in journal if journal[r][2] == "dir"), key=lambda r: -r.count("/")):
+        parts = rel.split("/")
+        try:
+            fd, fds = _walk_to(root_fd, parts, journal)
+        except OSError as exc:
+            raise Refused(f"{_q(rel)} is not where it was created") from exc
+        try:
+            os.fchmod(fd, 0o755)
+        finally:
+            for f in fds:
+                os.close(f)
+    os.fchmod(root_fd, 0o755)
+
+
+def _manifest(journal, total, head, base_sha):
+    names = sorted(r for r in journal if journal[r][2] != "dir")
+    digest = hashlib.sha256(("\n".join(names) + "\n").encode("utf-8", "surrogateescape")).hexdigest()
+    body = {
+        "complete": True,
+        "files": len(names),
+        "bytes": total,
+        "file_list_sha256": digest,
+        "head": head,
+        "base": base_sha,
+    }
+    return (json.dumps(body, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _target_state(parent_fd, name):
+    """The requested output name must not exist, or be an empty directory (replaced atomically at the end)."""
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused(f"output path {_q(name)} exists and is not a directory")
+    fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        if os.listdir(fd):
+            raise Refused(f"output directory {_q(name)} is not empty")
+    finally:
+        os.close(fd)
+
+
+def _publish(parent_fd, staging_name, out_name):
+    """The last step: one atomic rename of the finished staging directory to the requested name (onto nothing, or
+    onto an empty directory). A reader never sees a partial tree under the requested name."""
+    try:
+        os.rename(staging_name, out_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except OSError as exc:
+        raise Refused(f"cannot publish the export: {exc.strerror or 'error'}") from exc
 
 
 def _pinned_path(fd, fallback):
@@ -612,9 +720,13 @@ def export(
     exclude_trees=(),
     max_files=DEFAULT_MAX_FILES,
     max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
+    allow_symlinks=False,
 ):
-    """Write the export and return {"files": n, "bytes": n}. Raises Refused before writing on any problem;
-    a failure while writing removes what was written."""
+    """Write the export and return {"files": n, "bytes": n}. The tree is built in a hidden staging directory
+    beside the requested output (same parent, random name, mode 0700), verified there, given a completion marker
+    as its last file, and published with one atomic rename to the requested name, which must not exist or must be
+    an empty directory (replaced). Raises Refused on any problem; a failure removes what was created in staging,
+    and the requested name is untouched. A killed process leaves only the hidden staging directory."""
     repo = Path(repo)
     out = _check_out(repo, out)
     head = _resolve_ref(repo, ref)
@@ -623,9 +735,13 @@ def export(
     dot_allow = tuple(dot_allow)
     trees = _clean_tree(exclude_trees)
 
-    keep, dropped = _classify(_tree(repo, head), strip, allow_nonascii, dot_allow, max_file_bytes, True, trees)
+    keep, dropped = _classify(
+        _tree(repo, head), strip, allow_nonascii, dot_allow, max_file_bytes, True, trees, allow_symlinks
+    )
     if base_sha and any(name == DIFF_NAME for _, _, name, _ in keep):
         raise Refused(f"the repository already has a file named {DIFF_NAME}")
+    if any(name == MARKER_NAME for _, _, name, _ in keep):
+        raise Refused(f"the repository already has a file named {MARKER_NAME}")
     if len(keep) > max_files:
         raise Refused(f"{len(keep)} files, over the file-count cap of {max_files}")
     planned = sum(size for *_, size in keep)
@@ -635,7 +751,7 @@ def export(
     diff = b""
     if base_sha:
         base_keep, base_dropped = _classify(
-            _tree(repo, base_sha), strip, allow_nonascii, dot_allow, max_file_bytes, False, trees
+            _tree(repo, base_sha), strip, allow_nonascii, dot_allow, max_file_bytes, False, trees, allow_symlinks
         )
         kept_names = {n for _, _, n, _ in keep} | {n for _, _, n, _ in base_keep}
         diff = _diff(repo, base_sha, head, paths, dropped + base_dropped, kept_names, max_file_bytes)
@@ -652,20 +768,26 @@ def export(
             raise Refused(f"symlink {_q(name)} has an over-long target")
         data = _git(repo, "cat-file", "blob", sha, binary=True)
         targets[name] = data
-        problem = _link_problem(name, os.fsdecode(data), links)
+        problem = _link_problem(name, os.fsdecode(data), links) or _target_problem(
+            name, os.fsdecode(data), strip, allow_nonascii, dot_allow, trees
+        )
         if problem:
             raise Refused(f"symlink {_q(name)} -> {_q(data)} {problem}")
 
-    existed = out.exists()
     files = total = 0
     made = []
     journal = {}
-    root_fd = None
+    parent_fd = root_fd = None
+    staging_name = f".{out.name[:60]}.staging-{secrets.token_hex(8)}"
+    staging_id = None
     try:
-        out.mkdir(parents=True, exist_ok=True)
-        root_fd = os.open(out, _DIR_FLAGS)  # pinned: every later step uses this descriptor, not the path
-        if os.listdir(root_fd):
-            raise Refused(f"output directory {_q(str(out))} is not empty")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        parent_fd = os.open(out.parent, _DIR_FLAGS)  # pinned parent: staging and the final rename go through it
+        _target_state(parent_fd, out.name)
+        os.mkdir(staging_name, 0o700, dir_fd=parent_fd)  # fails if the name exists: never reuse a directory
+        root_fd = os.open(staging_name, _DIR_FLAGS, dir_fd=parent_fd)
+        st = os.fstat(root_fd)
+        staging_id = (st.st_dev, st.st_ino)
         # regular files first, symlinks last; one blob in memory at a time, never over the per-file cap
         for want_link in (False, True):
             for mode, sha, name, size in keep:
@@ -686,26 +808,32 @@ def export(
             total += len(diff)
         _verify_links(_pinned_path(root_fd, out), made)
         _backstop(root_fd, {n for _, _, n, _ in keep} | ({DIFF_NAME} if base_sha else set()), strip)
-        here, pinned = os.stat(out, follow_symlinks=False), os.fstat(root_fd)
-        if (here.st_dev, here.st_ino) != (pinned.st_dev, pinned.st_ino):
-            raise Refused("the output path no longer names the directory that was written")
+        _finalize(root_fd, journal)
+        _write_entry(root_fd, MARKER_NAME, _manifest(journal, total, head, base_sha), "100644", journal, final=True)
+        os.fsync(root_fd)
+        _target_state(parent_fd, out.name)  # re-checked immediately before the atomic replace
+        _publish(parent_fd, staging_name, out.name)
+        staging_name = None
     except BaseException as exc:
         left = _rollback(root_fd, journal) if root_fd is not None else 0
-        if root_fd is not None and not existed and left == 0:
-            try:  # we created it and it is empty again; rmdir removes nothing else
-                here, pinned = os.stat(out, follow_symlinks=False), os.fstat(root_fd)
-                if (here.st_dev, here.st_ino) == (pinned.st_dev, pinned.st_ino):
-                    os.rmdir(out)
+        if root_fd is not None and left == 0:
+            try:  # the (now empty) staging directory, only if it is still the one that was created
+                here = os.stat(staging_name, dir_fd=parent_fd, follow_symlinks=False)
+                if (here.st_dev, here.st_ino) == staging_id:
+                    os.rmdir(staging_name, dir_fd=parent_fd)
+                    staging_name = None
             except OSError:
                 pass
         if isinstance(exc, OSError):
             exc = Refused(f"cannot write the export: {exc.strerror or 'error'}")
-        if left and isinstance(exc, Refused):
-            exc = Refused(f"{exc}; {left} entries were left in place in the output directory")
+        if isinstance(exc, Refused) and root_fd is not None and staging_name is not None:
+            exc = Refused(f"{exc}; {left} entries and the staging directory {_q(staging_name)} were left in place")
         raise exc from None
     finally:
         if root_fd is not None:
             os.close(root_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
     return {"files": files, "bytes": total}
 
 
@@ -723,7 +851,7 @@ def _read(path):
     try:
         return Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise Refused(f"cannot read {path}: {exc}") from exc
+        raise Refused(f"cannot read {_q(str(path))}: {_q(exc.strerror or type(exc).__name__, 60)}") from exc
 
 
 def main(argv=None):
@@ -749,6 +877,11 @@ def main(argv=None):
         default=[],
         help="drop this literal tree prefix from the export and from CHANGE.diff, unchecked; repeatable",
     )
+    e.add_argument(
+        "--allow-symlinks",
+        action="store_true",
+        help="keep symlinks; the link name and its target text go through the same shape and strip checks",
+    )
     e.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES)
     e.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
     e.add_argument("--max-total-bytes", type=int, default=DEFAULT_MAX_TOTAL_BYTES)
@@ -773,16 +906,19 @@ def main(argv=None):
                 a.exclude_tree,
                 a.max_files,
                 a.max_total_bytes,
+                a.allow_symlinks,
             )
-            print(f"export: {a.out}\nfiles: {m['files']}\nbytes: {m['bytes']}")
+            print(f"export: {_q(str(a.out), 200)}\nfiles: {m['files']}\nbytes: {m['bytes']}")
         else:
             text = next_prompt(_read(a.base_prompt), _read(a.findings))
             try:
                 with a.output.open("x", encoding="utf-8") as f:  # never overwrite
                     f.write(text)
             except OSError as exc:
-                raise Refused(f"cannot write {a.output}: {exc}") from exc
-            print(f"wrote {a.output} ({len(text)} characters)")
+                raise Refused(
+                    f"cannot write {_q(str(a.output))}: {_q(exc.strerror or type(exc).__name__, 60)}"
+                ) from exc
+            print(f"wrote {_q(str(a.output), 200)} ({len(text)} characters)")
     except Refused as exc:
         print(f"Export refused: {exc}", file=sys.stderr)
         return 1

@@ -1,10 +1,11 @@
 """scripts/review_export.py (issue #138): the clean review export and the next-round prompt, tested against real
 temporary git repositories, with one case per refusal."""
 
+import hashlib
 import inspect
 import io
+import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,7 +70,11 @@ class Base(unittest.TestCase):
         self.out = self.tmp / "out"
 
     def files(self, root):
-        return sorted(str(p.relative_to(root)) for p in Path(root).rglob("*") if p.is_file() or p.is_symlink())
+        return sorted(
+            str(p.relative_to(root))
+            for p in Path(root).rglob("*")
+            if (p.is_file() or p.is_symlink()) and p.name != rx.MARKER_NAME
+        )
 
 
 class Export(Base):
@@ -113,12 +118,21 @@ class Export(Base):
     def test_safe_symlink_inside_the_tree_is_kept(self):
         os.symlink("app.py", self.repo / "src" / "link.py")
         head = commit(self.repo, "link")
-        rx.export(self.repo, head, self.out)
+        rx.export(self.repo, head, self.out, allow_symlinks=True)
         self.assertTrue((self.out / "src/link.py").is_symlink())
+
+    def test_symlinks_are_refused_by_default(self):
+        os.symlink("app.py", self.repo / "src" / "link.py")
+        head = commit(self.repo, "link")
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out)
+        self.assertIn("--allow-symlinks", str(cm.exception))
+        self.assertFalse(self.out.exists())
 
 
 class Refusals(Base):
     def refused(self, *args, **kw):
+        kw.setdefault("allow_symlinks", True)
         with self.assertRaises(rx.Refused) as cm:
             rx.export(*args, **kw)
         return str(cm.exception)
@@ -188,7 +202,7 @@ class Hardening(Base):
 
     def refused(self, head):
         with self.assertRaises(rx.Refused) as cm:
-            rx.export(self.repo, head, self.out)
+            rx.export(self.repo, head, self.out, allow_symlinks=True)
         return str(cm.exception)
 
     def test_link_through_an_earlier_link_that_leaves_the_export_is_refused(self):
@@ -210,7 +224,7 @@ class Hardening(Base):
         os.symlink("app.py", self.repo / "src" / "l1")
         os.symlink("l1", self.repo / "src" / "l2")
         head = commit(self.repo, "chain")
-        rx.export(self.repo, head, self.out)
+        rx.export(self.repo, head, self.out, allow_symlinks=True)
         self.assertTrue((self.out / "src" / "l2").is_symlink())
 
     def test_final_link_check_failure_removes_everything_written(self):
@@ -360,25 +374,20 @@ class Hardening(Base):
         self.assertEqual(self.files(self.out), ["keep.md"])
 
     def test_symlinks_are_created_after_every_regular_file(self):
-        calls = []
-        real_link, real_chmod = os.symlink, os.fchmod
+        modes, real = [], rx._write_entry
 
-        def link(*a, **k):
-            calls.append("link")
-            return real_link(*a, **k)
+        def spy(root_fd, name, data, mode, *a, **k):
+            modes.append(mode)
+            return real(root_fd, name, data, mode, *a, **k)
 
-        def chmod(*a, **k):
-            calls.append("file")
-            return real_chmod(*a, **k)
-
-        os.symlink, os.fchmod = link, chmod
-        self.addCleanup(setattr, os, "symlink", real_link)
-        self.addCleanup(setattr, os, "fchmod", real_chmod)
-        real_link("app.py", self.repo / "aaa_link")
+        rx._write_entry = spy
+        self.addCleanup(setattr, rx, "_write_entry", real)
+        os.symlink("app.py", self.repo / "aaa_link")
         head = commit(self.repo, "link first alphabetically")
-        rx.export(self.repo, head, self.out)
-        self.assertIn("link", calls)
-        self.assertNotIn("file", calls[calls.index("link") :])
+        rx.export(self.repo, head, self.out, allow_symlinks=True)
+        self.assertIn("120000", modes)
+        first = modes.index("120000")
+        self.assertNotIn("100644", modes[first:-1])  # only the completion marker follows the links
 
     def test_modes_are_kept_from_the_tree(self):
         write(self.repo, "run.sh", "#!/bin/sh\n")
@@ -414,7 +423,7 @@ class Allowlist(Base):
     def test_zero_width_character_inside_an_agent_name_is_refused(self):
         name = "AGEN​TS.md"
         self.assertIn("non-ASCII", self.refuse([name]))
-        self.assertIn("not a letter", self.refuse([name], allow_nonascii=True))
+        self.assertIn("not an accented", self.refuse([name], allow_nonascii=True))
 
     def test_trailing_dot_and_trailing_space_are_refused(self):
         for name in ("AGENTS.md.", "AGENTS.md ", "CLAUDE.md.", "sub/GEMINI.md. "):
@@ -438,12 +447,12 @@ class Allowlist(Base):
     def test_cyrillic_lookalike_is_refused_by_default_and_when_mixed_with_latin(self):
         name = "АGENTS.md"  # Cyrillic A, then Latin
         self.assertIn("non-ASCII", self.refuse([name]))
-        self.assertIn("outside the allowed", self.refuse([name], allow_nonascii=True))
+        self.assertIn("not an accented ASCII letter", self.refuse([name], allow_nonascii=True))
 
     def test_fullwidth_agent_name_is_refused_and_with_opt_in_caught_on_disk(self):
         name = "ＡＧＥＮＴＳ.md"  # fullwidth AGENTS.md
         self.assertIn("non-ASCII", self.refuse([name]))
-        self.assertIn("outside the allowed", self.refuse([name], allow_nonascii=True))
+        self.assertIn("not an accented ASCII letter", self.refuse([name], allow_nonascii=True))
 
     def test_opt_in_keeps_nfc_and_refuses_nfd(self):
         self.assertIn("NFC", self.refuse([NFD + ".txt"], allow_nonascii=True))
@@ -577,9 +586,12 @@ class Round2(Base):
         self.outside = self.tmp / "outside"
         self.outside.mkdir()
 
+    def staging_dirs(self):
+        return sorted(p.name for p in self.tmp.iterdir() if p.name.startswith(".out.staging-"))
+
     def raced(self, plant):
-        """Export into a pre-existing empty directory; `plant(dir_fd, leaf)` runs after each parent directory is
-        opened and before the file is created, as an attacker with write access to the output directory would."""
+        """Export into a pre-existing empty directory; `plant(dir_fd, leaf)` runs after each staging parent
+        directory is opened and before the file is created, as an attacker racing the export would."""
         self.out.mkdir()
         real = rx._open_parent
 
@@ -594,9 +606,7 @@ class Round2(Base):
         with self.assertRaises(rx.Refused):
             rx.export(self.repo, self.head, self.out)
         self.assertEqual(self.victim.read_text(), "precious", "nothing was written through the planted entry")
-        # only the planted entries remain: rollback removes what this export created, never what it did not
-        for leaf in os.listdir(self.out):
-            self.assertEqual(os.stat(self.out / leaf).st_ino, self.victim.stat().st_ino)
+        self.assertEqual(os.listdir(self.out), [], "the requested directory was never touched")
 
     def test_final_component_symlink_swap_is_not_followed(self):
         def plant(pfd, leaf):
@@ -648,8 +658,9 @@ class Round2(Base):
             rx.export(self.repo, self.head, self.out)
         self.assertIn("not empty", str(cm.exception))
         self.assertEqual(os.listdir(self.out), ["mine.txt"])
+        self.assertEqual(self.staging_dirs(), [])
 
-    def test_output_directory_swapped_for_a_symlink_is_refused_and_not_walked(self):
+    def test_output_path_swapped_for_a_symlink_is_refused_and_not_walked(self):
         (self.outside / "theirs.txt").write_text("theirs")
         real = rx._check_out
 
@@ -663,14 +674,167 @@ class Round2(Base):
         with self.assertRaises(rx.Refused):
             rx.export(self.repo, self.head, self.out)
         self.assertEqual(os.listdir(self.outside), ["theirs.txt"])
+        self.assertEqual(self.staging_dirs(), [])
+
+    # staging, atomic publish, completion marker
+
+    def plant_before_publish(self, plant):
+        real = rx._publish
+
+        def late(parent_fd, staging_name, out_name):
+            plant()
+            return real(parent_fd, staging_name, out_name)
+
+        rx._publish = late
+        self.addCleanup(setattr, rx, "_publish", real)
+
+    def test_output_that_fills_between_the_last_check_and_the_rename_is_refused(self):
+        self.out.mkdir()
+        self.plant_before_publish(lambda: (self.out / "mine.txt").write_text("keep me"))
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, self.head, self.out)
+        self.assertIn("cannot publish", str(cm.exception))
+        self.assertEqual(os.listdir(self.out), ["mine.txt"])
+        self.assertEqual(self.staging_dirs(), [], "staging was rolled back")
+
+    def test_output_swapped_for_a_symlink_at_the_last_moment_is_refused(self):
+        self.plant_before_publish(lambda: os.symlink(self.outside, self.out))
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, self.head, self.out)
+        self.assertEqual(os.listdir(self.outside), [])
+        self.assertEqual(self.staging_dirs(), [])
+
+    def test_the_requested_name_appears_only_complete_and_with_the_marker(self):
+        seen = []
+        real = rx._publish
+
+        def spy(parent_fd, staging_name, out_name):
+            seen.append(("before", self.out.exists(), (self.tmp / staging_name / rx.MARKER_NAME).is_file()))
+            real(parent_fd, staging_name, out_name)
+            seen.append(("after", self.out.exists(), (self.out / rx.MARKER_NAME).is_file()))
+
+        rx._publish = spy
+        self.addCleanup(setattr, rx, "_publish", real)
+        m = rx.export(self.repo, self.head, self.out, base=self.base)
+        self.assertEqual(seen, [("before", False, True), ("after", True, True)])
+        self.assertEqual(self.staging_dirs(), [])
+        body = json.loads((self.out / rx.MARKER_NAME).read_text())
+        names = sorted(self.files(self.out))
+        self.assertEqual(body["files"], m["files"])
+        self.assertEqual(body["files"], len(names))
+        self.assertEqual(body["bytes"], m["bytes"])
+        self.assertTrue(body["complete"])
+        self.assertEqual(body["file_list_sha256"], hashlib.sha256(("\n".join(names) + "\n").encode()).hexdigest())
+        self.assertEqual(body["head"], self.head)
+
+    def test_the_marker_is_the_last_thing_written_and_a_pre_existing_empty_directory_is_replaced(self):
+        self.out.mkdir()
+        order, real = [], rx._write_entry
+
+        def spy(root_fd, name, data, mode, *a, **k):
+            order.append(name)
+            return real(root_fd, name, data, mode, *a, **k)
+
+        rx._write_entry = spy
+        self.addCleanup(setattr, rx, "_write_entry", real)
+        rx.export(self.repo, self.head, self.out)
+        self.assertEqual(order[-1], rx.MARKER_NAME)
+        self.assertEqual(order.count(rx.MARKER_NAME), 1)
+        self.assertTrue((self.out / rx.MARKER_NAME).is_file())
+
+    def test_a_repository_file_named_like_the_marker_is_refused(self):
+        head = self._tree_with([(rx.MARKER_NAME, "file", "x")])
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.out, dot_allow=(rx.MARKER_NAME,))
+
+    def test_a_killed_exporter_leaves_nothing_under_the_requested_name(self):
+        code = (
+            "import os, signal, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import review_export as rx\n"
+            "real, n = rx._write_entry, [0]\n"
+            "def w(*a, **k):\n"
+            "    n[0] += 1\n"
+            "    if n[0] == 3:\n"
+            "        os.kill(os.getpid(), signal.SIGKILL)\n"
+            "    return real(*a, **k)\n"
+            "rx._write_entry = w\n"
+            "rx.export(sys.argv[2], sys.argv[3], sys.argv[4])\n"
+        )
+        for pre_existing in (False, True):
+            with self.subTest(pre_existing=pre_existing):
+                out = self.tmp / ("pre" if pre_existing else "new")
+                if pre_existing:
+                    out.mkdir()
+                res = subprocess.run(
+                    [sys.executable, "-I", "-c", code, str(ROOT / "scripts"), str(self.repo), self.head, str(out)],
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(res.returncode, -9)
+                if pre_existing:
+                    self.assertEqual(os.listdir(out), [])
+                else:
+                    self.assertFalse(out.exists(), "a partial export is never published")
+                partial = [p for p in self.tmp.iterdir() if p.name.startswith(f".{out.name}.staging-")]
+                self.assertEqual(len(partial), 1)
+                self.assertFalse((partial[0] / rx.MARKER_NAME).exists(), "no marker: a reader treats it as partial")
+                self.assertTrue(any(partial[0].iterdir()))
+
+    def test_files_are_private_in_staging_and_get_their_modes_at_the_end(self):
+        write(self.repo, "run.sh", "#!/bin/sh\n")
+        os.chmod(self.repo / "run.sh", 0o755)
+        head = commit(self.repo, "exec")
+        seen, real = {}, rx._backstop
+
+        def spy(fd, expected, strip):
+            root = Path(rx._pinned_path(fd, None))
+            for rel in ("README.md", "run.sh", "src", "."):
+                seen[rel] = (root / rel).stat().st_mode & 0o777
+            return real(fd, expected, strip)
+
+        rx._backstop = spy
+        self.addCleanup(setattr, rx, "_backstop", real)
+        rx.export(self.repo, head, self.out)
+        self.assertEqual(seen, {"README.md": 0o600, "run.sh": 0o700, "src": 0o700, ".": 0o700})
+
+        def mode(rel):
+            return (self.out / rel).stat().st_mode & 0o777
+
+        self.assertEqual((mode("README.md"), mode("run.sh"), mode("src"), mode(".")), (0o644, 0o755, 0o755, 0o755))
+        self.assertEqual(mode(rx.MARKER_NAME), 0o644)
+
+    def test_a_file_hard_linked_elsewhere_while_it_was_written_is_refused(self):
+        real = rx._write_entry
+        stolen = self.outside / "stolen.txt"
+
+        def spy(root_fd, name, data, mode, *a, **k):
+            result = real(root_fd, name, data, mode, *a, **k)
+            if name == "README.md":
+                os.link(Path(rx._pinned_path(root_fd, None)) / name, stolen)  # a link made after the file exists
+            return result
+
+        rx._write_entry = spy
+        self.addCleanup(setattr, rx, "_write_entry", real)
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, self.head, self.out)
+        self.assertIn("more than one link", str(cm.exception))
+        self.assertFalse(self.out.exists())
+
+    # rollback by descriptor
 
     def fail_after_swap(self, replace):
-        """Make the on-disk check fail after the output path was renamed away and `replace()` put something else
-        under its name, as an attacker who can rename entries in the parent directory would."""
+        """Make the on-disk check fail after the staging directory was renamed away and `replace(path)` put
+        something else under its name, as an attacker who can rename entries in the parent directory would."""
+        holder = {}
 
         def swap_then_fail(fd, expected, strip):
-            os.rename(self.out, str(self.out) + ".moved")
-            replace()
+            staging = Path(rx._pinned_path(fd, None))
+            holder["staging"] = staging
+            moved = Path(str(staging) + ".moved")
+            os.rename(staging, moved)
+            holder["moved"] = moved
+            replace(staging)
             raise rx.Refused("simulated late failure")
 
         real = rx._backstop
@@ -678,69 +842,58 @@ class Round2(Base):
         self.addCleanup(setattr, rx, "_backstop", real)
         with self.assertRaises(rx.Refused) as cm:
             rx.export(self.repo, self.head, self.out)
-        return str(cm.exception)
+        return str(cm.exception), holder
 
     def test_rollback_never_deletes_in_a_substituted_ordinary_directory(self):
         victim = self.tmp / "victim"
         victim.mkdir()
         (victim / "precious.txt").write_text("precious")
-        for pre in (True, False):
-            with self.subTest(preexisting=pre):
-                if self.out.exists():
-                    shutil.rmtree(self.out)
-                if pre:
-                    self.out.mkdir()
-                msg = self.fail_after_swap(lambda: os.rename(victim, self.out))
-                self.assertEqual((self.out / "precious.txt").read_text(), "precious")
-                self.assertEqual([p.name for p in self.out.iterdir()], ["precious.txt"])
-                self.assertEqual(msg, "simulated late failure")
-                os.rename(self.out, victim)
-                shutil.rmtree(str(self.out) + ".moved")
+        msg, h = self.fail_after_swap(lambda staging: os.rename(victim, staging))
+        self.assertEqual([p.name for p in h["staging"].iterdir()], ["precious.txt"])
+        self.assertEqual((h["staging"] / "precious.txt").read_text(), "precious")
+        self.assertTrue(msg.startswith("simulated late failure"))
+        self.assertEqual(os.listdir(h["moved"]), [], "the pinned directory was emptied through its descriptor")
 
-    def test_rollback_never_walks_an_output_path_swapped_for_a_symlink(self):
+    def test_rollback_never_walks_a_staging_path_swapped_for_a_symlink(self):
         (self.outside / "theirs.txt").write_text("theirs")
-        self.out.mkdir()
-        self.fail_after_swap(lambda: os.symlink(self.outside, self.out))
+        self.fail_after_swap(lambda staging: os.symlink(self.outside, staging))
         self.assertEqual(os.listdir(self.outside), ["theirs.txt"])
 
-    def test_rollback_removes_what_was_created_through_the_pinned_directory(self):
-        self.fail_after_swap(lambda: None)
-        self.assertEqual(os.listdir(str(self.out) + ".moved"), [], "the pinned directory was emptied, not the path")
+    def test_rollback_removes_the_staging_directory_it_created(self):
+        def boom(*a):
+            raise rx.Refused("boom")
+
+        real = rx._backstop
+        rx._backstop = boom
+        self.addCleanup(setattr, rx, "_backstop", real)
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, self.head, self.out)
+        self.assertEqual(self.staging_dirs(), [])
+        self.assertFalse(self.out.exists())
 
     def test_rollback_leaves_replaced_and_planted_entries_and_says_so(self):
-        def tamper():
-            moved = Path(str(self.out) + ".moved")
+        def tamper(staging):
+            moved = Path(str(staging) + ".moved")
             (moved / "planted.txt").write_text("not ours")
             os.unlink(moved / "README.md")
             (moved / "README.md").write_text("a different file")
 
-        msg = self.fail_after_swap(tamper)
+        msg, h = self.fail_after_swap(tamper)
         self.assertIn("left in place", msg)
-        self.assertEqual(sorted(os.listdir(str(self.out) + ".moved")), ["README.md", "planted.txt"])
+        self.assertEqual(sorted(os.listdir(h["moved"])), ["README.md", "planted.txt"])
 
     def test_rollback_leaves_entries_under_a_substituted_subdirectory(self):
-        def tamper():
-            moved = Path(str(self.out) + ".moved")
+        def tamper(staging):
+            moved = Path(str(staging) + ".moved")
             os.rename(moved / "src", moved / "src.orig")
             (moved / "src").mkdir()
             os.link(moved / "src.orig" / "app.py", moved / "src" / "app.py")  # same inode, wrong directory
 
-        msg = self.fail_after_swap(tamper)
+        msg, h = self.fail_after_swap(tamper)
         self.assertIn("left in place", msg)
-        self.assertTrue((Path(str(self.out) + ".moved") / "src" / "app.py").exists())
+        self.assertTrue((h["moved"] / "src" / "app.py").exists())
 
-    def test_a_final_path_swap_refuses_a_completed_export(self):
-        def swap(fd, expected, strip):
-            os.rename(self.out, str(self.out) + ".moved")
-            self.out.mkdir()
-
-        real = rx._backstop
-        rx._backstop = swap
-        self.addCleanup(setattr, rx, "_backstop", real)
-        with self.assertRaises(rx.Refused) as cm:
-            rx.export(self.repo, self.head, self.out)
-        self.assertIn("no longer names", str(cm.exception))
-        self.assertEqual(os.listdir(self.out), [])
+    # Latin-only non-ASCII policy
 
     def refuse_opt_in(self, name):
         head = self._tree_with([(name, "file", "x"), ("keep.txt", "file", "x")])
@@ -751,63 +904,261 @@ class Round2(Base):
 
     def test_opt_in_refuses_replacement_disguises(self):
         for name, why in (
-            ("GEMıNı.md", "not an accented ASCII letter"),  # dotless i, Latin script
-            ("ꓮGENTS.md", "outside the allowed"),  # Lisu letter A
+            ("GEMıNı.md", "not an accented ASCII letter"),  # dotless i
+            ("ꓮGENTS.md", "not an accented ASCII letter"),  # Lisu letter A
             ("ÀGENTS.md", "disguised"),  # accented A: the skeleton is agents.md
             ("À-GENTS.md", "disguised"),  # skeleton plus punctuation reduces to agentsmd
         ):
             with self.subTest(name=name):
                 self.assertIn(why, self.refuse_opt_in(name))
 
-    def test_opt_in_keeps_an_ordinary_accented_name(self):
-        head = self._tree_with([(NFC + ".txt", "file", "x")])
+    def test_opt_in_keeps_accented_latin_names(self):
+        names = ["café.txt", "naïve/ÅÉ.md", "ǖ.txt", "Ấ.md", "ệ.md"]  # two marks
+        head = self._tree_with([(n, "file", "x") for n in names])
         rx.export(self.repo, head, self.out, allow_nonascii=True)
-        self.assertEqual(self.files(self.out), [NFC + ".txt"])
+        self.assertEqual(self.files(self.out), sorted(names))
+
+    def test_mark_count_cap(self):
+        real = rx.MAX_MARKS
+        rx.MAX_MARKS = 1
+        self.addCleanup(setattr, rx, "MAX_MARKS", real)
+        self.assertIn("not an accented", self.refuse_opt_in("ǖ.txt"))
 
     def test_skeleton_maps_cyrillic_and_greek_lookalikes(self):
         self.assertEqual(rx._fold("аgents.md"), "agentsmd")  # Cyrillic a
         self.assertEqual(rx._fold("clαude.md"), "claudemd")  # Greek alpha
         self.assertTrue(rx._reduced_hit(["ÀGENTS.md"], rx.DEFAULT_STRIP))
 
-    def test_script_allowlist_refuses_single_script_lookalikes(self):
-        for label, name in (
-            ("lisu", "ꓮꓖꓰꓠꓔꓢ.ꓟꓓ"),
-            ("cherokee", "ᎪᏀᎬᏁᎢᏚ.ᎷᎠ"),
-            ("greek", "ΑΓΕΝΤΣ.ΜΔ"),
-            ("cyrillic", "АГЕНТС.МД"),
-            ("cyrillic text", "документ"),
-            ("fullwidth", "ＡＧＥＮＴＳ.ＭＤ"),
-            ("math bold", "𝐀𝐆𝐄𝐍𝐓𝐒.𝐦𝐝"),
-            ("circled", "ⒶⒼⒺⓃⓉⓈ"),
-            ("coptic", "ⲀⲄⲈ"),
-            ("armenian", "ԱԳԵՆՏՍ"),
-            ("halfwidth katakana", "ｱｲｳ"),
-        ):
+    def test_every_other_script_and_every_invisible_code_point_is_refused(self):
+        cases = {
+            "lisu": "ꓮꓖꓰꓠꓔꓢ.ꓟꓓ",
+            "cherokee": "ᎪᏀᎬᏁᎢᏚ.ᎷᎠ",
+            "greek": "ΑΓΕΝΤΣ.ΜΔ",
+            "cyrillic": "АГЕНТС.МД",
+            "fullwidth": "ＡＧＥＮＴＳ.ＭＤ",
+            "math bold": "\U0001d400\U0001d406\U0001d404\U0001d40d\U0001d413\U0001d412",
+            "circled": "ⒶⒼⒺⓃⓉⓈ",
+            "coptic": "ⲀⲄⲈ",
+            "armenian": "ԱԳԵՆՏՍ",
+            "halfwidth katakana": "ｱｲｳ",
+            "han": "日本語",
+            "han and ascii": "文書.md",
+            "hiragana": "ひらがな",
+            "katakana": "カタカナ",
+            "prolonged mark": "ラーメン",
+            "hangul": "한국어",
+            "hangul filler": "aᅟb",
+            "hangul jungseong filler": "aᅠb",
+            "hangul compat filler": "aㅤb",
+            "halfwidth hangul filler": "aﾠb",
+            "only fillers": "ᅟᅠㅤﾠ",
+            "filler between hangul": "한ㅤ국",
+            "zero width space": "a​b",
+            "zero width joiner": "a‍b",
+            "word joiner": "a⁠b",
+            "soft hyphen": "a­b",
+            "variation selector 16": "a️.txt",
+            "han variation selector": "文️.md",
+            "han ideographic variation selector": "文\U000e0100.md",
+            "tag character": "a\U000e0041b",
+            "free-standing mark": "a͠.txt",
+            "mark without a base": "́abc",
+            "unassigned": "a͸b",
+            "private use": "ab",
+            "no-break space": "a b",
+            "ideographic space": "a　b",
+            "line separator": "a b",
+            "bidi override": "a‮b",
+        }
+        for label, name in cases.items():
             with self.subTest(label=label):
-                self.assertRegex(self.refuse_opt_in(name), "outside the allowed|not a letter")
+                self.assertTrue(self.refuse_opt_in(name))
 
-    def test_script_allowlist_keeps_latin_japanese_and_korean(self):
-        names = [
-            "café.txt",
-            "日本語/ひらがな/カタカナ",
-            "日本のカタカナ.md",
-            "ラーメン.txt",
-            "한국어/문서.txt",
-            "naïve/ÅÉ.md",
-        ]
-        head = self._tree_with([(n, "file", "x") for n in names])
-        rx.export(self.repo, head, self.out, allow_nonascii=True)
-        self.assertEqual(self.files(self.out), sorted(names))
+    def test_decomposed_input_is_refused_by_the_nfc_rule(self):
+        self.assertIn("NFC", self.refuse_opt_in("café.txt"))
 
-    def test_script_mixing_is_refused_except_japanese(self):
-        for label, name in (
-            ("han and latin", "日本abc"),
-            ("hangul and han", "한국語"),
-            ("hangul and kana", "한국あ"),
-            ("latin and kana", "caféあ"),
+    def test_a_cjk_named_subtree_can_be_excluded_instead(self):
+        head = self._tree_with([("keep.txt", "file", "x"), ("日本語/文書.md", "file", "x")])
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.out, allow_nonascii=True)
+        rx.export(self.repo, head, self.out, exclude_trees=["日本語"])
+        self.assertEqual(self.files(self.out), ["keep.txt"])
+
+    # symlink targets
+
+    def test_symlink_targets_get_the_strip_disguise_and_shape_checks(self):
+        for target in (
+            "AGENTS.md",
+            ".codex/instructions.md",
+            "A-G-E-N-T-S.md",
+            "src/../.claude/x",
+            "agents.MD",
+            "sp ace",
+            "src/ÀGENTS.md",
+            "x\x1by",
         ):
+            with self.subTest(target=target):
+                head = self._tree_with([("lnk", "link", target), ("src/app.py", "file", "x")])
+                with self.assertRaises(rx.Refused):
+                    rx.export(self.repo, head, self.out, allow_symlinks=True, allow_nonascii=True)
+                self.assertFalse(self.out.exists())
+
+    def test_a_non_ascii_link_target_needs_the_same_opt_in_as_a_path(self):
+        head = self._tree_with([("lnk", "link", "café"), ("src/app.py", "file", "x")])
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.out, allow_symlinks=True)
+        rx.export(self.repo, head, self.out, allow_symlinks=True, allow_nonascii=True)
+
+    def test_a_link_target_under_an_excluded_tree_is_refused(self):
+        head = self._tree_with([("lnk", "link", "vendor/x.txt"), ("src/app.py", "file", "x")])
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.out, exclude_trees=["vendor"], allow_symlinks=True)
+
+    def test_an_ordinary_dangling_or_present_link_target_is_kept_with_the_opt_in(self):
+        head = self._tree_with(
+            [("a/lnk", "link", "../src/app.py"), ("src/app.py", "file", "x"), ("dang", "link", "nothing.txt")]
+        )
+        rx.export(self.repo, head, self.out, allow_symlinks=True)
+        self.assertEqual(self.files(self.out), ["a/lnk", "dang", "src/app.py"])
+
+    def test_the_link_name_gets_the_same_checks(self):
+        head = self._tree_with([("AGENTS.md", "link", "src/app.py"), ("src/app.py", "file", "x")])
+        rx.export(self.repo, head, self.out, allow_symlinks=True)  # stripped, so it is simply not exported
+        self.assertEqual(self.files(self.out), ["src/app.py"])
+        head = self._tree_with([("A-G-E-N-T-S.md", "link", "src/app.py"), ("src/app.py", "file", "x")])
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.tmp / "out2", allow_symlinks=True)
+
+    # every message goes through the same quoting helper
+
+    def test_every_refusal_and_print_quotes_attacker_text(self):
+        """Scan every `Refused(f"...")` and `print(f"...")` in the script: an interpolated value must be a `_q(...)`
+        call, a constant name, a number or an already-quoted message. A new raw interpolation fails this test."""
+        import ast
+
+        tree = ast.parse((ROOT / "scripts" / "review_export.py").read_text())
+        safe_names = {
+            "DIFF_NAME",
+            "MARKER_NAME",
+            "size",
+            "cap",
+            "planned",
+            "max_files",
+            "max_total_bytes",
+            "max_file_bytes",
+        }
+        safe_names |= {"left", "problem", "exc", "n", "files"}
+
+        def safe(node):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("_q", "len", "ord"):
+                return True
+            if isinstance(node, ast.Name):
+                return node.id in safe_names
+            if isinstance(node, ast.Constant):
+                return True
+            if isinstance(node, ast.BinOp):
+                return safe(node.left) and safe(node.right)
+            if isinstance(node, ast.BoolOp):  # exc.strerror or "error": an OS message, no path
+                return all(safe(v) for v in node.values)
+            if isinstance(node, ast.Attribute):
+                return node.attr in ("strerror", "returncode")
+            if isinstance(node, ast.Subscript):  # args[0] (a fixed git subcommand), m['files']
+                return isinstance(node.value, ast.Name) and node.value.id in ("args", "m")
+            return False
+
+        bad, seen = [], 0
+        for node in ast.walk(tree):
+            call = None
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                call = node.exc
+                if not (isinstance(call.func, ast.Name) and call.func.id in ("Refused",)):
+                    continue
+            elif (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("print", "Refused")
+            ):
+                call = node
+            if call is None:
+                continue
+            for arg in call.args:
+                if isinstance(arg, ast.JoinedStr):
+                    seen += 1
+                    for part in arg.values:
+                        if isinstance(part, ast.FormattedValue) and not safe(part.value):
+                            bad.append((node.lineno, ast.unparse(part.value)))
+        self.assertGreater(seen, 30, "the scan must really see the message sites")
+        self.assertEqual(bad, [])
+
+    def test_hostile_names_are_escaped_in_the_refusals_that_name_a_path(self):
+        hostile = "a\x1b[2Jb\nc"
+        quoted_cases = []
+
+        def check(label, fn):
             with self.subTest(label=label):
-                self.assertIn("mixes", self.refuse_opt_in(name))
+                try:
+                    fn()
+                except rx.Refused as exc:
+                    text = str(exc)
+                    quoted_cases.append(label)
+                    self.assertNotIn("\x1b", text)
+                    self.assertNotIn("\n", text)
+                    self.assertTrue(text.isascii())
+                else:
+                    self.fail("not refused")
+
+        head = self._tree_with([(hostile + ".txt", "file", "x")])
+        check("shape", lambda: rx.export(self.repo, head, self.tmp / "o1"))
+        head = self._tree_with([(hostile, "link", "x")])
+        check("symlink refused", lambda: rx.export(self.repo, head, self.tmp / "o2"))
+        head = self._tree_with([("big.bin", "file", "y" * 50)])
+        check("size", lambda: rx.export(self.repo, head, self.tmp / "o3", max_file_bytes=10))
+        check("collide", lambda: rx._check_names([("100644", "a", "A" + hostile), ("100644", "b", "a" + hostile)]))
+        check("lies under", lambda: rx._check_names([("120000", "a", hostile), ("100644", "b", hostile + "/x")]))
+        check("exclude", lambda: rx.export(self.repo, self.head, self.tmp / "o4", exclude_trees=[hostile + "/.."]))
+        check("ref", lambda: rx.export(self.repo, hostile, self.tmp / "o5"))
+        check("out inside repo", lambda: rx.export(self.repo, self.head, self.repo / hostile))
+        out = self.tmp / ("o6" + hostile)
+        out.mkdir()
+        (out / "x").write_text("x")
+        check("out not empty", lambda: rx.export(self.repo, self.head, out))
+        check("read", lambda: rx._read(self.tmp / ("missing" + hostile)))
+        self.assertGreaterEqual(len(quoted_cases), 10)
+
+    def test_next_prompt_cli_quotes_the_paths_it_prints(self):
+        hostile = "o\x1b[2J\nx"
+        base, find = self.tmp / "b.txt", self.tmp / "f.txt"
+        base.write_text("base\n")
+        find.write_text("finding\n")
+        err, out = io.StringIO(), io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out):
+            rc = rx.main(
+                [
+                    "next-prompt",
+                    "--base-prompt",
+                    str(base),
+                    "--findings",
+                    str(find),
+                    "--output",
+                    str(self.tmp / hostile),
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("\x1b", out.getvalue())
+        self.assertEqual(out.getvalue().count("\n"), 1)
+        with redirect_stderr(err):
+            rc = rx.main(
+                [
+                    "next-prompt",
+                    "--base-prompt",
+                    str(self.tmp / (hostile + "m")),
+                    "--findings",
+                    str(find),
+                    "--output",
+                    str(self.tmp / "z"),
+                ]
+            )
+        self.assertEqual(rc, 1)
+        self.assertNotIn("\x1b", err.getvalue())
+        self.assertEqual(err.getvalue().count("\n"), 1)
 
     def test_file_count_and_total_byte_caps_refuse_before_writing(self):
         head = self._tree_with([(f"f{i}.txt", "file", "y" * 100) for i in range(10)])
@@ -829,9 +1180,9 @@ class Round2(Base):
         head = self._tree_with([(f"f{i}.txt", "file", "y" * 50) for i in range(6)])
         held, real = [], rx._write_entry
 
-        def watch(root_fd, name, data, mode, journal=None):
+        def watch(root_fd, name, data, mode, *a, **k):
             held.append(len(data))
-            return real(root_fd, name, data, mode, journal)
+            return real(root_fd, name, data, mode, *a, **k)
 
         rx._write_entry = watch
         self.addCleanup(setattr, rx, "_write_entry", real)
@@ -847,7 +1198,7 @@ class Round2(Base):
         rx._git = git_spy
         self.addCleanup(setattr, rx, "_git", real_git)
         rx.export(self.repo, head, self.out)
-        self.assertEqual(len(held), 6)
+        self.assertEqual(len(held), 7)  # six files and the marker
         self.assertNotIn("blobs = {}", inspect.getsource(rx.export))
 
     def test_a_big_diff_is_stopped_while_streaming(self):
@@ -872,7 +1223,9 @@ class Round2(Base):
         head = self._tree_with([("ln", "link", target)])
         err = io.StringIO()
         with redirect_stderr(err):
-            rc = rx.main(["export", "--repo", str(self.repo), "--ref", head, "--out", str(self.out)])
+            rc = rx.main(
+                ["export", "--repo", str(self.repo), "--ref", head, "--out", str(self.out), "--allow-symlinks"]
+            )
         text = err.getvalue()
         self.assertEqual(rc, 1)
         self.assertEqual(text.count("\n"), 1, "one line, no injected newline")
