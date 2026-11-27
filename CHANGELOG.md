@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+`threat-model` pack (issue #118): every threat model now ships both the markdown report and an OWASP Threat Dragon JSON for the owner to review (owner rule 2026-11-13). Pack text only; no role, policy or registry change.
+
+- `packs/threat-model/PACK.md` (updated 2026-11-13): deliverable item 6 (v2.0 schema file, STRIDE diagram, `tm.Actor`, `tm.Process`, `tm.Store`, `tm.Flow` and `trust-boundary-curve` cells, one threat per risk with the markdown risk id in its title); a "Model it in Threat Dragon" method step; runnable checks that the file parses, every flow end resolves to a cell, `detail.threatTop` is at least the threat count, and markdown and JSON risk ids agree; the JSON follows the same limits (no secrets, no probing, placeholders only). Schema read from OWASP/threat-dragon `ThreatDragonModels/v2-threat-model.json` on 2026-11-13.
+
 Local LLM pack refresh (issue ChiefGyk3D/workbench#16): `packs/local-llm-routing` carries the 2026-11-25 measurements (task fit for gemma4:12b, qwen3.5:4b and qwen3:14b, what fits one 16 GB card, `think: false` and the `num_ctx` default read from the Ollama docs with dates), the reference client's flags, exit codes (75 is busy, not an outage), call and outcome log fields and settings, and an evaluation record row per model. The description opens with `Load`; the body is under 3,000 tokens. `tests/test_local_llm_pack.py` checks the stated flags, outcomes, exit 75, log fields and settings against a copy of the client's `--help` (and the live tool when present), with negative cases.
 
 Marketing and advertising pilot (issue #131): five packs, `ad-disclosure`, `marketing-grc` (extends `grc-controls`), `audience-data-privacy`, `platform-data-terms` and `media-kit-claims`. No new role. Pilot: that they improve results is a prediction, and each pack states its measurement targets. Every regulator or platform fact quoted was read on the publisher's page on 2026-11-25 and is listed VERIFIED with its URL and date under the pack's Sources; anything unread is UNVERIFIED or INFERRED and not quoted. Working practice only: no pack output is a claim of compliance.
