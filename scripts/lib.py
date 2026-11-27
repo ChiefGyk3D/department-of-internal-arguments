@@ -49,6 +49,7 @@ PACK_NAMES = (
     "stage-crew",
     "front-door",
     "aws",
+    "digitalocean",
     "review-protocol",
     "implementer-self-check",
     "threat-detection",

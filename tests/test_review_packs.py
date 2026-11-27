@@ -94,7 +94,7 @@ class ReviewPacks(unittest.TestCase):
                 self.assertIn("## How to verify", text)
                 self.assertIn("## Limits", text)
                 self.assertIn("## Deliverable", text)
-        self.assertEqual(len(PACK_NAMES), 30)
+        self.assertEqual(len(PACK_NAMES), 31)
 
     def test_token_budgets(self):
         for pack in PACKS:

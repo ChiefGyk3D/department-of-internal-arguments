@@ -176,8 +176,8 @@ BRITISH = re.compile(r"\b(?:behaviour|colour|authoris\w*|defence|organis\w*|reco
 # The owner-approved wording (owner answer 2026-11-25, "Approve as written"), applied verbatim.
 APPROVED = {
     "README.md": [
-        "This repository defines thirteen roles and thirty packs for AI coding assistants. The five newest packs are "
-        "marketing and advertising pilots with predicted effects and measurement targets."
+        "This repository defines thirteen roles and thirty-one packs for AI coding assistants. "
+        "The five newest packs are marketing and advertising pilots with predicted effects and measurement targets."
     ],
     "docs/what-and-why.md": [
         "Organizations need more than coding work. Marketing and advertising also require records, evidence, and "
@@ -341,8 +341,8 @@ class Registry(unittest.TestCase):
     def test_registered(self):
         for p in PACKS:
             self.assertIn(p, PACK_NAMES)
-        self.assertEqual(len(PACK_NAMES), 30)
-        self.assertEqual(len(set(PACK_NAMES)), 30)
+        self.assertEqual(len(PACK_NAMES), 31)
+        self.assertEqual(len(set(PACK_NAMES)), 31)
 
     def test_no_new_role(self):
         from lib import ROLE_NAMES
