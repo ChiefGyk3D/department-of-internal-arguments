@@ -27,8 +27,9 @@ class CiPythonMatrix(unittest.TestCase):
                 self.assertIn(v, pinned, f"ci.yml python-versions omits {v}")
 
     def test_guard_bites_on_the_old_list(self):
-        self.assertEqual(pinned_versions("      python-versions: '[\"3.11\", \"3.12\", \"3.13\"]'\n"),
-                         ["3.11", "3.12", "3.13"])
+        self.assertEqual(
+            pinned_versions('      python-versions: \'["3.11", "3.12", "3.13"]\'\n'), ["3.11", "3.12", "3.13"]
+        )
         self.assertIsNone(pinned_versions("    with:\n      docker-build: false\n"))
 
     def test_drop_dates_are_recorded(self):
