@@ -259,7 +259,7 @@ class Registry(unittest.TestCase):
             self.assertIn(r, ROLE_NAMES)
         for p in PACKS:
             self.assertIn(p, PACK_NAMES)
-        self.assertEqual(len(ROLE_NAMES), 10)
+        self.assertEqual(len(ROLE_NAMES), 11)
         self.assertEqual(len(PACK_NAMES), 30)
 
     def test_generated_outputs_exist(self):
