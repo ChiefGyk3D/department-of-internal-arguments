@@ -480,6 +480,23 @@ class Allowlist(Base):
                 msg = self.refuse([name, "keep.txt"])
                 self.assertTrue("reduces to" in msg or "stripped" in msg, msg)
 
+    def test_backstop_scans_a_descriptor_that_was_already_read(self):
+        # on some file systems a directory descriptor that was listed once scans from its end; the export lists
+        # the empty output directory first. Use a directory beside the tests (a real disk, not tmpfs) too.
+        for base in (self.tmp, ROOT / "tests"):
+            with self.subTest(base=str(base)), tempfile.TemporaryDirectory(dir=base) as d:
+                fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    self.assertEqual(os.listdir(fd), [])
+                    (Path(d) / "sub").mkdir()
+                    (Path(d) / "sub" / "a.txt").write_text("x")
+                    (Path(d) / "top.txt").write_text("x")
+                    rx._backstop(fd, {"sub/a.txt", "top.txt"}, rx.DEFAULT_STRIP)
+                    with self.assertRaises(rx.Refused):
+                        rx._backstop(fd, {"top.txt"}, rx.DEFAULT_STRIP)  # sub/a.txt is seen, so it differs
+                finally:
+                    os.close(fd)
+
     def test_backstop_unit_cases(self):
         out = self.tmp / "b"
         (out / "agents").mkdir(parents=True)

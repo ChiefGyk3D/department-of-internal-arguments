@@ -443,6 +443,7 @@ def _backstop(out, expected, strip):
         while stack:
             rel, fd, ours = stack.pop()
             try:
+                os.lseek(fd, 0, os.SEEK_SET)  # a descriptor already read (os.listdir) would scan from its end
                 with os.scandir(fd) as it:
                     entries = sorted(it, key=lambda e: e.name)
                 for e in entries:
