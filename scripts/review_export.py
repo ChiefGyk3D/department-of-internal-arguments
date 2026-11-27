@@ -16,7 +16,7 @@ and nothing else."""
 
 import argparse
 import os
-import shutil
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -185,27 +185,59 @@ def _fold(name):
     return "".join(c for c in _skeleton(name) if c.isascii() and c.isalnum())
 
 
-def _script(ch):
-    return "LATIN" if ch.isascii() else unicodedata.name(ch, "UNKNOWN").split()[0]
+# Non-ASCII characters are kept only from an explicit short list of scripts, found by Unicode name (the standard
+# library has no script property). Everything else (Cyrillic, Greek, Lisu, Cherokee, Coptic, Armenian,
+# mathematical and enclosed alphanumerics, fullwidth and halfwidth forms, ...) is refused, so no lookalike table
+# has to be complete. ASCII letters count as Latin.
+_SCRIPT_PREFIXES = (
+    ("LATIN", "LATIN"),
+    ("CJK UNIFIED IDEOGRAPH", "HAN"),
+    ("HIRAGANA", "HIRAGANA"),
+    ("KATAKANA", "KATAKANA"),
+    ("HANGUL", "HANGUL"),
+)
+_JAPANESE = frozenset({"HAN", "HIRAGANA", "KATAKANA"})
+
+
+def _char_script(ch):
+    name = unicodedata.name(ch, "")
+    for prefix, script in _SCRIPT_PREFIXES:
+        if name.startswith(prefix):
+            return script
+    return None
 
 
 def _script_problem(c):
-    """With the non-ASCII opt-in: one script per component. ASCII letters count as Latin; a non-ASCII Latin
-    letter must be a precomposed ASCII letter plus combining marks (é, ñ), not ı, ɑ or similar; a component in
-    another script holds no ASCII letter."""
-    scripts = {_script(ch) for ch in c if ch.isalpha()}
-    if len(scripts) > 1:
-        return "mixes scripts in one component"
+    """With the non-ASCII opt-in. Every non-ASCII character is a combining mark or a letter of an allowed script:
+    Latin (only an ASCII letter plus marks, so é and ñ but not ı or ɑ), Han, Hiragana, Katakana, Hangul. One
+    script per component, except Han, Hiragana and Katakana together (Japanese). A component in a non-Latin script
+    holds no ASCII letter, apart from an ASCII alphanumeric extension after the last dot (`文書.md`)."""
+    scripts = set()
     for ch in c:
-        if ch.isascii() or not ch.isalpha() or _script(ch) != "LATIN":
+        if ch.isascii():
             continue
-        decomposed = unicodedata.normalize("NFD", ch)
-        if not (
-            decomposed[0].isascii()
-            and decomposed[0].isalpha()
-            and all(unicodedata.category(m) == "Mn" for m in decomposed[1:])
-        ):
-            return "has a Latin letter that is not an accented ASCII letter"
+        if unicodedata.category(ch) in ("Mn", "Mc"):
+            continue
+        if not unicodedata.category(ch).startswith("L"):
+            return f"has the character U+{ord(ch):04X}, which is not a letter of an allowed script"
+        script = _char_script(ch)
+        if script is None:
+            return f"has the character U+{ord(ch):04X}, from a script outside the allowed ones"
+        if script == "LATIN":
+            decomposed = unicodedata.normalize("NFD", ch)
+            if not (decomposed[0].isascii() and decomposed[0].isalpha()):
+                return "has a Latin letter that is not an accented ASCII letter"
+        scripts.add(script)
+    other = scripts - {"LATIN"}
+    if not other:
+        return None
+    if "LATIN" in scripts or not (other <= _JAPANESE or other == {"HANGUL"}):
+        return "mixes scripts in one component"
+    stem, dot, ext = c.rpartition(".")
+    if not dot or not (ext.isascii() and ext.isalnum() and len(ext) <= 10):
+        stem = c
+    if any(ch.isascii() and ch.isalpha() for ch in stem):
+        return "mixes scripts in one component"
     return None
 
 
@@ -341,17 +373,37 @@ def _tree(repo, head):
     return rows
 
 
-def _cleanup(out, existed):
-    if out.is_symlink():
-        return  # swapped after the check: never walk a link
-    if not existed:
-        shutil.rmtree(out, ignore_errors=True)
-        return
-    for child in out.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            child.unlink(missing_ok=True)
+def _rollback(root_fd, journal):
+    """Remove what this export created and nothing else, by descriptor. `journal` maps each created relative path to
+    the (st_dev, st_ino) recorded when it was created. Entries are walked from the pinned output directory with no
+    symlink followed, deepest first; an entry whose identity differs, a directory that is not empty, or a parent
+    that no longer matches is left in place. Returns the number of entries left. A leftover is safe; a wrong delete
+    is not, and nothing is ever removed by path or with rmtree."""
+    left = 0
+    for rel in sorted(journal, key=lambda r: (-r.count("/"), r)):
+        parts = rel.split("/")
+        fds = []
+        try:
+            fd = root_fd
+            for i, comp in enumerate(parts[:-1]):
+                fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
+                fds.append(fd)
+                st = os.fstat(fd)
+                if (st.st_dev, st.st_ino) != journal.get("/".join(parts[: i + 1])):
+                    raise OSError("parent is not the directory that was created")
+            st = os.lstat(parts[-1], dir_fd=fd)
+            if (st.st_dev, st.st_ino) != journal[rel]:
+                raise OSError("entry is not the one that was created")
+            if stat.S_ISDIR(st.st_mode):
+                os.rmdir(parts[-1], dir_fd=fd)
+            else:
+                os.unlink(parts[-1], dir_fd=fd)
+        except OSError:
+            left += 1
+        finally:
+            for f in fds:
+                os.close(f)
+    return left
 
 
 def _reduced_hit(parts, strip):
@@ -377,27 +429,43 @@ def _reduced_hit(parts, strip):
 
 
 def _backstop(out, expected, strip):
-    """After writing: walk the output directory and check the names that are really on disk. A name that the
-    strip list matches by NFC and case, or that reduces to a stripped name, or a set of files that differs from
-    the planned one (a file system that folded or renamed something), refuses; the caller rolls back."""
+    """After writing: walk the output directory (by descriptor, never following a link) and check the names that
+    are really on disk. A name that the strip list matches by NFC and case, or that reduces to a stripped name, or
+    a set of files that differs from the planned one (a file system that folded or renamed something), refuses;
+    the caller rolls back. `out` is an open directory descriptor or a path."""
+    opened = None
+    root = out
+    if not isinstance(out, int):
+        opened = root = os.open(out, _DIR_FLAGS)
     found = set()
-    stack = [""]
-    while stack:
-        rel = stack.pop()
-        with os.scandir(os.path.join(out, rel) if rel else out) as it:
-            entries = sorted(it, key=lambda e: e.name)
-        for e in entries:
-            name = f"{rel}/{e.name}" if rel else e.name
-            if _stripped(name, strip) or _reduced_hit(name.split("/"), strip):
-                raise Refused(f"{_q(name)} on disk is, or reduces to, a stripped agent file")
-            if e.is_dir(follow_symlinks=False):
-                stack.append(name)
-            else:
-                found.add(name)
+    stack = [("", root, False)]
+    try:
+        while stack:
+            rel, fd, ours = stack.pop()
+            try:
+                with os.scandir(fd) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+                for e in entries:
+                    name = f"{rel}/{e.name}" if rel else e.name
+                    if _stripped(name, strip) or _reduced_hit(name.split("/"), strip):
+                        raise Refused(f"{_q(name)} on disk is, or reduces to, a stripped agent file")
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append((name, os.open(e.name, _DIR_FLAGS, dir_fd=fd), True))
+                    else:
+                        found.add(name)
+            finally:
+                if ours:
+                    os.close(fd)
+    finally:
+        for _, fd, ours in stack:
+            if ours:
+                os.close(fd)
+        if opened is not None:
+            os.close(opened)
     if found != expected:
         extra = sorted(found - expected)[:3]
         gone = sorted(expected - found)[:3]
-        raise Refused(f"files on disk differ from the plan (unexpected {extra}, missing {gone})")
+        raise Refused(f"files on disk differ from the plan (unexpected {_q(extra)}, missing {_q(gone)})")
 
 
 def _disguised(name, strip):
@@ -460,17 +528,24 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
-def _open_parent(root_fd, parts):
+def _record(journal, rel, st):
+    if journal is not None:
+        journal[rel] = (st.st_dev, st.st_ino)
+
+
+def _open_parent(root_fd, parts, journal=None):
     """Walk (creating) the directories of `parts` one component at a time relative to an open directory, never
     following a symlink; return the last directory's fd and every fd opened, for closing."""
     fds = []
     fd = root_fd
     try:
-        for comp in parts:
+        for i, comp in enumerate(parts):
             try:
                 os.mkdir(comp, 0o755, dir_fd=fd)
             except FileExistsError:
                 pass
+            else:
+                _record(journal, "/".join(parts[: i + 1]), os.lstat(comp, dir_fd=fd))
             fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
             fds.append(fd)
     except BaseException:
@@ -480,17 +555,19 @@ def _open_parent(root_fd, parts):
     return fd, fds
 
 
-def _write_entry(root_fd, name, data, mode):
+def _write_entry(root_fd, name, data, mode, journal=None):
     """Create one file (O_EXCL, no symlink followed, mode set on the same descriptor) or one symlink, relative to
     the output directory's descriptor. No path is resolved a second time after a check."""
     *dirs, leaf = name.split("/")
-    pfd, fds = _open_parent(root_fd, dirs)
+    pfd, fds = _open_parent(root_fd, dirs, journal)
     try:
         if mode == "120000":
             os.symlink(os.fsdecode(data), leaf, dir_fd=pfd)
+            _record(journal, name, os.lstat(leaf, dir_fd=pfd))
             return
         fd = os.open(leaf, _FILE_FLAGS, 0o600, dir_fd=pfd)
         try:
+            _record(journal, name, os.fstat(fd))
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view) :]
@@ -500,6 +577,15 @@ def _write_entry(root_fd, name, data, mode):
     finally:
         for f in fds:
             os.close(f)
+
+
+def _pinned_path(fd, fallback):
+    """The path of the directory a descriptor really refers to (Linux /proc), so link verification checks the
+    directory that was written even if the requested path was renamed; the requested path elsewhere."""
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return str(fallback)
 
 
 def _clean_tree(trees):
@@ -572,44 +658,53 @@ def export(
     existed = out.exists()
     files = total = 0
     made = []
-    clean_up = False  # nothing is removed until the directory is open (no symlink) and verified empty
+    journal = {}
+    root_fd = None
     try:
         out.mkdir(parents=True, exist_ok=True)
-        root_fd = os.open(out, _DIR_FLAGS)
-        try:
-            if os.listdir(root_fd):
-                raise Refused(f"output directory {_q(str(out))} is not empty")
-            clean_up = True
-            # regular files first, symlinks last; one blob in memory at a time, never over the per-file cap
-            for want_link in (False, True):
-                for mode, sha, name, size in keep:
-                    if (mode == "120000") != want_link:
-                        continue
-                    data = targets[name] if want_link else _git(repo, "cat-file", "blob", sha, binary=True)
-                    if len(data) != size:
-                        raise Refused(f"{_q(name)} changed size while reading")
-                    _write_entry(root_fd, name, data, mode)
-                    if want_link:
-                        made.append(name)
-                    else:
-                        total += len(data)
-                    files += 1
-            if base_sha:
-                _write_entry(root_fd, DIFF_NAME, diff, "100644")
+        root_fd = os.open(out, _DIR_FLAGS)  # pinned: every later step uses this descriptor, not the path
+        if os.listdir(root_fd):
+            raise Refused(f"output directory {_q(str(out))} is not empty")
+        # regular files first, symlinks last; one blob in memory at a time, never over the per-file cap
+        for want_link in (False, True):
+            for mode, sha, name, size in keep:
+                if (mode == "120000") != want_link:
+                    continue
+                data = targets[name] if want_link else _git(repo, "cat-file", "blob", sha, binary=True)
+                if len(data) != size:
+                    raise Refused(f"{_q(name)} changed size while reading")
+                _write_entry(root_fd, name, data, mode, journal)
+                if want_link:
+                    made.append(name)
+                else:
+                    total += len(data)
                 files += 1
-                total += len(diff)
-        finally:
+        if base_sha:
+            _write_entry(root_fd, DIFF_NAME, diff, "100644", journal)
+            files += 1
+            total += len(diff)
+        _verify_links(_pinned_path(root_fd, out), made)
+        _backstop(root_fd, {n for _, _, n, _ in keep} | ({DIFF_NAME} if base_sha else set()), strip)
+        here, pinned = os.stat(out, follow_symlinks=False), os.fstat(root_fd)
+        if (here.st_dev, here.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise Refused("the output path no longer names the directory that was written")
+    except BaseException as exc:
+        left = _rollback(root_fd, journal) if root_fd is not None else 0
+        if root_fd is not None and not existed and left == 0:
+            try:  # we created it and it is empty again; rmdir removes nothing else
+                here, pinned = os.stat(out, follow_symlinks=False), os.fstat(root_fd)
+                if (here.st_dev, here.st_ino) == (pinned.st_dev, pinned.st_ino):
+                    os.rmdir(out)
+            except OSError:
+                pass
+        if isinstance(exc, OSError):
+            exc = Refused(f"cannot write the export: {exc.strerror or 'error'}")
+        if left and isinstance(exc, Refused):
+            exc = Refused(f"{exc}; {left} entries were left in place in the output directory")
+        raise exc from None
+    finally:
+        if root_fd is not None:
             os.close(root_fd)
-        _verify_links(out, made)
-        _backstop(out, {n for _, _, n, _ in keep} | ({DIFF_NAME} if base_sha else set()), strip)
-    except OSError as exc:
-        if clean_up:
-            _cleanup(out, existed)
-        raise Refused(f"cannot write the export: {exc.strerror or 'error'}") from exc
-    except BaseException:
-        if clean_up:
-            _cleanup(out, existed)
-        raise
     return {"files": files, "bytes": total}
 
 

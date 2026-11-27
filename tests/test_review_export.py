@@ -4,6 +4,7 @@ temporary git repositories, with one case per refusal."""
 import inspect
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -432,17 +433,17 @@ class Allowlist(Base):
         for name in ("CON", "nul.txt", "docs/COM1.md", "Lpt9", "aux"):
             with self.subTest(name=name):
                 self.assertIn("device", self.refuse([name]))
-        self.assertIn("device", self.refuse(["ＣＯＮ"], allow_nonascii=True))  # fullwidth CON
+        self.assertTrue(self.refuse(["ＣＯＮ"], allow_nonascii=True))  # fullwidth CON: script not allowed
 
     def test_cyrillic_lookalike_is_refused_by_default_and_when_mixed_with_latin(self):
         name = "АGENTS.md"  # Cyrillic A, then Latin
         self.assertIn("non-ASCII", self.refuse([name]))
-        self.assertIn("mixes", self.refuse([name], allow_nonascii=True))
+        self.assertIn("outside the allowed", self.refuse([name], allow_nonascii=True))
 
     def test_fullwidth_agent_name_is_refused_and_with_opt_in_caught_on_disk(self):
         name = "ＡＧＥＮＴＳ.md"  # fullwidth AGENTS.md
         self.assertIn("non-ASCII", self.refuse([name]))
-        self.assertIn("mixes", self.refuse([name], allow_nonascii=True))
+        self.assertIn("outside the allowed", self.refuse([name], allow_nonascii=True))
 
     def test_opt_in_keeps_nfc_and_refuses_nfd(self):
         self.assertIn("NFC", self.refuse([NFD + ".txt"], allow_nonascii=True))
@@ -565,8 +566,8 @@ class Round2(Base):
         self.out.mkdir()
         real = rx._open_parent
 
-        def hook(root_fd, parts):
-            pfd, fds = real(root_fd, parts)
+        def hook(root_fd, parts, journal=None):
+            pfd, fds = real(root_fd, parts, journal)
             for leaf in ("README.md", "app.py", "other.py"):
                 plant(pfd, leaf)
             return pfd, fds
@@ -576,7 +577,9 @@ class Round2(Base):
         with self.assertRaises(rx.Refused):
             rx.export(self.repo, self.head, self.out)
         self.assertEqual(self.victim.read_text(), "precious", "nothing was written through the planted entry")
-        self.assertEqual(os.listdir(self.out), [], "the output was rolled back")
+        # only the planted entries remain: rollback removes what this export created, never what it did not
+        for leaf in os.listdir(self.out):
+            self.assertEqual(os.stat(self.out / leaf).st_ino, self.victim.stat().st_ino)
 
     def test_final_component_symlink_swap_is_not_followed(self):
         def plant(pfd, leaf):
@@ -644,21 +647,83 @@ class Round2(Base):
             rx.export(self.repo, self.head, self.out)
         self.assertEqual(os.listdir(self.outside), ["theirs.txt"])
 
-    def test_rollback_never_walks_an_output_path_swapped_for_a_symlink(self):
-        (self.outside / "theirs.txt").write_text("theirs")
-        self.out.mkdir()  # pre-existing and empty, so the rollback empties it instead of removing it
-        real = rx._backstop
+    def fail_after_swap(self, replace):
+        """Make the on-disk check fail after the output path was renamed away and `replace()` put something else
+        under its name, as an attacker who can rename entries in the parent directory would."""
 
-        def swap_then_fail(out, expected, strip):
-            os.rename(out, str(out) + ".moved")
-            os.symlink(self.outside, out)
+        def swap_then_fail(fd, expected, strip):
+            os.rename(self.out, str(self.out) + ".moved")
+            replace()
             raise rx.Refused("simulated late failure")
 
+        real = rx._backstop
         rx._backstop = swap_then_fail
         self.addCleanup(setattr, rx, "_backstop", real)
-        with self.assertRaises(rx.Refused):
+        with self.assertRaises(rx.Refused) as cm:
             rx.export(self.repo, self.head, self.out)
+        return str(cm.exception)
+
+    def test_rollback_never_deletes_in_a_substituted_ordinary_directory(self):
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("precious")
+        for pre in (True, False):
+            with self.subTest(preexisting=pre):
+                if self.out.exists():
+                    shutil.rmtree(self.out)
+                if pre:
+                    self.out.mkdir()
+                msg = self.fail_after_swap(lambda: os.rename(victim, self.out))
+                self.assertEqual((self.out / "precious.txt").read_text(), "precious")
+                self.assertEqual([p.name for p in self.out.iterdir()], ["precious.txt"])
+                self.assertEqual(msg, "simulated late failure")
+                os.rename(self.out, victim)
+                shutil.rmtree(str(self.out) + ".moved")
+
+    def test_rollback_never_walks_an_output_path_swapped_for_a_symlink(self):
+        (self.outside / "theirs.txt").write_text("theirs")
+        self.out.mkdir()
+        self.fail_after_swap(lambda: os.symlink(self.outside, self.out))
         self.assertEqual(os.listdir(self.outside), ["theirs.txt"])
+
+    def test_rollback_removes_what_was_created_through_the_pinned_directory(self):
+        self.fail_after_swap(lambda: None)
+        self.assertEqual(os.listdir(str(self.out) + ".moved"), [], "the pinned directory was emptied, not the path")
+
+    def test_rollback_leaves_replaced_and_planted_entries_and_says_so(self):
+        def tamper():
+            moved = Path(str(self.out) + ".moved")
+            (moved / "planted.txt").write_text("not ours")
+            os.unlink(moved / "README.md")
+            (moved / "README.md").write_text("a different file")
+
+        msg = self.fail_after_swap(tamper)
+        self.assertIn("left in place", msg)
+        self.assertEqual(sorted(os.listdir(str(self.out) + ".moved")), ["README.md", "planted.txt"])
+
+    def test_rollback_leaves_entries_under_a_substituted_subdirectory(self):
+        def tamper():
+            moved = Path(str(self.out) + ".moved")
+            os.rename(moved / "src", moved / "src.orig")
+            (moved / "src").mkdir()
+            os.link(moved / "src.orig" / "app.py", moved / "src" / "app.py")  # same inode, wrong directory
+
+        msg = self.fail_after_swap(tamper)
+        self.assertIn("left in place", msg)
+        self.assertTrue((Path(str(self.out) + ".moved") / "src" / "app.py").exists())
+
+    def test_a_final_path_swap_refuses_a_completed_export(self):
+        def swap(fd, expected, strip):
+            os.rename(self.out, str(self.out) + ".moved")
+            self.out.mkdir()
+
+        real = rx._backstop
+        rx._backstop = swap
+        self.addCleanup(setattr, rx, "_backstop", real)
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, self.head, self.out)
+        self.assertIn("no longer names", str(cm.exception))
+        self.assertEqual(os.listdir(self.out), [])
 
     def refuse_opt_in(self, name):
         head = self._tree_with([(name, "file", "x"), ("keep.txt", "file", "x")])
@@ -670,7 +735,7 @@ class Round2(Base):
     def test_opt_in_refuses_replacement_disguises(self):
         for name, why in (
             ("GEMıNı.md", "not an accented ASCII letter"),  # dotless i, Latin script
-            ("ꓮGENTS.md", "mixes scripts"),  # Lisu letter A
+            ("ꓮGENTS.md", "outside the allowed"),  # Lisu letter A
             ("ÀGENTS.md", "disguised"),  # accented A: the skeleton is agents.md
             ("À-GENTS.md", "disguised"),  # skeleton plus punctuation reduces to agentsmd
         ):
@@ -687,10 +752,45 @@ class Round2(Base):
         self.assertEqual(rx._fold("clαude.md"), "claudemd")  # Greek alpha
         self.assertTrue(rx._reduced_hit(["ÀGENTS.md"], rx.DEFAULT_STRIP))
 
-    def test_single_script_non_latin_names_are_kept_and_a_latin_mix_is_refused(self):
-        self.assertIn("mixes", self.refuse_opt_in("документ.txt"))
-        head = self._tree_with([("док/файл", "file", "x")])
+    def test_script_allowlist_refuses_single_script_lookalikes(self):
+        for label, name in (
+            ("lisu", "ꓮꓖꓰꓠꓔꓢ.ꓟꓓ"),
+            ("cherokee", "ᎪᏀᎬᏁᎢᏚ.ᎷᎠ"),
+            ("greek", "ΑΓΕΝΤΣ.ΜΔ"),
+            ("cyrillic", "АГЕНТС.МД"),
+            ("cyrillic text", "документ"),
+            ("fullwidth", "ＡＧＥＮＴＳ.ＭＤ"),
+            ("math bold", "𝐀𝐆𝐄𝐍𝐓𝐒.𝐦𝐝"),
+            ("circled", "ⒶⒼⒺⓃⓉⓈ"),
+            ("coptic", "ⲀⲄⲈ"),
+            ("armenian", "ԱԳԵՆՏՍ"),
+            ("halfwidth katakana", "ｱｲｳ"),
+        ):
+            with self.subTest(label=label):
+                self.assertRegex(self.refuse_opt_in(name), "outside the allowed|not a letter")
+
+    def test_script_allowlist_keeps_latin_japanese_and_korean(self):
+        names = [
+            "café.txt",
+            "日本語/ひらがな/カタカナ",
+            "日本のカタカナ.md",
+            "ラーメン.txt",
+            "한국어/문서.txt",
+            "naïve/ÅÉ.md",
+        ]
+        head = self._tree_with([(n, "file", "x") for n in names])
         rx.export(self.repo, head, self.out, allow_nonascii=True)
+        self.assertEqual(self.files(self.out), sorted(names))
+
+    def test_script_mixing_is_refused_except_japanese(self):
+        for label, name in (
+            ("han and latin", "日本abc"),
+            ("hangul and han", "한국語"),
+            ("hangul and kana", "한국あ"),
+            ("latin and kana", "caféあ"),
+        ):
+            with self.subTest(label=label):
+                self.assertIn("mixes", self.refuse_opt_in(name))
 
     def test_file_count_and_total_byte_caps_refuse_before_writing(self):
         head = self._tree_with([(f"f{i}.txt", "file", "y" * 100) for i in range(10)])
@@ -712,9 +812,9 @@ class Round2(Base):
         head = self._tree_with([(f"f{i}.txt", "file", "y" * 50) for i in range(6)])
         held, real = [], rx._write_entry
 
-        def watch(root_fd, name, data, mode):
+        def watch(root_fd, name, data, mode, journal=None):
             held.append(len(data))
-            return real(root_fd, name, data, mode)
+            return real(root_fd, name, data, mode, journal)
 
         rx._write_entry = watch
         self.addCleanup(setattr, rx, "_write_entry", real)
