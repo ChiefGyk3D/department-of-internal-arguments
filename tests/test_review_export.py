@@ -886,12 +886,14 @@ class Round2(Base):
         def tamper(staging):
             moved = Path(str(staging) + ".moved")
             (moved / "planted.txt").write_text("not ours")
-            os.unlink(moved / "README.md")
+            # keep the original inode alive under another name: a file system may hand a freed inode number to the
+            # next new file, and an entry with the same device and inode IS the created one (that is the design)
+            os.rename(moved / "README.md", moved / "README.orig")
             (moved / "README.md").write_text("a different file")
 
         msg, h = self.fail_after_swap(tamper)
         self.assertIn("left in place", msg)
-        self.assertEqual(sorted(os.listdir(h["moved"])), ["README.md", "planted.txt"])
+        self.assertEqual(sorted(os.listdir(h["moved"])), ["README.md", "README.orig", "planted.txt"])
 
     def test_rollback_leaves_entries_under_a_substituted_subdirectory(self):
         def tamper(staging):
