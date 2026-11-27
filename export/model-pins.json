@@ -20,9 +20,12 @@
   ],
   "roles": {
     "adversarial-reviewer": "standard",
+    "analyst": "standard",
+    "assessor": "standard",
     "cloud-engineer": "standard",
     "devops-engineer": "standard",
     "implementer": "standard",
+    "planner": "standard",
     "researcher": "standard",
     "reviewer": "standard",
     "transcriber": "cheap"
@@ -41,9 +44,12 @@
       "model": "claude-sonnet-5-5",
       "roles": [
         "adversarial-reviewer",
+        "analyst",
+        "assessor",
         "cloud-engineer",
         "devops-engineer",
         "implementer",
+        "planner",
         "researcher",
         "reviewer"
       ]

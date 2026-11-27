@@ -69,8 +69,9 @@ class Generated(unittest.TestCase):
             text = load_toml(ROOT / AGENTS / f"{name}.toml")["developer_instructions"]
             for field in ("ROLE:", "MODEL:", "GATE:", "TREE:", "NOT VERIFIED:", "LOCAL-LLM:", "VERIFIED-AGAINST:"):
                 self.assertIn(field, text, name)
-            for title in ("Human approvals", "Quality gates", "Security boundaries", "Model routing"):
+            for title in ("Human approvals", "Quality gates", "Security boundaries"):
                 self.assertIn(f"### {title}", text, name)
+            self.assertNotIn("### Model routing", text, name)  # issue #121: lead-addressed, not a role rule
             self.assertNotIn("{{fragment:", text)
 
     def test_instructions_are_the_same_text_as_the_other_adapters(self):
