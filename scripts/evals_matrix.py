@@ -188,7 +188,35 @@ def _refuse_constant(name):
     raise ValueError(f"{name} is not valid JSON")
 
 
+MAX_DEPTH = 200
+
+
+def _check_depth(text):
+    """Refuse nesting past MAX_DEPTH by counting [ and { outside strings, so the answer does not depend on how the
+    running Python's JSON scanner fails on deep input (RecursionError, or a decode error on newer versions)."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise ValueError("nested too deeply")
+        elif ch in "]}":
+            depth -= 1
+
+
 def strict_json(text):
+    _check_depth(text)
     try:
         return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_refuse_constant)
     except json.JSONDecodeError as exc:
