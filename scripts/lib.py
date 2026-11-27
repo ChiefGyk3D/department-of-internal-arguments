@@ -11,6 +11,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICIES = ("security-boundaries", "human-approvals", "quality-gates", "model-routing")
+# The policies spliced into every role file. Model routing is addressed to the lead (choose a model, hand off across
+# providers, spend), which a role cannot act on, so it stays a policy file for the exporter and the lead and is not
+# repeated in each role file (issue #121).
+ROLE_POLICIES = ("security-boundaries", "human-approvals", "quality-gates")
 ROLE_NAMES = (
     "implementer",
     "reviewer",
@@ -19,7 +23,11 @@ ROLE_NAMES = (
     "researcher",
     "cloud-engineer",
     "devops-engineer",
+    "cybersecurity-blue",
     "grc-analyst",
+    "analyst",
+    "assessor",
+    "planner",
 )
 PACK_NAMES = (
     "python-untrusted-input",
@@ -39,8 +47,21 @@ PACK_NAMES = (
     "clip-desk",
     "stage-crew",
     "front-door",
+    "aws",
+    "review-protocol",
+    "implementer-self-check",
+    "threat-detection",
+    "grc-controls",
+    "delivery-business-mgmt",
+    "org-operating-model",
+    "org-dispatch",
+    "ad-disclosure",
+    "marketing-grc",
+    "audience-data-privacy",
+    "platform-data-terms",
+    "media-kit-claims",
 )
-FRAGMENT_NAMES = ("report-header", "never-weaken")
+FRAGMENT_NAMES = ("report-header", "never-weaken", "deleting-files", "report-contract")
 
 # Suggested model tier -> pinned Claude model id. Pinned, not an alias: an alias
 # moves when a new model ships, which changes cost and behavior silently. Bumping

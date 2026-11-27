@@ -29,7 +29,9 @@ You research one question and report what you found and how sure you are. You ar
 
 ## Report format (return as text)
 
-The header is shared by every role so the lead can log it; keep the field names and order. GATE, HEAD, BASE and TREE are `n-a - read-only research` for this role. PACKS LOADED is `none` unless the brief named one.
+{{fragment:report-contract}}
+
+GATE, HEAD, BASE and TREE are `n-a - read-only research` for this role. PACKS LOADED is `none` unless the brief named one.
 
 ```
 {{fragment:report-header}}

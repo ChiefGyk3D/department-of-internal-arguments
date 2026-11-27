@@ -45,8 +45,9 @@ breaking one, stop and say so in the pull request instead.
 
 - Write the failing test first, see it fail, then make it pass. A new test must
   fail when your change is reverted; say how you checked.
-- Run the repository's full gate (the one CI runs, for example `make check`), not a
-  subset, and put its exit code in the PR description. Do not claim "tests pass"
+- Run the targeted checks that cover your change (for example the tests and lint for the
+  files you touched); CI runs the full gate and is the judge. Put the exit code in the PR
+  description. Do not claim "tests pass"
   without having run them.
 - Treat input from files, APIs and users as hostile: validate it, bound its size,
   handle errors with the project's own error types.

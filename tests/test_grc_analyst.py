@@ -109,7 +109,7 @@ class RoleFile(unittest.TestCase):
         names = ["NIST Cybersecurity Framework 2.0", "NIST SP 800-53 Rev. 5", "CIS Controls v8.1", "AICPA SOC 2"]
         marks = [facts.index(n) for n in names]
         self.assertEqual(marks, sorted(marks))
-        for name, lo, hi in zip(names, marks, marks[1:] + [len(facts)]):
+        for name, lo, hi in zip(names, marks, marks[1:] + [len(facts)], strict=True):
             clause = facts[lo:hi]
             with self.subTest(name):
                 self.assertRegex(clause, r"\bpage\b")
@@ -197,7 +197,7 @@ class EvalCases(unittest.TestCase):
 
     def test_two_cases(self):
         picked = [c for c in self.cases().values() if c["roles"] == [NAME]]
-        self.assertEqual([c["id"] for c in picked], [47, 48])
+        self.assertEqual([c["id"] for c in picked], [49, 50])
         for c in picked:
             self.assertEqual(c["grading"], "mechanical")
             json.dumps(c)  # serializable

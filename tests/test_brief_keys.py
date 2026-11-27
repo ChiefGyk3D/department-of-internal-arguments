@@ -23,6 +23,7 @@ KEY_LINE = re.compile(r"(role|model):")
 ROLE_VALUE = re.compile(r"[a-z][a-z-]{0,39}")
 MODEL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 LOWER_KEY_LINE = re.compile(r"[a-z][a-z-]*:")
+TEMPLATE_RESEARCH = "research: n/a - editing the repository's own files; no outside facts needed\n"
 
 
 def parse_brief(text):
@@ -131,10 +132,148 @@ class TemplateLines(unittest.TestCase):
     def test_export_brief_keys_equal_template_keys_both_directions(self):
         data = em.read_pins(ROOT / em.EXPORT_PATH)
         template_keys = {ln.split(":")[0] for ln in self.text.split("\n") if LOWER_KEY_LINE.match(ln)}
-        # `spend:` is a separate policy line (issue #66) with its own validator; it is not a machine-read brief key.
-        self.assertEqual(template_keys - {"spend"}, set(data["brief_keys"]))
+        # `spend:` (issue #66) and `research:` (issue #121) are separate policy lines with their own validators; they
+        # are not machine-read brief keys.
+        self.assertEqual(template_keys - {"spend", "research"}, set(data["brief_keys"]))
         self.assertEqual(data["brief_keys"], ["role", "model"])
         self.assertEqual(data["brief_keys"], list(em.BRIEF_KEYS))
+
+
+class ResearchAndRoles(unittest.TestCase):
+    """Issue #121: the template carries one `research:` line and names every role."""
+
+    def setUp(self):
+        self.text = comment_free((ROOT / TEMPLATE).read_text(encoding="utf-8"))
+
+    def test_template_has_exactly_one_valid_research_line(self):
+        self.assertEqual(validate.research_line_errors(self.text), [])
+        self.assertEqual(sum(ln.startswith("research: ") for ln in self.text.split("\n")), 1)
+
+    def test_research_guard_bites(self):
+        good = "research: n/a - reason\n"
+        cases = {
+            "missing": "",
+            "duplicated": good * 2,
+            "empty": "research:\n",
+            "no reason": "research: n/a\n",
+            "empty reason": "research: n/a - \n",
+            "unknown form": "research: maybe\n",
+            "only in a code fence": "```\n" + good + "```\n",
+            "only in a tilde fence": "~~~\n" + good + "~~~\n",
+            "only in an indented fence": "   ```\n" + good + "   ```\n",
+            "no space after the colon": "research:n/a - reason\n",
+            "two spaces after the colon": "research:  n/a - reason\n",
+            "no space and a valid line": good + "research:n/a - reason\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertTrue(validate.research_line_errors(text), label)
+        for ok in (good, "research: ladder - prior art, vendor docs page, live API\n"):
+            self.assertEqual(validate.research_line_errors(ok), [])
+
+    def test_fence_closes_only_with_same_character_and_at_least_the_same_length(self):
+        line = "research: n/a - hidden\n"
+        for label, text in {
+            "four backticks closed by three": "````\n" + line + "```\n" + line + "````\n",
+            "five tildes closed by four": "~~~~~\n" + line + "~~~~\n" + line + "~~~~~\n",
+            "backticks closed by tildes": "```\n" + line + "~~~\n" + line + "```\n",
+            "tildes closed by backticks": "~~~\n" + line + "```\n" + line + "~~~\n",
+            "closer carries text": "```\n" + line + "``` x\n" + line + "```\n",
+            "never closed": "```\n" + line,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # a longer closer ends the fence, and a line after it is operative
+        text = "```\n" + line + "`````\n" + "research: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+        text = "~~~~\n" + line + "   ~~~~~\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+
+    def test_fence_opened_in_a_list_item_is_an_opener_and_its_indented_closer_closes_it(self):
+        hid = "research: n/a - hidden\n"
+        real = "research: n/a - real\n"
+        want = ["research: n/a - real"]
+        # the failing example from #127: a bullet with a python fence, closed two spaces in, then a real line
+        text = "- item\n  ```python\n" + hid + "  ```\n" + real
+        self.assertEqual(validate.policy_lines(text, "research"), want)
+        for label, text in {
+            "bullet opener, indented closer": "- ```python\n" + hid + "  ```\n" + real,
+            "star bullet": "* ```\n" + hid + "  ```\n" + real,
+            "ordered item": "1. ```\n" + hid + "   ```\n" + real,
+            "ordered paren item": "1) ~~~\n" + hid + "   ~~~\n" + real,
+            "nested item": "- a\n  - ```\n" + hid + "    ```\n" + real,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), want, label)
+        # hidden while the fence is open, also when it is never closed or the closer is the wrong kind
+        for label, text in {
+            "bullet fence never closed": "- ```\n  " + hid + hid,
+            "wrong closer character": "- ```\n" + hid + "  ~~~\n" + hid,
+            "closer too short": "- ````\n" + hid + "  ```\n" + hid,
+            "closer carries text": "- ```\n" + hid + "  ``` x\n" + hid,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # a closer indented past the content indent plus three spaces is content, not a closer
+        self.assertEqual(validate.policy_lines("- ```\n" + hid + "      ```\n" + hid, "research"), [])
+        # four spaces without a marker is indented code, not an opener
+        self.assertEqual(validate.policy_lines("    ```\n" + real, "research"), want)
+
+    def test_fence_after_several_list_markers_or_a_tab_is_an_opener(self):
+        hid = "research: n/a - hidden\n"
+        for label, text in {
+            "two bullets": "- - ```\n" + hid + "```\n",
+            "three markers": "- - - ```\n" + hid + "```\n",
+            "ordered inside bullet": "- 1. ```\n" + hid + "```\n",
+            "ordered pair": "1. 2) ```\n" + hid + "```\n",
+            "tab after marker": "-\t```\n" + hid + "```\n",
+            "tab after ordered marker": "1.\t```\n" + hid + "```\n",
+            "tab between markers": "-\t- ```\n" + hid + "```\n",
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), [], label)
+        # and the closer still closes: a real line after it is returned
+        text = "- - ```\n" + hid + "    ```\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+        text = "-\t```\n" + hid + "\t```\nresearch: n/a - real\n"
+        self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"])
+
+    def test_backtick_info_string_clause_a_backtick_after_the_run_is_inline_code_not_an_opener(self):
+        line = "research: n/a - real\n"
+        for label, text in {
+            "inline code span": "```x``` and more\n" + line,
+            "backtick in info string": "```py`thon\n" + line,
+            "bullet inline code": "- ```x```\n" + line,
+        }.items():
+            with self.subTest(label):
+                self.assertEqual(validate.policy_lines(text, "research"), ["research: n/a - real"], label)
+        # the clause applies to backticks only: a tilde fence may carry a backtick in its info string
+        self.assertEqual(validate.policy_lines("~~~ a`b\n" + line + "~~~\n", "research"), [])
+        # no backtick after the run: it is an opener and hides the line
+        self.assertEqual(validate.policy_lines("```python\n" + line, "research"), [])
+
+    def test_research_reason_is_printable_ascii_only_and_the_template_says_so(self):
+        self.assertTrue(validate.research_line_errors("research: n/a - caf\u00e9\n"))
+        self.assertEqual(validate.research_line_errors("research: n/a - cafe\n"), [])
+        self.assertIn("printable ASCII only", (ROOT / TEMPLATE).read_text(encoding="utf-8"))  # the comment block
+
+    def test_spend_line_fences_and_spacing_bite_too(self):
+        free = "spend: none - free-only\n"
+        for label, text in {
+            "tilde fence": "~~~\n" + free + "~~~\n",
+            "indented fence": "  ```\n" + free + "  ```\n",
+            "no space": "spend:none - free-only\n",
+        }.items():
+            with self.subTest(label):
+                self.assertTrue(validate.spend_line_errors(text), label)
+        self.assertEqual(validate.spend_line_errors(free), [])
+
+    def test_template_lists_every_role(self):
+        data = em.read_pins(ROOT / em.EXPORT_PATH)
+        self.assertEqual(len(data["roles"]), 12)
+        for role in data["roles"]:
+            with self.subTest(role):
+                self.assertRegex(self.text, rf"(?m)^- Role agent and model:.*\b{re.escape(role)}\b")
 
 
 class Scratch(unittest.TestCase):
@@ -177,6 +316,17 @@ class Validator(Scratch):
             with self.subTest(label):
                 self.setUp()
                 self.edit(TEMPLATE, old, new)
+                self.assertTrue(self.brief_problems(), label)
+
+    def test_research_line_missing_or_malformed_fails_validation(self):
+        for label, new in {
+            "missing": "",
+            "no reason": "research: n/a\n",
+            "duplicated": "research: n/a - x\n" * 2,
+        }.items():
+            with self.subTest(label):
+                self.setUp()
+                self.edit(TEMPLATE, TEMPLATE_RESEARCH, new)
                 self.assertTrue(self.brief_problems(), label)
 
     def test_exact_model_id_is_accepted(self):

@@ -1,6 +1,6 @@
 # Policies
 
-Four policies, embedded in every generated agent. The sources are in `policies/`. In one line each:
+Four policies. The first three are embedded in every generated role file; model routing is addressed to the lead, so it stays a policy file that the lead reads and the prompt exporter embeds. The sources are in `policies/`. In one line each:
 
 - [Human approvals](../policies/human-approvals.md): approval is never inferred and role agents never push; every paid action has its own single-use approval, shown after a quota and cost line.
 - [Quality gates](../policies/quality-gates.md): gate statuses are pass, fail, not-run or n-a, and a repository with no gate says so rather than inventing one; reviewers prove fixes bite by reverting them and finish with a clean tree.

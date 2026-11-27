@@ -1,0 +1,29 @@
+usage: <client> [-h] [--model MODEL] [--task TASK] [--outcome ID OUTCOME]
+                 [--envelope] [--json] [--think] [--timeout TIMEOUT] [--stats]
+                 [--num-ctx NUM_CTX] [--est-mb EST_MB] [--wait WAIT]
+                 [--allow-reload]
+                 [prompt]
+
+<client>: send one prompt to the local Ollama box and print the answer.
+
+positional arguments:
+  prompt
+
+options:
+  -h, --help            show this help message and exit
+  --model MODEL
+  --task TASK           required for a real call: a short label for the log,
+                        e.g. triage
+  --outcome ID OUTCOME  record what was done with call ID's answer:
+                        accepted|rewritten|discarded|fact-error
+  --envelope            print {"call_id", "model", "response"} as JSON instead
+                        of the bare answer
+  --json                ask Ollama for JSON output
+  --think               let a thinking model think
+  --timeout TIMEOUT
+  --stats
+  --num-ctx NUM_CTX     num_ctx this call declares (the loaded one is sent)
+  --est-mb EST_MB       estimated VRAM for this call, MB
+  --wait WAIT           seconds to wait for a slot before exit 75
+  --allow-reload        send the declared num_ctx even if it differs from the
+                        loaded one
