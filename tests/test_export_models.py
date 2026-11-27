@@ -84,6 +84,7 @@ class Content(unittest.TestCase):
                 "analyst",
                 "assessor",
                 "cloud-engineer",
+                "cybersecurity-blue",
                 "devops-engineer",
                 "implementer",
                 "planner",

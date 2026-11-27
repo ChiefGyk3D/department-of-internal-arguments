@@ -335,7 +335,7 @@ class OverlayLoading(unittest.TestCase):
     def test_overlay_pack_rules_still_apply(self):
         bad = {
             "no verify section": pack_text("private-ops").replace("## How to verify", "## Other"),
-            "bad date": pack_text("private-ops").replace('updated: "2026-10-08"', 'updated: "26"', 1),
+            "bad date": pack_text("private-ops").replace('updated: "2026-11-13"', 'updated: "26"', 1),
             "name mismatch": pack_text("different"),
         }
         for label, text in bad.items():

@@ -23,6 +23,7 @@ ROLE_NAMES = (
     "researcher",
     "cloud-engineer",
     "devops-engineer",
+    "cybersecurity-blue",
     "analyst",
     "assessor",
     "planner",

@@ -295,7 +295,7 @@ class RoleRules(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = copy_fixture(d)
             f = r / "packs/threat-model/PACK.md"
-            f.write_text(f.read_text().replace('updated: "2026-10-08"', 'updated: "yesterday"'))
+            f.write_text(f.read_text().replace('updated: "2026-11-13"', 'updated: "yesterday"'))
             self.assertTrue(any("updated must be" in e for e in validate(r)))
         with tempfile.TemporaryDirectory() as d:
             r = copy_fixture(d)
@@ -463,7 +463,7 @@ class RoleFileTrim(unittest.TestCase):
 
     def test_role_files_carry_no_lead_addressed_routing_text(self):
         files = self.agent_files()
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 33)
         for f in files:
             text = f.read_text(encoding="utf-8")
             for needle in self.LEAD_ONLY:
@@ -562,7 +562,7 @@ class ReportContract(unittest.TestCase):
 
     def test_every_role_file_has_the_contract_once_and_no_old_sentence(self):
         files = self.files()
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 33)
         for f in files:
             text = f.read_text(encoding="utf-8")
             self.assertEqual(text.count("**Report contract.**"), 1, f.name)
