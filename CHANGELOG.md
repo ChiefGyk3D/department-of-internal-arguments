@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+Clean review export (issue #138): `scripts/review_export.py` builds a clean scratch copy of a git ref for a cyber-tier review (`git archive` into a new empty directory, agent and instruction files removed from a configurable list, `CHANGE.diff` against a base ref, a printed manifest) and refuses a non-empty output directory, an output path inside the repository, a symlink that escapes and a file over the size cap. Its `next-prompt` subcommand appends the previous round's findings to a base prompt under a fixed header, leaving the base prompt unchanged and naming no tier or model, and carries the rule that a stop caused only by a failed scan tool is HELD, not clean.
+
+- `packs/cyber-tier-review/PACK.md`: rule 3 states the failed-scan-tool case; a short section documents both commands. No pack, role or count change.
+- `tests/test_review_export.py`: real temporary git repositories, one test per refusal, byte-for-byte base prompt, header sweep for model and tier values.
+
 `threat-model` pack (issue #118): every threat model now ships both the markdown report and an OWASP Threat Dragon JSON for the owner to review (owner rule 2026-11-13). Pack text only; no role, policy or registry change.
 
 - `packs/threat-model/PACK.md` (updated 2026-11-13): deliverable item 6 (v2.0 schema file, STRIDE diagram, `tm.Actor`, `tm.Process`, `tm.Store`, `tm.Flow` and `trust-boundary-curve` cells, one threat per risk with the markdown risk id in its title); a "Model it in Threat Dragon" method step; runnable checks that the file parses, every flow end resolves to a cell, `detail.threatTop` is at least the threat count, and markdown and JSON risk ids agree; the JSON follows the same limits (no secrets, no probing, placeholders only). Schema read from OWASP/threat-dragon `ThreatDragonModels/v2-threat-model.json` on 2026-11-13.

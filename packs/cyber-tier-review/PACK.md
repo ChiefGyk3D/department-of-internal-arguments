@@ -18,7 +18,7 @@ Persona text (the adversarial reviewer, the lead) says only "the high-trust tier
 
 1. **Security and adversarial reviews use the high-trust tier model, never the default.** The default model carries the standard cybersecurity safeguards, and a defensive review of exploit-shaped code can trip them.
 2. **The wrong-tier symptom** is a cutoff saying the request was flagged for possible cybersecurity risk (INFERRED wording; see the table). The rule: **fix the tier and rerun. Never reword the prompt to get past the filter, and never skip the review.** Rewording to evade a safeguard is the behavior the safeguard exists to stop; a skipped review is a hole in the gate. If the tier is correct and a safeguard still blocks a legitimate request, stop, report it with the exact text and the time, and let the user use the vendor's feedback or appeal route.
-3. **A review that cannot show its answer is a held review, not a clean one.** No findings section, an empty output, a cutoff or an authentication error all mean HELD. Report it as held with the reason. Never count it as an approval and never write "no findings".
+3. **A review that cannot show its answer is a held review, not a clean one.** No findings section, an empty output, a cutoff or an authentication error all mean HELD. Report it as held with the reason. Never count it as an approval and never write "no findings". A stop caused only by a failed scan tool (the tool did not run, crashed or returned nothing) is also HELD, not clean.
 4. **Single-flight.** One cyber-tier review at a time per user, guarded by a lock, so two runs do not share a session, race on authentication state or burn tokens twice. Example: `flock -n "$SCRATCH/cyber-review.lock" <command>`; if the lock is held, wait or report, do not start a second run.
 5. **Least privilege.** Run the review read-only (`-s read-only`), against a scratch copy of the code, with no credentials in the environment. The vendor's recommended configuration page asks for isolation, narrow permissions and human oversight for higher-risk work.
 
@@ -78,6 +78,18 @@ One measured observation (2026-10-26), INFERRED, not found on a vendor page: whe
 ## Round budget
 
 The round budget, the stop rule, the base-severity rule (Critical and High are never accepted) and the evidence handoff are in the `review-protocol` pack; load it and follow it, and do not restate its numbers here. Nothing there loosens the rules above: the tier is fixed, never the prompt, and a held review is never a clean one.
+
+## Clean export and next-round prompt
+
+`scripts/review_export.py` in the department repository (standard library only) prepares the scratch copy and the round prompt. It names no tier, model or flag; those stay in your private config.
+
+```
+python3 scripts/review_export.py export --repo <repo> --ref <head> --base <base> --out <new-empty-dir> [--path <p>]...
+python3 scripts/review_export.py next-prompt --base-prompt <prompt.txt> --findings <findings.txt> --output <next.txt>
+```
+
+- `export` runs `git archive` of the ref into a new or empty directory, removes agent and instruction files (`.codex`, `.agents`, `.claude`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and similar; `--strip` replaces the list, `--add-strip` extends it), writes `CHANGE.diff` against the base (stripped files left out, `--path` limits it) and prints the file count and bytes. It refuses, writing nothing, on a non-empty output directory, an output path inside the repository, a symlink that escapes, or a kept file over `--max-file-bytes`.
+- `next-prompt` copies the base prompt unchanged, appends a fixed header and the previous findings as data, and carries the held rule above. It refuses an empty findings file and never overwrites its output.
 
 ## Evidence table
 
