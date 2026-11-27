@@ -18,7 +18,8 @@ cutoff, authentication or failed-scan marker is also present); a clean statement
 Only the final message is judged for HELD markers, the findings section and the clean statement: the text after the
 last `tokens used` line and its count line, up to a wrapper marker line (`exit=N status=ok`); without a `tokens used`
 line, the last 8 KiB. A clean statement counts only after the findings heading, with no later heading, finding,
-severity mention or unclosed code fence (a cut-off block). A symlink or `..` in any path component is refused. The echoed prompt and the transcript never decide the verdict. Findings come from the final
+severity mention or unclosed code fence (a cut-off block). A symlink or `..` in any path component is refused.
+The echoed prompt and the transcript never decide the verdict. Findings come from the final
 message first and from the whole file only when it has none. No final message is HELD.
 
 The input is read as untrusted data: one regular file, no symlink, invalid UTF-8 replaced, at most the last 1 MiB read
