@@ -132,8 +132,10 @@ class CurrentTree(unittest.TestCase):
     def test_every_adapter_embeds_every_policy(self):
         for f in list((ROOT / ".claude/agents").glob("*.md")) + list((ROOT / ".github/agents").glob("*.md")):
             text = f.read_text()
-            for title in ("Human approvals", "Quality gates", "Security boundaries", "Model routing"):
+            for title in ("Human approvals", "Quality gates", "Security boundaries"):
                 self.assertIn(f"### {title}", text, f.name)
+            # Issue #121: Model routing is addressed to the lead, which a role cannot act on; it stays a policy file.
+            self.assertNotIn("### Model routing", text, f.name)
 
     def test_policy_rules_present(self):
         text = "\n".join((ROOT / "policies" / f"{p}.md").read_text() for p in POLICIES)
@@ -398,6 +400,195 @@ class Install(unittest.TestCase):
             install(ROOT, "claude")
         with tempfile.TemporaryDirectory() as d, self.assertRaises(ValueError):
             install(d, "everything")
+
+
+class GateWording(unittest.TestCase):
+    """Issue #121: targeted checks locally, CI is the judge; no text tells an agent to run the full gate."""
+
+    SOURCES = (
+        "policies/quality-gates.md",
+        "templates/brief.md",
+        "templates/copilot-instructions.md",
+        "docs/writing-a-brief.md",
+        "docs/roles.md",
+        "packs/python-untrusted-input/PACK.md",
+        "CLAUDE.md",
+        "templates/lead.md",
+    )
+    BANNED = re.compile(
+        r"(?i)(?<!CI )\b(?:run|runs|running) (?:the )?(?:repo(?:sitory)?'s )?full gate\b(?! unless)"
+        r"|(?<!CI )\b(?:run|runs|running) the gate\b|exactly as CI (?:runs|would)|narrower subset|not a\s+subset"
+    )
+
+    def texts(self):
+        paths = [ROOT / n for n in self.SOURCES] + sorted((ROOT / "roles").glob("*.md"))
+        return {p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8") for p in paths}
+
+    def test_nothing_tells_an_agent_to_run_the_full_gate(self):
+        texts = self.texts()
+        self.assertGreaterEqual(len(texts), 15)  # something was collected: 8 named files and 7 roles
+        for name, text in texts.items():
+            with self.subTest(name):
+                self.assertIsNone(self.BANNED.search(text), self.BANNED.search(text))
+
+    def test_policy_says_targeted_checks_and_ci_is_the_judge(self):
+        text = (ROOT / "policies/quality-gates.md").read_text(encoding="utf-8")
+        self.assertIn("targeted checks", text)
+        self.assertIn("CI is the judge", text)
+
+    def test_the_ban_bites(self):
+        for bad in (
+            "run the repo's FULL gate",
+            "runs the full gate after",
+            "exactly as CI runs it",
+            "a narrower subset",
+            "not a subset",
+            "run the gate",
+            "Then run the gate again",
+        ):
+            self.assertTrue(self.BANNED.search(bad), bad)
+        for fine in ("You do not run the full gate unless the brief asks", "CI runs the full gate and is the judge"):
+            self.assertIsNone(self.BANNED.search(fine), fine)
+
+
+class RoleFileTrim(unittest.TestCase):
+    """Issue #121: no lead-addressed text in role files, and the gate capture rule is stated once per role file."""
+
+    LEAD_ONLY = ("Routing is a decision policy", "A 429 is final", "Every dispatch names its model explicitly")
+
+    def agent_files(self):
+        files = sorted((ROOT / ".claude/agents").glob("*.md")) + sorted((ROOT / ".github/agents").glob("*.md"))
+        files += sorted((ROOT / ".codex/agents").glob("*.toml"))
+        return files
+
+    def test_role_files_carry_no_lead_addressed_routing_text(self):
+        files = self.agent_files()
+        self.assertEqual(len(files), 30)
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            for needle in self.LEAD_ONLY:
+                self.assertNotIn(needle, text, f.name)
+
+    def test_the_policy_file_stays_for_the_exporter(self):
+        text = (ROOT / "policies/model-routing.md").read_text(encoding="utf-8")
+        for needle in self.LEAD_ONLY:
+            self.assertIn(needle, text)  # the check above bites: the text exists, it is just not in role files
+
+    def test_adversarial_reviewer_keeps_the_cyber_tier_line(self):
+        for f in self.agent_files():
+            if f.name.startswith("adversarial-reviewer"):
+                self.assertIn("never on a default or unpaid tier", f.read_text(encoding="utf-8"), f.name)
+
+    def test_gate_capture_command_appears_once_per_role_file(self):
+        for f in self.agent_files():
+            text = f.read_text(encoding="utf-8")
+            n = text.count('2>&1; echo "gate exit=$?"')
+            if f.name.startswith(("implementer", "reviewer", "transcriber")):
+                self.assertEqual(n, 1, f.name)
+            else:
+                self.assertLessEqual(n, 1, f.name)
+
+
+class LocalRoutingPackName(unittest.TestCase):
+    """Issue #121: one name for the local-model routing pack. The installer names a skill `pack-<directory>`, so the
+    directory name is the installed name; the older hand-made copy called ollama-local-routing is not a second pack."""
+
+    def test_one_directory_and_one_installed_skill_name(self):
+        self.assertEqual((ROOT / "packs/local-llm-routing/PACK.md").is_file(), True)
+        self.assertEqual(sorted(p.name for p in (ROOT / "packs").glob("*ollama*")), [])
+        for base in (".claude/skills", ".agents/skills"):
+            self.assertTrue((ROOT / base / "pack-local-llm-routing/SKILL.md").is_file(), base)
+            self.assertEqual(sorted(p.name for p in (ROOT / base).glob("*ollama*")), [], base)
+
+    def test_pack_page_names_the_old_name_once(self):
+        text = (ROOT / "docs/packs.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("ollama-local-routing"), 1)
+        self.assertIn("pack-local-llm-routing", text)
+
+
+class DeletingFilesRule(unittest.TestCase):
+    """Issue #121: the delete-only-your-own-files rule, a shared fragment, reaches every role that can run commands."""
+
+    RULE = "Delete only files and directories you created in this task"
+    HAS_SHELL = (
+        "implementer",
+        "reviewer",
+        "adversarial-reviewer",
+        "transcriber",
+        "cloud-engineer",
+        "devops-engineer",
+        "analyst",
+    )
+
+    def test_every_shell_role_carries_it_in_every_adapter(self):
+        paths = []
+        for name in self.HAS_SHELL:
+            paths += [ROOT / f".claude/agents/{name}.md", ROOT / f".github/agents/{name}.agent.md"]
+            paths.append(ROOT / f".codex/agents/{name}.toml")
+        self.assertEqual(len(paths), 21)
+        for p in paths:
+            self.assertEqual(p.read_text(encoding="utf-8").count(self.RULE), 1, p.name)
+
+    def test_roles_without_a_shell_do_not_carry_it(self):
+        self.assertNotIn(self.RULE, (ROOT / ".claude/agents/researcher.md").read_text(encoding="utf-8"))
+
+    def test_the_rule_names_no_private_path(self):
+        text = (ROOT / "fragments/deleting-files.md").read_text(encoding="utf-8")
+        self.assertNotIn("~/", text)
+        self.assertIn("exact path", text)
+
+
+class ReportContract(unittest.TestCase):
+    """Issue #121: one report contract per role file, replacing the old shared-header sentence, with every mandatory
+    field and the gate and evidence rules unchanged."""
+
+    PARTS = (
+        "STATUS: done | partly done | blocked",
+        "default 12 lines",
+        "counts free text only",
+        "Exempt from the cap and never dropped",
+        "every field of this role's report format",
+        "5 lines",
+        "`NEEDS:`",
+        "exit code",
+        "request a higher cap in the `NEEDS:` line",
+    )
+    OLD = "The header is shared by every role so the lead can log it"
+    FIELDS = ("ROLE:", "MODEL:", "HEAD:", "BASE:", "GATE:", "OTHER GATES:", "PACKS LOADED:", "TREE:", "NOT VERIFIED:")
+
+    def files(self):
+        out = sorted((ROOT / ".claude/agents").glob("*.md")) + sorted((ROOT / ".github/agents").glob("*.md"))
+        return out + sorted((ROOT / ".codex/agents").glob("*.toml"))
+
+    def test_every_role_file_has_the_contract_once_and_no_old_sentence(self):
+        files = self.files()
+        self.assertEqual(len(files), 30)
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            self.assertEqual(text.count("**Report contract.**"), 1, f.name)
+            self.assertNotIn(self.OLD, text, f.name)
+            for part in self.PARTS:
+                self.assertIn(part, text, (f.name, part))
+
+    def test_mandatory_fields_and_gate_rules_are_still_there(self):
+        for f in self.files():
+            text = f.read_text(encoding="utf-8")
+            for field in self.FIELDS:
+                self.assertIn(field, text, (f.name, field))
+            for rule in ("Never weaken a check to get green", "Reviewers prove fixes bite", "not-run - none defined"):
+                self.assertIn(rule, text, (f.name, rule))
+        for name in ("implementer", "adversarial-reviewer"):
+            text = (ROOT / f".claude/agents/{name}.md").read_text(encoding="utf-8")
+            self.assertIn("DEVIATIONS" if name == "implementer" else "VERDICT:", text)
+        self.assertIn("ESCALATIONS:", (ROOT / ".claude/agents/implementer.md").read_text(encoding="utf-8"))
+
+    def test_brief_template_states_the_cap(self):
+        text = (ROOT / "templates/brief.md").read_text(encoding="utf-8")
+        self.assertIn("default 12 lines", text)
+        self.assertIn("lines of free text", text)
+        self.assertIn("NEEDS", text)
+        self.assertIn("request a higher cap in the `NEEDS:` line", text)
+        self.assertIn("Evidence the report must carry (gate exit code, red evidence, revert check", text)
 
 
 class Export(unittest.TestCase):
@@ -698,6 +889,19 @@ class AmericanSpelling(unittest.TestCase):
         re.IGNORECASE,
     )
     DIRS = ("docs", "packs", "policies", "fragments", "templates", "roles", "evals")
+    # A URL path is not prose: a cited page keeps its publisher's spelling. Only https URLs are removed.
+    URL = re.compile(r"https://[^\s)>\]\"'`,]+")
+
+    def prose(self, line):
+        return self.URL.sub("", line)
+
+    def test_the_guard_ignores_urls_but_not_prose(self):
+        word = "organis" + "ations"
+        url_line = f"(https://example.test/for-{word}/page, read 2026-11-25)"
+        self.assertIsNotNone(self.BRITISH.search(url_line))  # the raw line would trip the pattern
+        self.assertIsNone(self.BRITISH.search(self.prose(url_line)))
+        self.assertIsNotNone(self.BRITISH.search(self.prose(f"{url_line} and the {word} agree")))
+        self.assertIsNotNone(self.BRITISH.search(self.prose(f"http://example.test/x {word}")))  # only https is removed
 
     def files(self):
         found = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "SECURITY.md"]
@@ -726,7 +930,7 @@ class AmericanSpelling(unittest.TestCase):
             f"{f.relative_to(ROOT)}:{n}: {m.group(0)}"
             for f in files
             for n, line in enumerate(f.read_text().splitlines(), 1)
-            for m in self.BRITISH.finditer(line)
+            for m in self.BRITISH.finditer(self.prose(line))
         ]
         self.assertEqual(hits, [])
 

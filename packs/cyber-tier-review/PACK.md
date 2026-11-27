@@ -70,14 +70,14 @@ One measured observation (2026-10-26), INFERRED, not found on a vendor page: whe
 ## Prompt shape that passes
 
 - State what the code is and who trusts whom (for example: "a parser for files from untrusted contributors, run in CI with repository write access").
-- Name the files and exactly one defect class per run (for example: path confinement, or duplicate-key handling).
+- Name the files and the base and head commits. The class list, the round-one sweep and the rest of the prompt shape are in the `review-protocol` pack; its sweep rule replaces any one-defect-class limit. Load `review-protocol` before writing the prompt.
 - Ask for a failing input and the observed behavior, not an essay. A finding without an input that fails is SPECULATIVE.
 - Avoid attacker-voice exploit lists ("how do I break in", step-by-step abuse). Write it as a defender reading code: what input makes this wrong, and what happens.
 - Do not paste secrets, real hostnames or live target details into the prompt.
 
 ## Round budget
 
-Parsers and sandbox code usually need 3-4 rounds: each fix is the likeliest place for the next defect, so the last round reviews the fix, not the original. Stop at the budget and hand the remaining findings to the lead; do not loop. If two rounds on one finding class fail, recommend a different model, as the quality-gates policy says.
+The round budget, the stop rule, the base-severity rule (Critical and High are never accepted) and the evidence handoff are in the `review-protocol` pack; load it and follow it, and do not restate its numbers here. Nothing there loosens the rules above: the tier is fixed, never the prompt, and a held review is never a clean one.
 
 ## Evidence table
 

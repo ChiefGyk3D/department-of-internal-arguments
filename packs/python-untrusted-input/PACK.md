@@ -81,6 +81,6 @@ Measured in the SAFO guard and approval reviews (2026-10); one line each, no byp
 - Mutation replay: stub the transport to time out after sending a mutation; assert exactly one send.
 - Mutation sweep: for each validation, delete it in a scratch copy and run the suite; any green run is a survivor.
 - Revert check: undo the fix, run the new test, expect red; restore, expect green.
-- Gate: run the repo's full gate with the exit code captured (`> log 2>&1; echo "exit=$?"`).
+- Checks: run the targeted tests for the touched code with the exit code captured (`> log 2>&1; echo "exit=$?"`).
 - Foreign-object probe: pass a subclass whose `__eq__`, `__hash__` and `__str__` raise; the loader must return its own error type.
 - Subprocess probe: a child that forks a grandchild writing a marker after the timeout, and one that spins on the CPU; assert the marker never appears and the group is gone.
