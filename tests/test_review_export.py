@@ -190,6 +190,11 @@ class NextPrompt(unittest.TestCase):
         self.assertIn(rx.PROMPT_HEADER, out)
         self.assertEqual(out, self.BASE + "\n" + rx.PROMPT_HEADER + "\n" + self.FIND)
 
+    def test_surrounding_whitespace_in_the_base_prompt_is_kept(self):
+        base = "\n  indented first line\n\n\n"
+        out = rx.next_prompt(base, self.FIND)
+        self.assertTrue(out.startswith(base))
+
     def test_base_without_trailing_newline_is_not_reworded(self):
         out = rx.next_prompt("no newline", self.FIND)
         self.assertTrue(out.startswith("no newline\n"))
