@@ -24,6 +24,7 @@ ROLE_NAMES = (
     "cloud-engineer",
     "devops-engineer",
     "cybersecurity-blue",
+    "grc-analyst",
     "analyst",
     "assessor",
     "planner",

@@ -22,10 +22,11 @@ jobs:
       contents: read
       id-token: write   # declared by the shared python-ci workflow; checked statically, unused here
     with:
-      python-versions: '["3.11", "3.12", "3.13"]'
+      # python-versions is left at the shared python-ci default (3.11 to 3.15) so this repo tests every Python GYST
+      # supports. Drop dates (issue #81): 3.11 after 2027-10-31, 3.12 after 2028-10-31, 3.13 after 2029-10-31.
       install-command: |
         python -m pip install --upgrade pip
-        pip install pytest 'pyyaml==6.0.2'   # pyyaml: test-only, compares the front matter check with a real loader
+        pip install pytest 'pyyaml==6.0.3'   # pyyaml: test-only, compares the front matter check with a real loader
       test-command: |
         python scripts/generate.py --check
         python scripts/gen_wiki.py --check
