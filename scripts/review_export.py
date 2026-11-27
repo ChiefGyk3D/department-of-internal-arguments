@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -91,13 +92,19 @@ def _resolve_ref(repo, ref):
         raise Refused(f"unknown ref {ref!r}") from exc
 
 
+def _key(p):
+    """Comparison key for a path or pattern: a target file system may treat names that differ only by Unicode
+    normalization or case as the same, so every comparison uses NFC plus casefold."""
+    return unicodedata.normalize("NFC", p).casefold()
+
+
 def _stripped(path, patterns):
     """True when path (posix, relative) is a pattern, lies under one, or has a component matching a
     slash-free pattern. Case-insensitive."""
-    path = path.casefold()
+    path = _key(path)
     parts = path.split("/")
     for pat in patterns:
-        pat = pat.casefold()
+        pat = _key(pat)
         if "/" in pat:
             if path == pat or path.startswith(pat + "/"):
                 return True
@@ -144,9 +151,36 @@ def _link_problem(name, target, links):
             cur.pop()
             continue
         cur.append(comp)
-        if i < len(comps) - 1 and "/".join(cur).casefold() in links:
+        if i < len(comps) - 1 and _key("/".join(cur)) in links:
             return "passes through another symlink"
     return None
+
+
+def _under(root, path):
+    return path == root or path.startswith(root + os.sep)
+
+
+def _check_parent(out, dest):
+    """Before a write: the destination's parent must really lie under the output directory."""
+    if not _under(os.path.realpath(out), os.path.realpath(dest.parent)):
+        raise Refused(f"{dest} would be written outside the export")
+
+
+def _check_names(keep):
+    """Two kept paths that a target file system could treat as one, or a path under a kept file or symlink
+    (by comparison key), are refused."""
+    seen = {}
+    for _, _, name in keep:
+        k = _key(name)
+        if k in seen:
+            raise Refused(f"{name} and {seen[k]} collide on a case-folding or normalizing file system")
+        seen[k] = name
+    for _, _, name in keep:
+        parts = name.split("/")
+        for i in range(1, len(parts)):
+            parent = _key("/".join(parts[:i]))
+            if parent in seen:
+                raise Refused(f"{name} lies under {seen[parent]}, which is a file or symlink")
 
 
 def _verify_links(out, links):
@@ -154,7 +188,7 @@ def _verify_links(out, links):
     root = os.path.realpath(out)
     for rel in links:
         real = os.path.realpath(os.path.join(out, rel))
-        if real != root and not real.startswith(root + os.sep):
+        if not _under(root, real):
             raise Refused(f"symlink {rel} resolves outside the export")
 
 
@@ -223,7 +257,8 @@ def export(repo, ref, out, base=None, paths=(), strip=DEFAULT_STRIP, max_file_by
             raise Refused(f"the repository already has a file named {DIFF_NAME}")
         keep.append((mode, sha, name))
 
-    links = {name.casefold() for mode, _, name in keep if mode == "120000"}
+    _check_names(keep)
+    links = {_key(name) for mode, _, name in keep if mode == "120000"}
     blobs = {}
     for mode, sha, name in keep:
         data = _git(repo, "cat-file", "blob", sha, binary=True)
@@ -239,18 +274,24 @@ def export(repo, ref, out, base=None, paths=(), strip=DEFAULT_STRIP, max_file_by
     made = []
     try:
         out.mkdir(parents=True, exist_ok=True)
-        for mode, _, name in keep:
-            dest = out / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            data = blobs[name]
-            if mode == "120000":
-                dest.symlink_to(os.fsdecode(data))
-                made.append(name)
-            else:
-                dest.write_bytes(data)
-                dest.chmod(0o755 if mode == "100755" else 0o644)
-                total += len(data)
-            files += 1
+        # directories and regular files first, symlinks last, each parent re-checked on disk before the write
+        for want_link in (False, True):
+            for mode, _, name in keep:
+                if (mode == "120000") != want_link:
+                    continue
+                dest = out / name
+                _check_parent(out, dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                _check_parent(out, dest)
+                data = blobs[name]
+                if want_link:
+                    dest.symlink_to(os.fsdecode(data))
+                    made.append(name)
+                else:
+                    dest.write_bytes(data)
+                    dest.chmod(0o755 if mode == "100755" else 0o644)
+                    total += len(data)
+                files += 1
         if base_sha:
             with (out / DIFF_NAME).open("xb") as f:
                 f.write(diff)

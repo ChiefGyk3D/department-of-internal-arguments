@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import review_export as rx  # noqa: E402
 
+NFC = "café"  # one code point
+NFD = "café"  # base letter plus combining accent: the same name to a normalizing file system
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t",
     "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -292,6 +294,92 @@ class Hardening(Base):
             self.assertIn(f, diff)
         self.assertIn("+line", diff)  # the -diff attribute does not hide the content
         self.assertIn("$Format:%H$", diff)
+
+    def _tree_with(self, entries):
+        """Commit a tree holding exactly these (path, kind, text) entries, built with plumbing so names that
+        differ only by case or normalization can coexist."""
+        env = {**os.environ, **GIT_ENV}
+        lines = []
+        for path, kind, payload in entries:
+            blob = (
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                    input=payload.encode(),
+                    capture_output=True,
+                    check=True,
+                    env=env,
+                )
+                .stdout.decode()
+                .strip()
+            )
+            mode = "120000" if kind == "link" else "100644"
+            lines.append(f"{mode} {blob}\t{path}\n")
+        env = {**env, "GIT_INDEX_FILE": str(self.tmp / "plumbing-index")}
+        for argv, data in (
+            (["update-index", "--add", "--index-info"], "".join(lines).encode()),
+            (["write-tree"], b""),
+        ):
+            res = subprocess.run(
+                ["git", "-C", str(self.repo), *argv], input=data, capture_output=True, check=True, env=env
+            )
+        tree = res.stdout.decode().strip()
+        return git(self.repo, "commit-tree", tree, "-m", "plumbing").strip()
+
+    def test_names_that_differ_only_by_normalization_collide(self):
+        head = self._tree_with([(NFC + ".txt", "file", "a"), (NFD + ".txt", "file", "b")])
+        self.assertIn("collide", self.refused(head))
+        self.assertFalse(self.out.exists())
+
+    def test_names_that_differ_only_by_case_collide(self):
+        head = self._tree_with([("Readme.md", "file", "a"), ("README.MD", "file", "b")])
+        self.assertIn("collide", self.refused(head))
+
+    def test_path_under_a_link_by_case_or_normalization_is_refused(self):
+        for link, under in (("Dir", "dir/x.txt"), (NFC, NFD + "/x.txt")):
+            with self.subTest(link=link):
+                head = self._tree_with([(link, "link", "src"), (under, "file", "x")])
+                self.assertIn("lies under", self.refused(head))
+                self.assertFalse(self.out.exists())
+
+    def test_link_target_through_a_link_by_normalization_is_refused(self):
+        head = self._tree_with([(NFC, "link", "src"), ("e", "link", NFD + "/app.py")])
+        self.assertIn("passes through", self.refused(head))
+
+    def test_strip_matches_across_normalization(self):
+        head = self._tree_with([(NFD + ".md", "file", "x"), ("keep.md", "file", "y")])
+        rx.export(self.repo, head, self.out, strip=[NFC + ".md"])
+        self.assertEqual(self.files(self.out), ["keep.md"])
+
+    def test_write_time_parent_check_refuses_a_parent_that_leaves_the_export(self):
+        out = self.tmp / "w"
+        out.mkdir()
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(outside, out / "sneak")
+        with self.assertRaises(rx.Refused):
+            rx._check_parent(out, out / "sneak" / "f.txt")
+        rx._check_parent(out, out / "fine" / "f.txt")
+
+    def test_symlinks_are_created_after_every_regular_file(self):
+        calls = []
+        real_link, real_write = Path.symlink_to, Path.write_bytes
+
+        def link(s, *a, **k):
+            calls.append("link")
+            return real_link(s, *a, **k)
+
+        def wr(s, *a, **k):
+            calls.append("file")
+            return real_write(s, *a, **k)
+
+        Path.symlink_to, Path.write_bytes = link, wr
+        self.addCleanup(setattr, Path, "symlink_to", real_link)
+        self.addCleanup(setattr, Path, "write_bytes", real_write)
+        os.symlink("app.py", self.repo / "aaa_link")
+        head = commit(self.repo, "link first alphabetically")
+        rx.export(self.repo, head, self.out)
+        self.assertIn("link", calls)
+        self.assertNotIn("file", calls[calls.index("link") :])
 
     def test_modes_are_kept_from_the_tree(self):
         write(self.repo, "run.sh", "#!/bin/sh\n")
