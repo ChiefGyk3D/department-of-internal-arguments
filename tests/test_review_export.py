@@ -98,7 +98,7 @@ class Export(Base):
         self.assertNotIn("src/app.py", diff2)
 
     def test_strip_list_is_configurable(self):
-        rx.export(self.repo, self.head, self.out, strip=["src/other.py"])
+        rx.export(self.repo, self.head, self.out, strip=["src/other.py"], dot_allow=(".claude", ".codex", ".agents"))
         got = self.files(self.out)
         self.assertNotIn("src/other.py", got)
         self.assertIn("AGENTS.md", got)  # defaults replaced, not added to
@@ -314,7 +314,9 @@ class Hardening(Base):
             )
             mode = "120000" if kind == "link" else "100644"
             lines.append(f"{mode} {blob}\t{path}\n")
-        env = {**env, "GIT_INDEX_FILE": str(self.tmp / "plumbing-index")}
+        index = self.tmp / "plumbing-index"
+        index.unlink(missing_ok=True)  # one fresh index per tree, so trees never accumulate entries
+        env = {**env, "GIT_INDEX_FILE": str(index)}
         for argv, data in (
             (["update-index", "--add", "--index-info"], "".join(lines).encode()),
             (["write-tree"], b""),
@@ -325,25 +327,30 @@ class Hardening(Base):
         tree = res.stdout.decode().strip()
         return git(self.repo, "commit-tree", tree, "-m", "plumbing").strip()
 
-    def test_names_that_differ_only_by_normalization_collide(self):
+    def test_normalization_twins_are_refused_by_default_and_collide_when_checked(self):
         head = self._tree_with([(NFC + ".txt", "file", "a"), (NFD + ".txt", "file", "b")])
-        self.assertIn("collide", self.refused(head))
+        self.assertIn("non-ASCII", self.refused(head))
         self.assertFalse(self.out.exists())
+        with self.assertRaises(rx.Refused) as cm:
+            rx._check_names([("100644", "a", NFC + ".txt"), ("100644", "b", NFD + ".txt")])
+        self.assertIn("collide", str(cm.exception))
 
     def test_names_that_differ_only_by_case_collide(self):
         head = self._tree_with([("Readme.md", "file", "a"), ("README.MD", "file", "b")])
         self.assertIn("collide", self.refused(head))
 
-    def test_path_under_a_link_by_case_or_normalization_is_refused(self):
-        for link, under in (("Dir", "dir/x.txt"), (NFC, NFD + "/x.txt")):
-            with self.subTest(link=link):
-                head = self._tree_with([(link, "link", "src"), (under, "file", "x")])
-                self.assertIn("lies under", self.refused(head))
-                self.assertFalse(self.out.exists())
+    def test_path_under_a_link_by_case_is_refused(self):
+        head = self._tree_with([("Dir", "link", "src"), ("dir/x.txt", "file", "x")])
+        self.assertIn("lies under", self.refused(head))
+        self.assertFalse(self.out.exists())
+
+    def test_path_under_a_link_by_normalization_is_refused_by_the_name_check(self):
+        with self.assertRaises(rx.Refused) as cm:
+            rx._check_names([("120000", "a", NFC), ("100644", "b", NFD + "/x.txt")])
+        self.assertIn("lies under", str(cm.exception))
 
     def test_link_target_through_a_link_by_normalization_is_refused(self):
-        head = self._tree_with([(NFC, "link", "src"), ("e", "link", NFD + "/app.py")])
-        self.assertIn("passes through", self.refused(head))
+        self.assertEqual(rx._link_problem("e", NFD + "/app.py", {rx._key(NFC)}), "passes through another symlink")
 
     def test_strip_matches_across_normalization(self):
         head = self._tree_with([(NFD + ".md", "file", "x"), ("keep.md", "file", "y")])
@@ -390,10 +397,162 @@ class Hardening(Base):
         self.assertFalse(os.access(self.out / "README.md", os.X_OK))
 
     def test_odd_names_round_trip(self):
-        write(self.repo, "sp ace/newé.txt", "n\n")
+        name = NFC + "/" + NFC + ".txt"
+        write(self.repo, name, "n\n")
         head = commit(self.repo, "names")
+        with self.assertRaises(rx.Refused):
+            rx.export(self.repo, head, self.out)
+        rx.export(self.repo, head, self.out, allow_nonascii=True)
+        self.assertIn(name, self.files(self.out))
+
+
+class Allowlist(Base):
+    """Issue #138 design change: an allowlist of path shapes, an on-disk backstop and a diff built from the same
+    decisions. Names git allows are put in the tree with plumbing (hash-object, update-index, write-tree)."""
+
+    _tree_with = Hardening._tree_with
+
+    def refuse(self, entries, **kw):
+        head = self._tree_with([(n, "file", "x") for n in entries])
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out, **kw)
+        self.assertFalse(self.out.exists(), "a refusal leaves no output")
+        return str(cm.exception)
+
+    def test_zero_width_character_inside_an_agent_name_is_refused(self):
+        name = "AGEN​TS.md"
+        self.assertIn("non-ASCII", self.refuse([name]))
+        self.assertIn("not a letter", self.refuse([name], allow_nonascii=True))
+
+    def test_trailing_dot_and_trailing_space_are_refused(self):
+        for name in ("AGENTS.md.", "AGENTS.md ", "CLAUDE.md.", "sub/GEMINI.md. "):
+            with self.subTest(name=name):
+                self.assertTrue(self.refuse([name]))
+
+    def test_short_name_alias_is_refused(self):
+        self.assertIn("~", self.refuse(["CLAUDE~1.MD"]))
+        self.assertIn("~", self.refuse(["docs/AGENTS~2.md"]))
+
+    def test_alternate_data_stream_name_is_refused(self):
+        self.assertIn(":", self.refuse(["AGENTS.md:stream"]))
+        self.assertIn(":", self.refuse(["CLAUDE.md::$DATA"]))
+
+    def test_windows_device_names_are_refused(self):
+        for name in ("CON", "nul.txt", "docs/COM1.md", "Lpt9", "aux"):
+            with self.subTest(name=name):
+                self.assertIn("device", self.refuse([name]))
+        self.assertIn("device", self.refuse(["ＣＯＮ"], allow_nonascii=True))  # fullwidth CON
+
+    def test_cyrillic_lookalike_is_refused_by_default_and_when_mixed_with_latin(self):
+        name = "АGENTS.md"  # Cyrillic A, then Latin
+        self.assertIn("non-ASCII", self.refuse([name]))
+        self.assertIn("mixes", self.refuse([name], allow_nonascii=True))
+
+    def test_fullwidth_agent_name_is_refused_and_with_opt_in_caught_on_disk(self):
+        name = "ＡＧＥＮＴＳ.md"  # fullwidth AGENTS.md
+        self.assertIn("non-ASCII", self.refuse([name]))
+        self.assertIn("reduces to", self.refuse([name], allow_nonascii=True))  # backstop, output rolled back
+
+    def test_opt_in_keeps_nfc_and_refuses_nfd(self):
+        self.assertIn("NFC", self.refuse([NFD + ".txt"], allow_nonascii=True))
+
+    def test_leading_dot_names_need_the_allow_list(self):
+        self.assertIn("dot-name", self.refuse([".env"]))
+        self.assertIn("dot-name", self.refuse(["pkg/.hidden/x"]))
+        head = self._tree_with([(".env", "file", "x"), ("a.txt", "file", "x")])
+        rx.export(self.repo, head, self.out, dot_allow=(".env",))
+        self.assertIn(".env", self.files(self.out))
+
+    def test_size_and_shape_caps(self):
+        self.assertIn("long", self.refuse(["a" * 101]))
+        self.assertIn("long", self.refuse(["/".join(["d"] * 17) + "/f"]))
+        self.assertIn("long", self.refuse(["/".join(["d" * 90] * 3)]))
+        self.assertIn("allowlist", self.refuse(["sp ace.txt"]))
+        self.assertIn("allowlist", self.refuse(["a=b.txt"]))
+
+    def test_ordinary_names_pass(self):
+        names = ["c++/main.cc", "@types/node/index.d.ts", "docs/a-b_c.1.md", ".github/workflows/ci.yml", ".gitignore"]
+        head = self._tree_with([(n, "file", "x") for n in names])
         rx.export(self.repo, head, self.out)
-        self.assertIn("sp ace/newé.txt", self.files(self.out))
+        self.assertEqual(self.files(self.out), sorted(names))
+
+    def test_a_plain_directory_named_like_a_stripped_dot_directory_is_kept(self):
+        head = self._tree_with([("agents/a.txt", "file", "x"), ("claude/b.txt", "file", "x")])
+        rx.export(self.repo, head, self.out)
+        self.assertEqual(self.files(self.out), ["agents/a.txt", "claude/b.txt"])
+
+    def test_backstop_rolls_back_a_disguise_the_allowlist_permits(self):
+        # every character here is on the allowlist, so only the on-disk check can see the agent name
+        for name in ("A-G-E-N-T-S.md", "agents_md", "docs/Claude-.md", "x/GEMINI-.md"):
+            with self.subTest(name=name):
+                msg = self.refuse([name, "keep.txt"])
+                self.assertTrue("reduces to" in msg or "stripped" in msg, msg)
+
+    def test_backstop_unit_cases(self):
+        out = self.tmp / "b"
+        (out / "agents").mkdir(parents=True)
+        (out / "agents" / "a.txt").write_text("x")
+        rx._backstop(out, {"agents/a.txt"}, rx.DEFAULT_STRIP)
+        with self.assertRaises(rx.Refused):
+            rx._backstop(out, {"agents/a.txt", "gone.txt"}, rx.DEFAULT_STRIP)  # file set differs from the plan
+        (out / "Claude.").write_text("x")
+        with self.assertRaises(rx.Refused):
+            rx._backstop(out, {"agents/a.txt", "Claude."}, rx.DEFAULT_STRIP)  # reduces to a stripped dir name
+        (out / "Claude.").unlink()
+        (out / ".vscode").mkdir()
+        (out / ".vscode" / "mcp.json").write_text("x")
+        with self.assertRaises(rx.Refused):
+            rx._backstop(out, {"agents/a.txt", ".vscode/mcp.json"}, rx.DEFAULT_STRIP)  # exact strip match on disk
+
+    def _two_commits(self, base_entries, head_entries):
+        return (
+            self._tree_with([(n, "file", "b") for n in base_entries]),
+            self._tree_with([(n, "file", "h") for n in head_entries]),
+        )
+
+    def test_nfd_named_agent_file_is_kept_out_of_the_diff(self):
+        base, head = self._two_commits(["keep.txt"], ["keep.txt", NFD + ".md", "new.txt"])
+        rx.export(self.repo, head, self.out, base=base, strip=[NFC + ".md"])
+        diff = (self.out / "CHANGE.diff").read_bytes()
+        self.assertIn(b"new.txt", diff)
+        self.assertNotIn(NFD.encode(), diff)
+        self.assertNotIn(NFC.encode(), diff)
+        self.assertEqual(self.files(self.out), ["CHANGE.diff", "keep.txt", "new.txt"])
+
+    def test_diff_excludes_every_stripped_path_literally(self):
+        base, head = self._two_commits(["AGENTS.md", ".claude/a.md"], ["AGENTS.md", ".claude/a.md", "k.txt"])
+        rx.export(self.repo, head, self.out, base=base)
+        self.assertEqual(self.files(self.out), ["CHANGE.diff", "k.txt"])
+        base2 = self._tree_with([("Agents.md", "file", "b"), ("src/CLAUDE.MD", "file", "b")])
+        head2 = self._tree_with([("Agents.md", "file", "h"), ("src/CLAUDE.MD", "file", "h"), ("k.txt", "file", "h")])
+        out2 = self.tmp / "out2"
+        rx.export(self.repo, head2, out2, base=base2)
+        text = (out2 / "CHANGE.diff").read_text().lower()
+        self.assertNotIn("agents", text)
+        self.assertNotIn("claude", text)
+
+    def test_diff_check_refuses_a_path_that_is_not_kept(self):
+        base, head = self._two_commits(["a.txt"], ["a.txt", "AGENTS.md"])
+        with self.assertRaises(rx.Refused) as cm:
+            rx._diff(self.repo, base, head, [], [], {"a.txt"}, 10**6)  # AGENTS.md is not excluded and not kept
+        self.assertIn("not a kept path", str(cm.exception))
+
+    def test_a_deleted_odd_name_in_the_base_is_refused_in_the_diff(self):
+        base = self._tree_with([("bad name.txt", "file", "b"), ("a.txt", "file", "b")])
+        head = self._tree_with([("a.txt", "file", "b")])
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out, base=base)
+        self.assertIn("not a kept path", str(cm.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_cli_flags(self):
+        head = self._tree_with([(NFC + ".txt", "file", "x")])
+        argv = ["export", "--repo", str(self.repo), "--ref", head, "--out", str(self.out)]
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(rx.main(argv), 1)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(rx.main([*argv, "--allow-nonascii-paths"]), 0)
+        self.assertEqual(self.files(self.out), [NFC + ".txt"])
 
 
 class NextPrompt(unittest.TestCase):
