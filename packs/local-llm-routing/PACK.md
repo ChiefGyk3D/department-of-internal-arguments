@@ -1,91 +1,100 @@
 ---
 name: "local-llm-routing"
-description: "Measured knowledge for sending work to a local Ollama server and for configuring one: send exactly the num_ctx a model is loaded with, think=false for cheap text tasks, what was measured on one named model (gemma4:12b) and what was measured on models whose names were not recorded (code does grouping and counting; the model writes prose only), an evaluation record per model, local output treated as an unverified draft that is checked against its source and reported on a LOCAL-LLM line, reachability checks, and verification commands. Single GPU and small context first; every setting configurable. Load when routing text work to a local model, writing a client that calls Ollama, or sizing models and context. Not for cloud-model prompting."
-updated: "2026-10-26"
+description: "Load when routing text work to a local Ollama model, writing a client that calls Ollama, or sizing a model and context for one 16 GB GPU. Carries measured num_ctx, think=false, fit, task-fit and busy (exit 75) facts, outcome logging, and a per-model evaluation record. Not for cloud-model prompting."
+updated: "2026-11-25"
 ---
 
 # Pack: local LLM routing (Ollama)
 
-Status: pilot pack, written 2026-10-08 from measurements taken 2026-08 to 2026-10-07. UNVERIFIED items were inferred or read, not measured. Start from the smallest setup: one GPU (or CPU), one model, a small context. Everything below must stay configurable; never bake in one person's layout of devices, ports or context sizes. The default endpoint in examples is `http://localhost:11434`; read the real one from your own config or environment.
-
-A local model costs no credits. In the 2026-10-07 measurements below it was slow and loose (model not recorded; measured 2026-10-07; not a finding about local models in general). Use it for text-in, text-out drafts that a stronger model or a human then checks. Anything that changes state, carries security risk, or must be exactly right stays with code or a stronger model.
+Status: pilot pack, written 2026-10-08, refreshed 2026-11-25. VERIFIED = vendor page read on the stated date; MEASURED = one named setup; INFERRED = reasoned, not tested. Start small (one GPU, one model, a small context) and keep every setting configurable; never bake in one person's devices, ports or contexts. Example endpoint: `http://localhost:11434`. Use a local model for text-in, text-out drafts that a stronger model or a human checks; state changes, security risk and exact answers stay with code or a stronger model.
 
 ## Local output is a draft: verify it against the source
 
-Local output is a draft, never applied or quoted unverified. Nothing a local model wrote goes into a commit, a PR, a comment, an issue or a decision until each name, number and claim in it has been checked against the source it was supposed to describe.
+Local output is a draft, never applied or quoted unverified: nothing it wrote goes into a commit, PR, comment, issue or decision until each name, number and claim is checked against its source.
 
-Measured, and about one model only: **gemma4:12b, 2026-10-26, 2 of 5 triage runs returned unrelated text.** On 2026-10-26 two of five PR-triage runs returned a summary of a different change (a JWT refactor for a systemd PR; a wrong PR for another). One of them ran with stdin from `/dev/null`, so the pipe was not the cause. Both were caught only because a reviewer read the diff. The runs did not log which model answered; gemma4:12b (12B parameters) is the default general model on the setup, so the failures are attributed to it by inference, and the context in use was not logged either. These findings are about gemma4:12b on that date and may not hold for another model, size or release. Do not read them as a statement about local models in general.
+Measured, one model only: **gemma4:12b, 2026-10-26, 2 of 5 triage runs returned unrelated text.** Two of five PR-triage runs summarized a different change; a reviewer reading the diff caught both. The model was not logged; gemma4:12b (12B parameters) was the default, so this is attributed to it by inference, and may not hold for another model, size or release. The cause is unknown (truncated or wrong prompt, or drift: INFERRED, untested); verification catches the symptom.
 
-The cause is not known. Two candidates are INFERRED and untested: the request was built wrong (prompt truncated by too small a context, or the wrong text sent by the client or a cache), or the model itself drifted. Do not treat either as established. Verification catches the symptom whichever it is.
+Rule out context first. Ollama's default is 4k tokens (4096) below 24 GiB of VRAM, 32k at 24 to 48 GiB, 256k above (VERIFIED, docs.ollama.com/context-length, read 2026-11-25), so a client that omits `num_ctx` on a 16 GB card runs at 4096. What an overlong prompt loses is INFERRED, untested on gemma4:12b: a long diff may lose most of its text while the instructions survive.
 
-Context is the first thing to rule out, and it is documented. Ollama's default context is 4096 tokens on GPUs under 24 GiB of VRAM (Ollama context-length docs, read 2026-10-26), so a client that omits `num_ctx` runs at 4096. What an overlong prompt then loses is INFERRED, untested on gemma4:12b: a long diff or issue may lose most of its text while the instructions survive. Always send `num_ctx` explicitly (the value the model is loaded with, see the checklist below), and compare the response's prompt token count with the size of what you sent. Whether truncation caused the two bad runs was not tested.
+Check shapes, cheapest first; code compares, the model never grades itself.
 
-Check shapes, cheapest first. Code does the comparing; the model does not grade itself.
+1. **Echo and compare identifiers.** The model echoes the PR number, title or file names as separate `format` JSON fields; code rejects any mismatch. Status: INFERRED, untested on gemma4:12b.
+2. **Quote, then answer.** Two or three short quotes first; code checks each appears verbatim in the source. Status: INFERRED, untested on gemma4:12b.
+3. **Identifiers in the prose.** Every name and number in the output must appear in the source. Status: INFERRED, untested on gemma4:12b.
+4. **Keep roles apart.** Instructions in `system`, the text under review in `user` inside delimiters. Status: INFERRED, untested on gemma4:12b.
 
-1. **Echo and compare identifiers.** Make the model echo the identifiers of the thing it was given (PR number, title, issue id, file names) as separate fields, using Ollama's `format` JSON schema, with the schema also described in the prompt. Code compares each echoed value with the source and rejects the whole answer on any mismatch. Schema-valid output can still be wrong, so this catches a wrong-input answer, not every error. Status: INFERRED, untested on gemma4:12b; the `format` mechanism itself is documented by Ollama, the echo pattern is not measured.
-2. **Quote, then answer.** Ask for two or three short quotes from the input before the summary. Code checks that every quote appears verbatim in the source text; a quote that is not found rejects the answer. Status: INFERRED, untested on gemma4:12b.
-3. **Identifiers in the prose.** Every file name, function name, number and proper noun in the output must appear in the source. One that does not is a discrepancy. Status: INFERRED, untested on gemma4:12b.
-4. **Keep roles apart.** Instructions go in the `system` message and the text under review in the `user` message, inside clear delimiters, with the instruction to answer only from that text and to say so when something is absent. Status: INFERRED, untested on gemma4:12b; no vendor page ranks this placement.
+On a failed check, reject the draft, retry once or write it yourself, and count the mismatch.
 
-On any failed check: do not repair the draft by hand and use it; reject it and retry once, or fall back to writing it yourself. Count each mismatch.
-
-Report the result on the shared header's `LOCAL-LLM:` line: `LOCAL-LLM: used - <exact model tag and size, as loaded>; VERIFIED-AGAINST: <source>; DISCREPANCIES: <n>`, or `LOCAL-LLM: n/a - <reason>`. Name the model that answered, not the one the brief hoped for; read it from the response (`model` field) or the server, not from memory. `DISCREPANCIES: 0` is only meaningful when `VERIFIED-AGAINST:` names a source that was actually compared. The pilot log records the same two values per task (`local_model`, `local_discrepancies`) so the rate is measured per model before this rule is widened or relaxed.
+Report on the header's `LOCAL-LLM:` line: `LOCAL-LLM: used - <exact model tag and size>; VERIFIED-AGAINST: <source>; DISCREPANCIES: <n>`, or `LOCAL-LLM: n/a - <reason>`. Name the model that answered, read from the response; `DISCREPANCIES: 0` counts only when `VERIFIED-AGAINST:` names a source actually compared.
 
 ## Division of labor (the rule that matters most)
 
-- **Code does the grouping, counting, sorting, deduplication, and every statistic.** The model never produces a number, a count, or a category assignment that anything depends on.
-- **The model writes prose only**, from facts that code already computed and passed in. Then someone verifies each claim in the prose against the source. Local drafts of grouped facts, technical prose, release notes and documentation all had to be rewritten by hand in the 2026-10-07 sessions (model not recorded; measured 2026-10-07; not a finding about local models in general).
-- Never let it write rules, code, or security judgments.
-- Classification with free-text labels is unreliable: one model's role labels were right about 85% of the time and domain labels about 46% (model not recorded; measured 2026-10-07; not a finding about local models in general; it named projects instead of technical areas). Give it a closed list of allowed labels and validate its output against the list in code.
+- **Code does the grouping, counting, sorting, deduplication and every statistic.** The model never produces a number, count or category that anything depends on.
+- **The model writes prose only**, from facts code already computed, and someone verifies each claim. Drafts of grouped facts, technical prose, release notes and documentation were all rewritten by hand in the 2026-10-07 sessions (model not recorded; measured 2026-10-07; not a finding about local models in general).
+- Never let it write rules, code or security judgments.
+- Classification with free-text labels is unreliable: one model's role labels were right about 85% of the time and domain labels about 46% (model not recorded; measured 2026-10-07; not a finding about local models in general; it named projects instead of technical areas). Give it a closed label list and validate against it in code.
+- Latency: roughly 55 to 215 seconds for a long draft (model not recorded; measured 2026-10-07; not a finding about local models in general); run it in the background.
 
-## Measured: what it was good and bad at (2026-10-07; model not recorded; measured 2026-10-07; not a finding about local models in general)
+## Measured 2026-11-25: where each model is good enough
 
-These notes come from sessions with a 4B-parameter and a 12B-parameter model whose names were not recorded, so they cannot be attributed to a named model. Treat them as leads to re-measure, not as properties of any model.
+Synthetic prompts (median about 900 tokens) scored by code (labels, JSON validity, key facts, invented numbers), two repetitions, Ollama 0.33.2, one 16 GB GPU, think off. Score is the mean per call; the percentage is the share fully right.
 
-- Usable as a first draft: issue triage of a batch, one-line summaries of facts you supply, PR-body drafts.
-- Poor: sorting facts into groups; precise technical prose; release notes (it missed the headline feature); documentation drafts.
-- Failure modes seen: misspelled repository names, the same CVE given different priorities on different runs, "false positive" verdicts it cannot justify from the input, dropped headline items. Check names and identifiers against the source; do not accept a verdict the input does not support.
-- Latency: roughly 55 to 215 seconds for a long draft on the measured setup (model not recorded; measured 2026-10-07; not a finding about local models in general). Run it in the background or with a generous timeout (most clients and CLIs have a timeout flag or setting; raise it for long drafts).
+| Shape | gemma4:12b | qwen3.5:4b | qwen3:14b |
+|---|---|---|---|
+| classification (20 items) | 1.00 | 1.00 | 1.00 |
+| triage (20) | 1.00 | 0.95 (90%) | 0.975 (95%) |
+| summary, 7 facts (12) | 1.00 | 0.976 (83%) | 1.00 |
+| issue first draft (12) | 0.994 (96%) | 0.979 (96%, one invented number) | 0.976 (83%) |
+| CI/log digest (12) | 1.00 | 0.958 (83%) | 0.979 (92%) |
+| decode tokens/s, cold load | 53, 4.4 s | 112, 3.9 s | 48, 13 s |
+
+- gemma4:12b is the default for faithfulness-critical work (summary, issue draft, CI digest, triage). qwen3.5:4b is about 2.2 times faster and right for closed-list classification and short summaries, not for triage, CI digests or where a wrong fact is costly. Route by task label.
+- qwen3:14b is not adopted: no better, no faster, 1.1 GB larger, and its 13 s load evicted both residents. qwen3.5:9b was not on disk, untested.
+- Limits (confidence medium): short invented prompts near the ceiling show no regression, not subtle fact errors; nothing over 6k tokens; tone not scored.
+- Real use, 2026-10-07 to 2026-11-25: gemma4:12b prompts p95 5,782 tokens, none above 32768 in 703 calls; qwen3.5:4b had 2 above 6,000 against its 8192 window.
+
+## What fits one 16 GB card (MEASURED 2026-11-25, server-reported sizes)
+
+- gemma4:12b at context 131072 reports 8.19 GB and qwen3.5:4b at 8192 reports 3.34 GB, both 100% on the GPU, `keep_alive` -1. A 2026-10-07 reading was 9.8 GB with KV cache; the gap is INFERRED to be the size estimate, so check `nvidia-smi` on the host.
+- Lowering gemma4:12b from 131072 showed no saving: 8.42 GB at 32768, 8.39 GB at 16384, 50 tokens/s in all three, and the switch evicted qwen3.5:4b. GPU memory itself was not measured; keep the loaded context.
 
 ## Checklist: calling Ollama
 
-1. **Always send `num_ctx`, and send exactly the value the model is already loaded with.** Ollama's default is 4096 on GPUs under 24 GiB of VRAM, so omitting it can silently cut a long prompt (see the verification section above). A different value reloads the model and can evict a neighbor that shares the GPU (measured twice; in one case loading a second model at a larger default context evicted the first even though its `keep_alive` was -1, so `keep_alive` does not protect a resident model from a context change). Find the loaded value with `ollama ps` or `GET /api/ps` and confirm it in the runner log.
-2. **`think: false` for cheap tasks.** A thinking model spends hundreds of tokens before a one-sentence answer (436 evaluation tokens for one sentence on a 12B-parameter model; about 15 times fewer with thinking off on a 4B-parameter model; model not recorded; measured 2026-10-07; not a finding about local models in general). Opt in to thinking only when the task needs reasoning.
-3. **Structured output.** Native `format` accepts a JSON schema; still validate the result in code, and ground the schema in the prompt. Schema-valid is not correct.
-4. **Role aliases and Modelfiles.** Whether a `FROM` alias shares a loaded runner with its base model is UNVERIFIED (source reading suggests reuse when weights and runner options match; not reproduced). Until you test it, send the role as the request `system` message to the resident base model.
-5. **Models that cannot co-reside** evict each other; check VRAM fit before adding a model to a shared box. Measure with `ollama ps` after a warm-up. In the measured case (Ollama 0.33.2) a 12B-parameter model and a second model fit together at a context of 8192 but not 16384 (model not recorded; measured 2026-10-07; not a finding about local models in general).
-6. **Configurable, not hard-coded.** Take host, model, context and timeouts from environment or config with a single-instance default.
+1. **Always send `num_ctx`, exactly the value the model is loaded with.** A different value reloads the model and can evict a neighbor on the same GPU (measured repeatedly, last 2026-11-25; `keep_alive` -1 does not protect a resident). Read it from `ollama ps` or `GET /api/ps`.
+2. **`think: false` for cheap tasks.** A thinking model spends hundreds of tokens before a one-sentence answer (436 evaluation tokens for one sentence on a 12B-parameter model; about 15 times fewer with thinking off on a 4B-parameter model; model not recorded; measured 2026-10-07; not a finding about local models in general). VERIFIED, docs.ollama.com/capabilities/thinking, read 2026-11-25: `think: false` requests no thinking output; a model that cannot turn it off uses its lowest level. Opt in only for judgments.
+3. **Structured output.** `format` accepts a JSON schema; validate in code. All responses in the 2026-11-25 run were valid JSON; schema-valid is still not correct.
+4. **Models that cannot co-reside** evict each other; check VRAM fit with `ollama ps` after a warm-up. A 12B-parameter model plus a second one fit together at a context of 8192 but not 16384 (model not recorded; measured 2026-10-07; not a finding about local models in general). Testing a candidate on a shared box evicts the residents: use an approved window, restore the same models and contexts, read `ollama ps` before and after.
+5. **Configurable, not hard-coded.** Host, model, context and timeouts come from environment or config (names below).
+
+## Reference client: a local-model CLI (flags, exit codes, logs)
+
+Read from the client's `--help` and source, 2026-11-25; a test checks the flags, outcomes, exit 75, log fields and settings below against them.
+
+- **Call.** `<client> --task LABEL "prompt" < material` (the label is required). Thinking is off unless `--think`; `--json` asks for JSON; `--envelope` prints the call id, model and response as JSON; `--stats` prints counts.
+- **Exit codes.** 0 answered. 75: admission control had no slot. **Exit 75 means busy, not an outage:** retry, or pass `--wait SECONDS` to poll for a slot; do not report the server as unreachable. 2 failed, cause in the log `reason` (`unreachable` and `timeout` are the outage signals; a missing `--task` also gives 2). 130, or 128 plus a signal number: interrupted.
+- **Context.** `--num-ctx` declares the context, but the loaded one from config is sent; `--allow-reload` sends the declared value and can evict a neighbor. `--est-mb` declares the call's VRAM.
+- **Outcome.** Each call prints its call id on stderr. Afterwards record what was done: `<client> --outcome ID accepted|rewritten|discarded|fact-error`; this makes an accept or rewrite rate computable per model and task (none existed before).
+- **Call log** (`calls.jsonl`, rotated at 8 MiB; no prompt or answer is stored). Call rows: `kind` ("call"), `id`, `ts`, `model`, `task`, `status` (`ok`, `failed` or `busy`). `ok` adds `prompt_tokens`, `eval_tokens`, `seconds`, `load_duration_s` and `load_fresh` (a load over the threshold, counted as an eviction; a cold load counts). `failed` and `busy` add `exit_code`, `reason` and `seconds`. Reason classes: `busy`, `unreachable`, `timeout`, `over-budget`, `bad-response`, `bad-config`, `bad-input`, `interrupted`, `internal`. Outcome rows: `kind` ("outcome"), `id`, `outcome`, `ts`.
+- **Settings.** Environment: `LLM_LOCAL_URL`, `LLM_LOCAL_MODEL` (default model), `LLM_LOCAL_CTX`, `LLM_LOCAL_CONFIG` (config file). Config keys, all optional: `vram_budget_mb`, `max_concurrent`, `default_est_mb`, `reload_threshold_s`, and per model `[models."name"]` with `num_ctx` (the loaded context) and `est_mb`. Set your own values, equal to what the server keeps loaded.
 
 ## Evaluation record for a local model
 
-Before assigning a task class to a local model, record the following, and re-measure when any field changes. A family name proves nothing about tool support, accuracy or context.
+Before assigning a task class to a model, record these fields and re-measure when one changes; "not recorded" is a defect, not a pass. Fields: artifact (tag, digest), quantization, loaded and maximum context, runtime version, license, hardware class (accelerator, VRAM), result per task class (check, runs, sanitized inputs), prompt fit. Rows (2026-11-25, Ollama 0.33.2, one 16 GB GPU, digests not recorded, no long-prompt test):
 
-- Exact model artifact (tag and digest, not the family name).
-- Quantization.
-- Context limit: the loaded `num_ctx`, and the model's own maximum.
-- Runtime and version (for example the Ollama release).
-- License, checked against the intended use.
-- Hardware class (accelerator type and VRAM class only; no hostnames).
-- Measured result per task class: pass or fail against a stated check, number of runs, sanitized inputs. "Seemed fine" is not a result.
-- Prompt fit: confirm policies and instructions were not dropped to fit the context.
+- gemma4:12b: Q4_K_M; loaded 131072, maximum 256K (library page, read 2026-11-25); Apache 2.0 (model card); 8.19 GB; all five shapes 0.99 or better.
+- qwen3.5:4b: Q4_K_M (INFERRED); loaded 8192, maximum 256K (library page); Apache 2.0 (INFERRED); 3.34 GB; classification and short summaries only.
+- qwen3:14b: Q4_K_M; 8192, maximum 40K (INFERRED); Apache 2.0 (INFERRED); 9.28 GB file; no gain; its 13 s load evicts both residents.
 
-## Optional: more than one GPU or instance
+## Multi-GPU and reachability
 
-Skip this on a single-GPU setup. If you do split models across devices, one measured trap: on a multi-GPU NVIDIA host, an Ollama release (0.33.2) also enumerated devices through Vulkan, which ignores `CUDA_VISIBLE_DEVICES`, so a per-device split put models on the wrong devices. Setting `OLLAMA_VULKAN=0` in each service unit fixed it. Verify placement from the service log, not only `ollama ps`: `journalctl -u <ollama-unit> | grep "using device"` per instance, then confirm each model shows 100% on GPU in `ollama ps` after warm-up. After changing an instance's default context, update every client that pins a value. UNVERIFIED: whether newer releases change this behavior.
-
-## Checklist: reachability and dispatch
-
-1. Probe before assuming: check whether the local server answers before you promise it to an agent. A session-start probe that records the result is fine, but treat a recorded result as stale after a few hours and say how old it is. If it is unreachable, write `local model: n/a - <reason>` in the brief and use another route; do not hang on a timeout.
-2. A brief that names the local step does not make an agent use it: only about 5 of 14 briefs that asked for it produced a logged call. A guard that inspects the brief proves only that the step was named, not that it ran; verify use from your tool's own call log instead of trusting the report.
-3. Subagents without network access to the server cannot call it; do not promise it to them.
-4. Using a coding agent CLI directly against Ollama may be possible (for example `codex exec --oss --local-provider ollama` on a recent Codex CLI); its tool use is UNVERIFIED, so trial it before relying on it.
+- On a multi-GPU NVIDIA host Ollama 0.33.2 also enumerated devices through Vulkan, which ignores `CUDA_VISIBLE_DEVICES`, so a split put models on the wrong devices; `OLLAMA_VULKAN=0` in each service unit fixed it (UNVERIFIED on newer releases). Verify with `journalctl -u <unit> | grep "using device"` and `ollama ps`.
+- Probe before promising it to an agent; a recorded probe goes stale in hours. If the server is unreachable (exit 2, reason `unreachable`, not exit 75), write `local model: n/a - <reason>` in the brief and use another route.
+- A brief that names the local step does not make an agent use it (about 5 of 14 did, 2026-10); verify from the call log. Subagents without network access cannot call it.
 
 ## How to verify (commands)
 
-- Is it up and what is loaded: `curl -s "$OLLAMA_HOST/api/ps"` with `OLLAMA_HOST` set from your own config (default `http://localhost:11434`); `ollama ps`.
-- Device placement (multi-GPU only): the `journalctl ... "using device"` grep above, run on the host.
-- Context match: compare the `context_length` shown by `ollama ps` with the `num_ctx` your client sends.
-- Reload detection: send the same prompt twice and compare `load_duration` in the response; a large second `load_duration` means a reload.
-- Prose check: after a local draft, diff every name, number and claim against the source before keeping a sentence.
-- Which model answered: read the `model` field of the response and record it on the `LOCAL-LLM:` line. The brief's model name is not proof.
-- Truncation: compare `prompt_eval_count` in the response with the size of what you sent. A count near `num_ctx`, or far below the input size, means text was dropped (INFERRED, untested on gemma4:12b).
+- Up and loaded: `curl -s "$OLLAMA_HOST/api/ps"` (default `http://localhost:11434`); `ollama ps`. Compare `context_length` with the `num_ctx` the client sends.
+- Reload: compare `load_duration` across two identical calls, or read `load_fresh` in the log.
+- Busy versus down: exit 75 means wait; `reason` `unreachable` means no answer.
+- Prose: diff every name, number and claim against the source. The response's `model` field names the model for the `LOCAL-LLM:` line.
+- Truncation: a `prompt_eval_count` near `num_ctx`, or far below the input size, means text was dropped (INFERRED, untested on gemma4:12b).

@@ -175,7 +175,7 @@ class EvalCases(unittest.TestCase):
 
     def test_two_cases(self):
         picked = [c for c in self.cases().values() if c["roles"] == [NAME]]
-        self.assertEqual([c["id"] for c in picked], [47, 48])
+        self.assertEqual([c["id"] for c in picked], [51, 52])
         for c in picked:
             self.assertEqual(c["grading"], "mechanical")
             json.dumps(c)  # serializable
@@ -197,7 +197,7 @@ class Docs(unittest.TestCase):
         pages = ["Parrot", "apt-get", "systemd unit", "systemctl", "systemd-analyze", "udevadm", "nft"]
         marks = [facts.index(n + " ") for n in pages]
         self.assertEqual(marks, sorted(marks))
-        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)]):
+        for name, lo, hi in zip(pages, marks, marks[1:] + [len(facts)], strict=True):
             with self.subTest(name):
                 self.assertRegex(facts[lo:hi], r"\bpage\b")
                 self.assertRegex(facts[lo:hi], r"\b(?:VERIFIED|INFERRED)\b")
