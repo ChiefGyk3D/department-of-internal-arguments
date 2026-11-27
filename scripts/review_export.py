@@ -22,7 +22,9 @@ import secrets
 import stat
 import subprocess
 import sys
+import threading
 import unicodedata
+from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -67,6 +69,19 @@ DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_FILES = 20000
 DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_LINK_TARGET = 4096
+TREE_ENTRY_FACTOR = 4  # tree entries listed per allowed kept file (the rest are stripped or excluded)
+MAX_TREE_RECORD = 8192  # one `ls-tree` record (mode, type, sha, size, path)
+DEFAULT_GIT_CAP = 1024 * 1024  # output bound of every small git call
+GIT_TIMEOUT = 300  # seconds before a git call is killed
+MAX_PROMPT_BYTES = 4 * 1024 * 1024
+# Modes are built from stat constants, not literals: private staging (owner only) and the published modes.
+MODE_DIR_PRIVATE = stat.S_IRWXU
+MODE_FILE_PRIVATE = stat.S_IRUSR | stat.S_IWUSR
+MODE_EXEC_PRIVATE = stat.S_IRWXU
+MODE_FILE_FINAL = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+MODE_EXEC_FINAL = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+MODE_DIR_FINAL = MODE_EXEC_FINAL
+MODE_OUTPUT_FILE = stat.S_IRUSR | stat.S_IWUSR
 DIFF_NAME = "CHANGE.diff"
 MARKER_NAME = ".EXPORT-COMPLETE.json"
 
@@ -109,24 +124,25 @@ def _q(value, limit=80):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _git(repo, *args, binary=False):
+def _git_stream(repo, *args, cap, what="git output", timeout=GIT_TIMEOUT):
+    """Run git and yield its stdout in chunks. git is killed, and the call refused, as soon as the output passes
+    `cap` bytes, the timeout passes, or the consumer stops reading; stderr is discarded. Nothing is buffered here."""
     try:
-        res = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
+        proc = subprocess.Popen(
+            ["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
     except OSError as exc:
         raise Refused(f"cannot run git: {exc.strerror or 'error'}") from exc
-    if res.returncode != 0:
-        raise Refused(f"git {args[0]} failed: {_q(res.stderr.decode('utf-8', 'replace').strip(), 200)}")
-    return res.stdout if binary else res.stdout.decode("utf-8", "replace")
+    timed_out = []
 
+    def expire():
+        timed_out.append(True)
+        proc.kill()
 
-def _git_capped(repo, *args, cap):
-    """Run git and read its output in chunks; stop git and refuse as soon as the output passes `cap` bytes, so
-    the output is never buffered past the cap."""
-    try:
-        proc = subprocess.Popen(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except OSError as exc:
-        raise Refused(f"cannot run git: {exc.strerror or 'error'}") from exc
-    chunks, size = [], 0
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
+    size = 0
     try:
         while True:
             chunk = proc.stdout.read(65536)
@@ -134,16 +150,31 @@ def _git_capped(repo, *args, cap):
                 break
             size += len(chunk)
             if size > cap:
-                raise Refused(f"{DIFF_NAME} is over the size cap of {cap} bytes")
-            chunks.append(chunk)
-        if proc.wait() != 0:
-            raise Refused(f"git {args[0]} failed (exit {proc.returncode})")
+                raise Refused(f"{what} is over the size cap of {cap} bytes")
+            yield chunk
+        returncode = proc.wait()
+        if timed_out:
+            raise Refused(f"git {args[0]} timed out after {timeout} seconds")
+        if returncode != 0:
+            raise Refused(f"git {args[0]} failed (exit {returncode})")
     finally:
+        timer.cancel()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
         proc.stdout.close()
-    return b"".join(chunks)
+
+
+def _git_capped(repo, *args, cap, what="git output"):
+    """The whole output of a git call, never buffered past `cap` bytes."""
+    return b"".join(_git_stream(repo, *args, cap=cap, what=what))
+
+
+def _git(repo, *args, binary=False, cap=DEFAULT_GIT_CAP):
+    """A bounded git call (output cap, timeout, killed on excess); every call site goes through here or
+    `_git_stream`."""
+    out = _git_capped(repo, *args, cap=cap)
+    return out if binary else out.decode("utf-8", "replace")
 
 
 def _resolve_ref(repo, ref):
@@ -354,18 +385,31 @@ def _verify_links(out, links):
             raise Refused(f"symlink {_q(rel)} resolves outside the export")
 
 
-def _tree(repo, head):
-    """(mode, sha, size, path) for every blob in the tree. Built from the tree itself, so no .gitattributes
-    rule (export-ignore, export-subst, eol, filters) is applied."""
-    raw = _git(repo, "ls-tree", "-r", "-z", "-l", "--full-tree", head, binary=True)
-    rows = []
-    for rec in raw.split(b"\0"):
-        if not rec:
-            continue
-        meta, _, path = rec.partition(b"\t")
-        mode, kind, sha, size = meta.decode("ascii").split()
-        rows.append((mode, kind, sha, size, os.fsdecode(path)))
-    return rows
+def _tree(repo, head, max_entries):
+    """Yield (mode, kind, sha, size, path) for every blob in the tree, one record at a time. Built from the tree
+    itself, so no .gitattributes rule (export-ignore, export-subst, eol, filters) is applied. The listing is
+    streamed and bounded while it is read: more than `max_entries` entries, or one record over MAX_TREE_RECORD
+    bytes, refuses and stops git."""
+    buf, count = b"", 0
+    args = ("ls-tree", "-r", "-z", "-l", "--full-tree", head)
+    for chunk in _git_stream(repo, *args, cap=max_entries * (MAX_TREE_RECORD + 64), what="the tree listing"):
+        buf += chunk
+        start = 0
+        while (end := buf.find(b"\0", start)) != -1:
+            rec, start = buf[start:end], end + 1
+            if not rec:
+                continue
+            count += 1
+            if count > max_entries:
+                raise Refused(
+                    f"the tree lists more than {max_entries} entries (the file-count cap applies while listing)"
+                )
+            meta, _, path = rec.partition(b"\t")
+            mode, kind, sha, size = meta.decode("ascii").split()
+            yield (mode, kind, sha, size, os.fsdecode(path))
+        buf = buf[start:]
+        if len(buf) > MAX_TREE_RECORD:
+            raise Refused("a tree record is over the length bound")
 
 
 def _rollback(root_fd, journal):
@@ -478,13 +522,22 @@ def _excluded(name, trees):
 
 
 def _classify(
-    rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shape, exclude_trees=(), allow_symlinks=False
+    rows,
+    strip,
+    allow_nonascii,
+    dot_allow,
+    max_file_bytes,
+    check_shape,
+    exclude_trees=(),
+    allow_symlinks=False,
+    max_files=DEFAULT_MAX_FILES,
+    max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
 ):
     """Split tree rows into (kept, dropped names). Dropped = stripped agent files and excluded trees (neither is
     shape-checked). With check_shape (the exported tree) any kept path outside the allowlist, a disguised agent
     name, a submodule or special entry or an oversized file refuses; without it (the base tree) only names are
     collected."""
-    keep, dropped = [], []
+    keep, dropped, planned = [], [], 0
     for mode, kind, sha, size, name in rows:
         if name.startswith("/") or ".." in name.split("/"):
             raise Refused(f"unsafe path {_q(name)} in the tree")
@@ -506,6 +559,11 @@ def _classify(
         elif _shape_problem(name, allow_nonascii, dot_allow) or _disguised(name, strip):
             continue  # a base-only odd name is not kept; the diff check refuses it if the diff names it
         keep.append((mode, sha, name, int(size) if size.isdigit() else 0))
+        planned += keep[-1][3]
+        if len(keep) > max_files:
+            raise Refused(f"more than {max_files} files, over the file-count cap")
+        if planned > max_total_bytes:
+            raise Refused(f"{planned} bytes in total, over the cap of {max_total_bytes}")
     return keep, dropped
 
 
@@ -517,12 +575,12 @@ def _diff(repo, base_sha, head, paths, dropped, kept_names, max_file_bytes):
     specs += [f":(exclude,top,literal){n}" for n in sorted(set(dropped))]
     common = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames")
     tail = (base_sha, head, "--", *specs)
-    names = _git_capped(repo, *common, "--name-only", "-z", *tail, cap=max_file_bytes)
+    names = _git_capped(repo, *common, "--name-only", "-z", *tail, cap=max_file_bytes, what=DIFF_NAME)
     for raw in names.split(b"\0"):
         if raw and os.fsdecode(raw) not in kept_names:
             raise Refused(f"the diff names {_q(os.fsdecode(raw))}, which is not a kept path")
     # --text: the diff shows content whatever a -diff or binary attribute says
-    return _git_capped(repo, *common, "--text", *tail, cap=max_file_bytes)
+    return _git_capped(repo, *common, "--text", *tail, cap=max_file_bytes, what=DIFF_NAME)
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -542,7 +600,7 @@ def _open_parent(root_fd, parts, journal=None):
     try:
         for i, comp in enumerate(parts):
             try:
-                os.mkdir(comp, 0o700, dir_fd=fd)
+                os.mkdir(comp, MODE_DIR_PRIVATE, dir_fd=fd)
             except FileExistsError:
                 pass
             else:
@@ -567,16 +625,16 @@ def _write_entry(root_fd, name, data, mode, journal=None, final=False):
             os.symlink(os.fsdecode(data), leaf, dir_fd=pfd)
             _record(journal, name, os.lstat(leaf, dir_fd=pfd), "link")
             return
-        fd = os.open(leaf, _FILE_FLAGS, 0o600, dir_fd=pfd)
+        fd = os.open(leaf, _FILE_FLAGS, MODE_FILE_PRIVATE, dir_fd=pfd)
         try:
             _record(journal, name, os.fstat(fd), "exec" if mode == "100755" else "file")
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view) :]
             if mode == "100755":
-                os.fchmod(fd, 0o700)
+                os.fchmod(fd, MODE_EXEC_PRIVATE)
             if final:
-                os.fchmod(fd, 0o755 if mode == "100755" else 0o644)
+                os.fchmod(fd, MODE_EXEC_FINAL if mode == "100755" else MODE_FILE_FINAL)
         finally:
             os.close(fd)
     finally:
@@ -625,7 +683,7 @@ def _finalize(root_fd, journal):
                 try:
                     st = os.fstat(fd)
                     if (st.st_dev, st.st_ino) == (dev, ino) and st.st_nlink == 1:
-                        os.fchmod(fd, 0o755 if kind == "exec" else 0o644)
+                        os.fchmod(fd, MODE_EXEC_FINAL if kind == "exec" else MODE_FILE_FINAL)
                 finally:
                     os.close(fd)
             if (st.st_dev, st.st_ino) != (dev, ino):
@@ -642,11 +700,11 @@ def _finalize(root_fd, journal):
         except OSError as exc:
             raise Refused(f"{_q(rel)} is not where it was created") from exc
         try:
-            os.fchmod(fd, 0o755)
+            os.fchmod(fd, MODE_DIR_FINAL)
         finally:
             for f in fds:
                 os.close(f)
-    os.fchmod(root_fd, 0o755)
+    os.fchmod(root_fd, MODE_DIR_FINAL)
 
 
 def _manifest(journal, total, head, base_sha):
@@ -735,24 +793,32 @@ def export(
     dot_allow = tuple(dot_allow)
     trees = _clean_tree(exclude_trees)
 
-    keep, dropped = _classify(
-        _tree(repo, head), strip, allow_nonascii, dot_allow, max_file_bytes, True, trees, allow_symlinks
-    )
+    max_entries = max_files * TREE_ENTRY_FACTOR  # kept and dropped entries together, bounded while listing
+    with closing(_tree(repo, head, max_entries)) as rows:
+        keep, dropped = _classify(
+            rows,
+            strip,
+            allow_nonascii,
+            dot_allow,
+            max_file_bytes,
+            True,
+            trees,
+            allow_symlinks,
+            max_files,
+            max_total_bytes,
+        )
     if base_sha and any(name == DIFF_NAME for _, _, name, _ in keep):
         raise Refused(f"the repository already has a file named {DIFF_NAME}")
     if any(name == MARKER_NAME for _, _, name, _ in keep):
         raise Refused(f"the repository already has a file named {MARKER_NAME}")
-    if len(keep) > max_files:
-        raise Refused(f"{len(keep)} files, over the file-count cap of {max_files}")
     planned = sum(size for *_, size in keep)
-    if planned > max_total_bytes:
-        raise Refused(f"{planned} bytes in total, over the cap of {max_total_bytes}")
 
     diff = b""
     if base_sha:
-        base_keep, base_dropped = _classify(
-            _tree(repo, base_sha), strip, allow_nonascii, dot_allow, max_file_bytes, False, trees, allow_symlinks
-        )
+        with closing(_tree(repo, base_sha, max_entries)) as rows:
+            base_keep, base_dropped = _classify(
+                rows, strip, allow_nonascii, dot_allow, max_file_bytes, False, trees, allow_symlinks, max_entries
+            )
         kept_names = {n for _, _, n, _ in keep} | {n for _, _, n, _ in base_keep}
         diff = _diff(repo, base_sha, head, paths, dropped + base_dropped, kept_names, max_file_bytes)
         if planned + len(diff) > max_total_bytes:
@@ -781,10 +847,13 @@ def export(
     staging_name = f".{out.name[:60]}.staging-{secrets.token_hex(8)}"
     staging_id = None
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
+        # The only thing created outside the requested directory is the staging directory named below, directly in
+        # the existing parent (the parent itself is never created); the final rename moves it to the requested name.
+        if not out.parent.is_dir():
+            raise Refused("the parent directory of the output path does not exist; create it first")
         parent_fd = os.open(out.parent, _DIR_FLAGS)  # pinned parent: staging and the final rename go through it
         _target_state(parent_fd, out.name)
-        os.mkdir(staging_name, 0o700, dir_fd=parent_fd)  # fails if the name exists: never reuse a directory
+        os.mkdir(staging_name, MODE_DIR_PRIVATE, dir_fd=parent_fd)  # fails if the name exists: never reuse a directory
         root_fd = os.open(staging_name, _DIR_FLAGS, dir_fd=parent_fd)
         st = os.fstat(root_fd)
         staging_id = (st.st_dev, st.st_ino)
@@ -848,10 +917,30 @@ def next_prompt(base_text, findings_text):
 
 
 def _read(path):
+    """Read a prompt or findings file as text without any newline translation (CRLF stays CRLF): a regular file
+    only (no link followed, no FIFO or device opened), at most MAX_PROMPT_BYTES, valid UTF-8."""
     try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
         raise Refused(f"cannot read {_q(str(path))}: {_q(exc.strerror or type(exc).__name__, 60)}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Refused(f"cannot read {_q(str(path))}: not a regular file")
+        data = b""
+        while len(data) <= MAX_PROMPT_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_PROMPT_BYTES:
+            raise Refused(f"cannot read {_q(str(path))}: over {MAX_PROMPT_BYTES} bytes")
+        return data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Refused(
+            f"cannot read {_q(str(path))}: {_q(getattr(exc, 'strerror', None) or type(exc).__name__, 60)}"
+        ) from exc
+    finally:
+        os.close(fd)
 
 
 def main(argv=None):
@@ -912,8 +1001,10 @@ def main(argv=None):
         else:
             text = next_prompt(_read(a.base_prompt), _read(a.findings))
             try:
-                with a.output.open("x", encoding="utf-8") as f:  # never overwrite
-                    f.write(text)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC  # never overwrite
+                fd = os.open(a.output, flags, MODE_OUTPUT_FILE)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(text.encode("utf-8"))
             except OSError as exc:
                 raise Refused(
                     f"cannot write {_q(str(a.output))}: {_q(exc.strerror or type(exc).__name__, 60)}"

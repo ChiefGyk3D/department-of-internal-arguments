@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -328,7 +329,7 @@ class Hardening(Base):
                 .stdout.decode()
                 .strip()
             )
-            mode = "120000" if kind == "link" else "100644"
+            mode = {"link": "120000", "exec": "100755"}.get(kind, "100644")
             lines.append(f"{mode} {blob}\t{path}\0")
         index = self.tmp / "plumbing-index"
         index.unlink(missing_ok=True)  # one fresh index per tree, so trees never accumulate entries
@@ -390,9 +391,7 @@ class Hardening(Base):
         self.assertNotIn("100644", modes[first:-1])  # only the completion marker follows the links
 
     def test_modes_are_kept_from_the_tree(self):
-        write(self.repo, "run.sh", "#!/bin/sh\n")
-        os.chmod(self.repo / "run.sh", 0o755)
-        head = commit(self.repo, "exec")
+        head = self._tree_with([("run.sh", "exec", "#!/bin/sh\n"), ("README.md", "file", "x")])
         rx.export(self.repo, head, self.out)
         self.assertTrue(os.access(self.out / "run.sh", os.X_OK))
         self.assertFalse(os.access(self.out / "README.md", os.X_OK))
@@ -630,7 +629,7 @@ class Round2(Base):
         self.out.mkdir()
         real = os.mkdir
 
-        def mkdir(path, mode=0o777, *, dir_fd=None):
+        def mkdir(path, mode=rx.MODE_DIR_PRIVATE, *, dir_fd=None):
             real(path, mode, dir_fd=dir_fd)
             if path == "src":
                 os.rmdir(path, dir_fd=dir_fd)
@@ -782,27 +781,39 @@ class Round2(Base):
                 self.assertTrue(any(partial[0].iterdir()))
 
     def test_files_are_private_in_staging_and_get_their_modes_at_the_end(self):
-        write(self.repo, "run.sh", "#!/bin/sh\n")
-        os.chmod(self.repo / "run.sh", 0o755)
-        head = commit(self.repo, "exec")
+        head = self._tree_with(
+            [("run.sh", "exec", "#!/bin/sh\n"), ("README.md", "file", "x"), ("src/app.py", "file", "x")]
+        )
         seen, real = {}, rx._backstop
 
         def spy(fd, expected, strip):
             root = Path(rx._pinned_path(fd, None))
             for rel in ("README.md", "run.sh", "src", "."):
-                seen[rel] = (root / rel).stat().st_mode & 0o777
+                seen[rel] = stat.S_IMODE((root / rel).stat().st_mode)
             return real(fd, expected, strip)
 
         rx._backstop = spy
         self.addCleanup(setattr, rx, "_backstop", real)
         rx.export(self.repo, head, self.out)
-        self.assertEqual(seen, {"README.md": 0o600, "run.sh": 0o700, "src": 0o700, ".": 0o700})
+        self.assertEqual(
+            seen,
+            {
+                "README.md": rx.MODE_FILE_PRIVATE,
+                "run.sh": rx.MODE_EXEC_PRIVATE,
+                "src": rx.MODE_DIR_PRIVATE,
+                ".": rx.MODE_DIR_PRIVATE,
+            },
+        )
+        self.assertEqual(rx.MODE_FILE_PRIVATE & (stat.S_IRWXG | stat.S_IRWXO), 0, "no group or other access")
 
         def mode(rel):
-            return (self.out / rel).stat().st_mode & 0o777
+            return stat.S_IMODE((self.out / rel).stat().st_mode)
 
-        self.assertEqual((mode("README.md"), mode("run.sh"), mode("src"), mode(".")), (0o644, 0o755, 0o755, 0o755))
-        self.assertEqual(mode(rx.MARKER_NAME), 0o644)
+        self.assertEqual(
+            (mode("README.md"), mode("run.sh"), mode("src"), mode(".")),
+            (rx.MODE_FILE_FINAL, rx.MODE_EXEC_FINAL, rx.MODE_DIR_FINAL, rx.MODE_DIR_FINAL),
+        )
+        self.assertEqual(mode(rx.MARKER_NAME), rx.MODE_FILE_FINAL)
 
     def test_a_file_hard_linked_elsewhere_while_it_was_written_is_refused(self):
         real = rx._write_entry
@@ -1029,6 +1040,150 @@ class Round2(Base):
         with self.assertRaises(rx.Refused):
             rx.export(self.repo, head, self.tmp / "out2", allow_symlinks=True)
 
+    # bounded git calls and a bounded, streamed tree listing
+
+    def test_tree_listing_is_capped_while_it_is_read_and_git_is_stopped(self):
+        head = self._tree_with([(f"d{i % 7}/f{i:05d}.txt", "file", "x") for i in range(3000)])
+        procs, real = [], subprocess.Popen
+
+        def spy(*a, **k):
+            p = real(*a, **k)
+            procs.append(p)
+            return p
+
+        subprocess.Popen = spy
+        self.addCleanup(setattr, subprocess, "Popen", real)
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out, max_files=1)
+        self.assertIn("size cap", str(cm.exception))
+        self.assertEqual(procs[-1].returncode, -9, "git ls-tree was killed, not read to the end")
+        self.assertFalse(self.out.exists())
+
+    def test_the_entry_cap_applies_while_the_listing_is_read(self):
+        head = self._tree_with([(f".claude/f{i:04d}.txt", "file", "x") for i in range(500)])  # all stripped
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out, max_files=100)  # 400 entries listed at most, 500 present
+        self.assertIn("while listing", str(cm.exception))
+
+    def test_the_file_count_cap_applies_while_the_listing_is_classified(self):
+        head = self._tree_with([(f"f{i}.txt", "file", "x") for i in range(12)])
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out, max_files=5)
+        self.assertIn("file-count", str(cm.exception))
+
+    def test_one_overlong_tree_record_is_refused(self):
+        head = self._tree_with([("d/" + "x" * 70000, "file", "x")])
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, head, self.out)
+        self.assertIn("length bound", str(cm.exception))
+
+    def test_every_git_call_is_bounded_and_has_a_timeout(self):
+        with self.assertRaises(rx.Refused) as cm:
+            rx._git(self.repo, "cat-file", "-p", self.head, cap=10)
+        self.assertIn("size cap", str(cm.exception))
+        with self.assertRaises(rx.Refused) as cm:
+            b"".join(rx._git_stream(self.repo, "-c", "alias.slow=!sleep 2", "slow", cap=10, timeout=0.3))
+        self.assertIn("timed out", str(cm.exception))
+        import ast
+
+        tree = ast.parse((ROOT / "scripts" / "review_export.py").read_text())
+        direct = [
+            n.lineno
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "subprocess"
+            and n.func.attr in ("run", "check_output", "call")
+        ]
+        self.assertEqual(direct, [], "no unbounded subprocess.run: every git call goes through the bounded helpers")
+
+    # what is created outside the requested directory
+
+    def test_only_the_staging_name_is_created_in_the_parent_and_the_parent_is_never_created(self):
+        before = set(os.listdir(self.tmp))
+        seen, real = [], rx._backstop
+
+        def spy(fd, expected, strip):
+            seen.append(set(os.listdir(self.tmp)) - before)
+            return real(fd, expected, strip)
+
+        rx._backstop = spy
+        self.addCleanup(setattr, rx, "_backstop", real)
+        rx.export(self.repo, self.head, self.out)
+        self.assertEqual([len(x) for x in seen], [1])
+        (staging,) = seen[0]
+        self.assertTrue(staging.startswith(".out.staging-"))
+        self.assertEqual(set(os.listdir(self.tmp)) - before, {"out"})
+        missing = self.tmp / "no" / "such" / "dir" / "out"
+        with self.assertRaises(rx.Refused) as cm:
+            rx.export(self.repo, self.head, missing)
+        self.assertIn("parent directory", str(cm.exception))
+        self.assertFalse((self.tmp / "no").exists())
+
+    def test_a_kill_after_the_marker_and_before_the_rename_publishes_nothing(self):
+        code = (
+            "import os, signal, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import review_export as rx\n"
+            "def p(*a):\n"
+            "    os.kill(os.getpid(), signal.SIGKILL)\n"
+            "rx._publish = p\n"
+            "rx.export(sys.argv[2], sys.argv[3], sys.argv[4])\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(ROOT / "scripts"), str(self.repo), self.head, str(self.out)],
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(res.returncode, -9)
+        self.assertFalse(self.out.exists(), "the requested name never appears")
+        (staging,) = [p for p in self.tmp.iterdir() if p.name.startswith(".out.staging-")]
+        self.assertTrue((staging / rx.MARKER_NAME).is_file(), "the staging copy is complete but not a deliverable")
+
+    # next-prompt input handling
+
+    def run_next(self, base_bytes, findings_bytes=b"finding\n", base_path=None):
+        base = base_path or (self.tmp / "b.txt")
+        if base_path is None:
+            base.write_bytes(base_bytes)
+        find = self.tmp / "f.txt"
+        find.write_bytes(findings_bytes)
+        out = self.tmp / "next.txt"
+        out.unlink(missing_ok=True)
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = rx.main(["next-prompt", "--base-prompt", str(base), "--findings", str(find), "--output", str(out)])
+        return rc, out, err.getvalue()
+
+    def test_next_prompt_keeps_crlf_byte_for_byte(self):
+        rc, out, _ = self.run_next(b"first\r\nsecond\r\n", b"f1\r\nf2\r\n")
+        self.assertEqual(rc, 0)
+        data = out.read_bytes()
+        self.assertTrue(data.startswith(b"first\r\nsecond\r\n"))
+        self.assertTrue(data.endswith(b"f1\r\nf2\r\n"))
+        self.assertEqual(stat.S_IMODE(out.stat().st_mode), rx.MODE_OUTPUT_FILE)
+
+    def test_next_prompt_refuses_a_fifo_a_symlink_and_an_oversized_or_invalid_file(self):
+        fifo = self.tmp / "fifo"
+        os.mkfifo(fifo)
+        rc, _, err = self.run_next(b"", base_path=fifo)  # must not hang
+        self.assertEqual(rc, 1)
+        self.assertIn("not a regular file", err)
+        real = self.tmp / "real.txt"
+        real.write_text("base\n")
+        link = self.tmp / "link.txt"
+        os.symlink(real, link)
+        self.assertEqual(self.run_next(b"", base_path=link)[0], 1)
+        old = rx.MAX_PROMPT_BYTES
+        rx.MAX_PROMPT_BYTES = 8
+        self.addCleanup(setattr, rx, "MAX_PROMPT_BYTES", old)
+        rc, _, err = self.run_next(b"x" * 100)
+        self.assertEqual(rc, 1)
+        self.assertIn("over 8 bytes", err)
+        rx.MAX_PROMPT_BYTES = old
+        self.assertEqual(self.run_next(b"\xff\xfe\n")[0], 1)
+
     # every message goes through the same quoting helper
 
     def test_every_refusal_and_print_quotes_attacker_text(self):
@@ -1047,7 +1202,18 @@ class Round2(Base):
             "max_total_bytes",
             "max_file_bytes",
         }
-        safe_names |= {"left", "problem", "exc", "n", "files"}
+        safe_names |= {
+            "left",
+            "problem",
+            "exc",
+            "n",
+            "files",
+            "timeout",
+            "returncode",
+            "what",
+            "max_entries",
+            "MAX_PROMPT_BYTES",
+        }
 
         def safe(node):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("_q", "len", "ord"):
