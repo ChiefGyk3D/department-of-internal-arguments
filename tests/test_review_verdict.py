@@ -128,10 +128,33 @@ class Held(unittest.TestCase):
         code, _ = run("status=ok\n" + CLEAN)
         self.assertEqual(code, 0)
 
-    def test_held_still_lists_findings_but_never_counts_as_clean(self):
-        code, out = run(FINDINGS_BLOCK + "\nthe scan did not start\n")
-        self.assertEqual(code, 3)
+    def test_findings_beside_a_failed_scan_note_are_findings_with_a_note(self):
+        final = FINDINGS_BLOCK + "\nNote: the optional deep-scan tool did not start; I ran my own probes instead.\n"
+        code, out = run(real_shape("prompt", "commentary", final))
+        self.assertEqual(code, 1, out)
+        self.assertIn("note: scan or tool failed to start mentioned", out.splitlines()[0])
+        self.assertIn("high=1", out.splitlines()[0])
         self.assertIn("Synthetic widget", out)
+
+    def test_findings_beside_a_cutoff_or_auth_marker_are_findings_with_a_note(self):
+        for marker in ("flagged for possible cybersecurity risk", "not authenticated with a hardware key"):
+            with self.subTest(marker=marker):
+                code, out = run(FINDINGS_BLOCK + f"\n{marker}\n")
+                self.assertEqual(code, 1, out)
+                self.assertIn("note:", out.splitlines()[0])
+
+    def test_findings_without_a_marker_have_no_note(self):
+        _, out = run(FINDINGS_BLOCK)
+        self.assertNotIn("note:", out)
+
+    def test_clean_statement_beside_a_failed_scan_note_is_held(self):
+        code, out = run(CLEAN + "\nNote: the deep-scan tool did not start.\n")
+        self.assertEqual(code, 3, out)
+        self.assertIn("scan or tool failed to start", out)
+
+    def test_held_does_not_hide_the_marker_text(self):
+        code, out = run(FINDINGS_BLOCK.replace("###", "NOHEADING") + "\nthe scan did not start\n")
+        self.assertEqual(code, 3)
 
     def test_held_output_does_not_echo_the_matched_text(self):
         out = self.check_held("flagged for possible cybersecurity risk: SECRETBODY\n")

@@ -12,7 +12,8 @@ Verdicts (pack rule 3 in packs/cyber-tier-review: a review that cannot show its 
 
 A finding is a heading such as `### High - title` (hyphen, en dash, em dash or colon). Reviews often repeat the
 findings block, so findings are deduplicated on severity and normalized title; the first line number is kept. Held
-wins over everything else: a held review is listed with any findings it did show but is never clean.
+only ever blocks a clean verdict: findings in the final message are always reported (FINDINGS, with a note when a
+cutoff, authentication or failed-scan marker is also present); a clean statement beside such a marker is HELD.
 
 Only the final message is judged for HELD markers, the findings section and the clean statement: the text after the
 last `tokens used` line and its count line, up to a wrapper marker line (`exit=N status=ok`); without a `tokens used`
@@ -152,20 +153,19 @@ def parse_findings(text, offset=0):
 
 
 def parse(text):
-    """Return (findings, section, clean_statement, held, has_final, stray). Findings come from the
+    """Return (findings, section, clean_statement, held, has_final, stray, seg_has_findings). Findings come from the
     final-message segment, and from the whole file only when the segment has none; the section, the clean statement
     and the held markers are judged in the segment only."""
     offset, seg = final_segment(text)
-    findings = parse_findings(seg, offset)
-    if not findings:
-        findings = parse_findings(text)
+    seg_findings = parse_findings(seg, offset)
+    findings = seg_findings or parse_findings(text)
     section = any(finding_match(ln) or SECTION_RE.match(ln) for ln in seg.splitlines())
     clean_statement = any(CLEAN_RE.search(ln) for ln in seg.splitlines())
     held = [reason for reason, pat in HELD_PATTERNS if pat.search(seg)]
     stray = any(
         SEVERITY_MENTION_RE.search(ln) and not finding_match(ln) and not CLEAN_RE.search(ln) for ln in seg.splitlines()
     )
-    return findings, section, clean_statement, held, bool(seg.strip()), stray
+    return findings, section, clean_statement, held, bool(seg.strip()), stray, bool(seg_findings)
 
 
 def read_review(path):
@@ -189,11 +189,14 @@ def read_review(path):
 
 def verdict(text):
     """Return (name, exit code, reason or None, findings)."""
-    findings, section, clean_statement, held, has_final, stray = parse(text)
+    findings, section, clean_statement, held, has_final, stray, seg_has_findings = parse(text)
     if not text.strip():
         return "HELD", EXIT_HELD, "empty output", findings
     if not has_final:
         return "HELD", EXIT_HELD, "no final message", findings
+    if seg_has_findings:
+        # HELD only ever blocks CLEAN: findings the final message shows are always reported, with a note.
+        return "FINDINGS", EXIT_FINDINGS, f"note: {held[0]} mentioned" if held else None, findings
     if held:
         return "HELD", EXIT_HELD, held[0], findings
     if findings:
@@ -224,7 +227,8 @@ def main(argv=None):
     if name == "CLEAN":
         print(f"VERDICT: CLEAN no Critical or High findings stated{note}")
     elif name == "FINDINGS":
-        print(f"VERDICT: FINDINGS {tally} (unique {len(findings)}){note}")
+        extra = f" {reason}" if reason else ""
+        print(f"VERDICT: FINDINGS {tally} (unique {len(findings)}){extra}{note}")
     else:
         print(f"VERDICT: HELD {reason} (never a clean review) {tally}{note}")
     if findings:
