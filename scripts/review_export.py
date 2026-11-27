@@ -61,6 +61,9 @@ DEFAULT_STRIP = (
     "GEMINI.md",
 )
 DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_FILES = 20000
+DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_LINK_TARGET = 4096
 DIFF_NAME = "CHANGE.diff"
 
 # Allowlist of path shapes. A component may hold ASCII letters, digits and `._-+@` only (`+` for names such as
@@ -93,14 +96,50 @@ class Refused(Exception):
     """A request refused before anything was written."""
 
 
+def _q(value, limit=80):
+    """Attacker-controlled text (a path, a link target) as it may appear in a message: escaped to ASCII, so no
+    control or escape character reaches a terminal or a log, and capped."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "surrogateescape")
+    text = ascii(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def _git(repo, *args, binary=False):
     try:
         res = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
     except OSError as exc:
-        raise Refused(f"cannot run git: {exc}") from exc
+        raise Refused(f"cannot run git: {exc.strerror or 'error'}") from exc
     if res.returncode != 0:
-        raise Refused(f"git {args[0]} failed: {res.stderr.decode('utf-8', 'replace').strip()}")
+        raise Refused(f"git {args[0]} failed: {_q(res.stderr.decode('utf-8', 'replace').strip(), 200)}")
     return res.stdout if binary else res.stdout.decode("utf-8", "replace")
+
+
+def _git_capped(repo, *args, cap):
+    """Run git and read its output in chunks; stop git and refuse as soon as the output passes `cap` bytes, so
+    the output is never buffered past the cap."""
+    try:
+        proc = subprocess.Popen(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise Refused(f"cannot run git: {exc.strerror or 'error'}") from exc
+    chunks, size = [], 0
+    try:
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > cap:
+                raise Refused(f"{DIFF_NAME} is over the size cap of {cap} bytes")
+            chunks.append(chunk)
+        if proc.wait() != 0:
+            raise Refused(f"git {args[0]} failed (exit {proc.returncode})")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+    return b"".join(chunks)
 
 
 def _resolve_ref(repo, ref):
@@ -118,10 +157,56 @@ def _key(p):
     return unicodedata.normalize("NFC", p).casefold()
 
 
+# A small table of Cyrillic and Greek letters that look like ASCII ones. It is a second line of defense only:
+# the opt-in already refuses a component that mixes scripts, and no maintained confusables table is in the
+# standard library, so this table is NOT complete (see the pack's residuals).
+_CONFUSABLES = {}
+for _src, _dst in (
+    ("авсеіјорѕтхуԁԍнкм", "abceijopstxydghkm"),
+    ("αβεικνορτυχ", "abeiknoptux"),
+    ("ıɡɑ", "iga"),
+):
+    _CONFUSABLES.update(zip(_src, _dst, strict=True))
+
+
+def _skeleton(name):
+    """`name` reduced toward ASCII: NFKD with combining marks dropped, a few lookalike letters mapped, casefolded.
+    `AGENTS.md`, `ÀGENTS.md`, fullwidth and Cyrillic-lookalike spellings share a skeleton."""
+    text = unicodedata.normalize("NFKD", name)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = "".join(_CONFUSABLES.get(c, c) for c in text.casefold())
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
 def _fold(name):
-    """ASCII-only fold used by the on-disk backstop: NFKC, casefold, then every non-alphanumeric character
-    dropped, so `AGENTS.md`, `agents md`, `A-G-E-N-T-S.md` and fullwidth letters all reduce to `agentsmd`."""
-    return "".join(c for c in unicodedata.normalize("NFKC", name).casefold() if c.isascii() and c.isalnum())
+    """ASCII-only fold used by the on-disk backstop: the skeleton, then every non-alphanumeric character
+    dropped, so `AGENTS.md`, `agents md`, `A-G-E-N-T-S.md`, fullwidth and accented or lookalike letters all
+    reduce to `agentsmd`."""
+    return "".join(c for c in _skeleton(name) if c.isascii() and c.isalnum())
+
+
+def _script(ch):
+    return "LATIN" if ch.isascii() else unicodedata.name(ch, "UNKNOWN").split()[0]
+
+
+def _script_problem(c):
+    """With the non-ASCII opt-in: one script per component. ASCII letters count as Latin; a non-ASCII Latin
+    letter must be a precomposed ASCII letter plus combining marks (é, ñ), not ı, ɑ or similar; a component in
+    another script holds no ASCII letter."""
+    scripts = {_script(ch) for ch in c if ch.isalpha()}
+    if len(scripts) > 1:
+        return "mixes scripts in one component"
+    for ch in c:
+        if ch.isascii() or not ch.isalpha() or _script(ch) != "LATIN":
+            continue
+        decomposed = unicodedata.normalize("NFD", ch)
+        if not (
+            decomposed[0].isascii()
+            and decomposed[0].isalpha()
+            and all(unicodedata.category(m) == "Mn" for m in decomposed[1:])
+        ):
+            return "has a Latin letter that is not an accented ASCII letter"
+    return None
 
 
 def _shape_problem(name, allow_nonascii=False, dot_allow=DEFAULT_DOT_ALLOW):
@@ -153,11 +238,9 @@ def _shape_problem(name, allow_nonascii=False, dot_allow=DEFAULT_DOT_ALLOW):
         if allow_nonascii and not c.isascii():
             if unicodedata.normalize("NFC", c) != c:
                 return "has a component that is not in NFC"
-            ascii_letter = any(ch.isascii() and ch.isalpha() for ch in c)
-            if ascii_letter and any(
-                unicodedata.name(ch, "").startswith(("CYRILLIC", "GREEK")) for ch in c if not ch.isascii()
-            ):
-                return "mixes Latin letters with Cyrillic or Greek ones"
+            problem = _script_problem(c)
+            if problem:
+                return problem
         if c.startswith(".") and _key(c) not in dots:
             return "has a leading-dot component that is not on the dot-name allow list"
         stem = unicodedata.normalize("NFKC", c).casefold().split(".", 1)[0]
@@ -218,12 +301,6 @@ def _under(root, path):
     return path == root or path.startswith(root + os.sep)
 
 
-def _check_parent(out, dest):
-    """Before a write: the destination's parent must really lie under the output directory."""
-    if not _under(os.path.realpath(out), os.path.realpath(dest.parent)):
-        raise Refused(f"{dest} would be written outside the export")
-
-
 def _check_names(keep):
     """Two kept paths that a target file system could treat as one, or a path under a kept file or symlink
     (by comparison key), are refused."""
@@ -231,14 +308,14 @@ def _check_names(keep):
     for _, _, name in keep:
         k = _key(name)
         if k in seen:
-            raise Refused(f"{name} and {seen[k]} collide on a case-folding or normalizing file system")
+            raise Refused(f"{_q(name)} and {_q(seen[k])} collide on a case-folding or normalizing file system")
         seen[k] = name
     for _, _, name in keep:
         parts = name.split("/")
         for i in range(1, len(parts)):
             parent = _key("/".join(parts[:i]))
             if parent in seen:
-                raise Refused(f"{name} lies under {seen[parent]}, which is a file or symlink")
+                raise Refused(f"{_q(name)} lies under {_q(seen[parent])}, which is a file or symlink")
 
 
 def _verify_links(out, links):
@@ -247,7 +324,7 @@ def _verify_links(out, links):
     for rel in links:
         real = os.path.realpath(os.path.join(out, rel))
         if not _under(root, real):
-            raise Refused(f"symlink {rel} resolves outside the export")
+            raise Refused(f"symlink {_q(rel)} resolves outside the export")
 
 
 def _tree(repo, head):
@@ -265,6 +342,8 @@ def _tree(repo, head):
 
 
 def _cleanup(out, existed):
+    if out.is_symlink():
+        return  # swapped after the check: never walk a link
     if not existed:
         shutil.rmtree(out, ignore_errors=True)
         return
@@ -310,7 +389,7 @@ def _backstop(out, expected, strip):
         for e in entries:
             name = f"{rel}/{e.name}" if rel else e.name
             if _stripped(name, strip) or _reduced_hit(name.split("/"), strip):
-                raise Refused(f"{name} on disk is, or reduces to, a stripped agent file")
+                raise Refused(f"{_q(name)} on disk is, or reduces to, a stripped agent file")
             if e.is_dir(follow_symlinks=False):
                 stack.append(name)
             else:
@@ -321,54 +400,116 @@ def _backstop(out, expected, strip):
         raise Refused(f"files on disk differ from the plan (unexpected {extra}, missing {gone})")
 
 
-def _classify(rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shape):
-    """Split tree rows into (kept, stripped names). With check_shape (the exported tree) any kept path outside the
-    allowlist, submodule, special entry or oversized file refuses; without it (the base tree) only names are
+def _disguised(name, strip):
+    """A non-ASCII path whose skeleton (see _skeleton) is a stripped agent file or reduces to one."""
+    if name.isascii():
+        return False
+    skel = _skeleton(name)
+    return _stripped(skel, strip) or _reduced_hit(skel.split("/"), strip) or _reduced_hit(name.split("/"), strip)
+
+
+def _excluded(name, trees):
+    return any(name == t or name.startswith(t + "/") for t in trees)
+
+
+def _classify(rows, strip, allow_nonascii, dot_allow, max_file_bytes, check_shape, exclude_trees=()):
+    """Split tree rows into (kept, dropped names). Dropped = stripped agent files and excluded trees (neither is
+    shape-checked). With check_shape (the exported tree) any kept path outside the allowlist, a disguised agent
+    name, a submodule or special entry or an oversized file refuses; without it (the base tree) only names are
     collected."""
-    keep, stripped = [], []
+    keep, dropped = [], []
     for mode, kind, sha, size, name in rows:
         if name.startswith("/") or ".." in name.split("/"):
-            raise Refused(f"unsafe path {name!r} in the tree")
-        if _stripped(name, strip):
-            stripped.append(name)
+            raise Refused(f"unsafe path {_q(name)} in the tree")
+        if _stripped(name, strip) or _excluded(name, exclude_trees):
+            dropped.append(name)
             continue
         if check_shape:
             problem = _shape_problem(name, allow_nonascii, dot_allow)
             if problem:
-                raise Refused(f"path {name!r} {problem}; the export is refused, not folded")
+                raise Refused(f"path {_q(name)} {problem}; the export is refused, not folded")
+            if _disguised(name, strip):
+                raise Refused(f"path {_q(name)} is a disguised agent or instruction file name")
             if kind != "blob" or mode not in ("100644", "100755", "120000"):
-                raise Refused(f"{name} is a submodule or special entry; not exported")
+                raise Refused(f"{_q(name)} is a submodule or special entry; not exported")
             if int(size) > max_file_bytes:
-                raise Refused(f"{name} is {size} bytes, over the size cap of {max_file_bytes}")
-        elif _shape_problem(name, allow_nonascii, dot_allow):
+                raise Refused(f"{_q(name)} is {size} bytes, over the size cap of {max_file_bytes}")
+        elif _shape_problem(name, allow_nonascii, dot_allow) or _disguised(name, strip):
             continue  # a base-only odd name is not kept; the diff check refuses it if the diff names it
-        keep.append((mode, sha, name))
-    return keep, stripped
+        keep.append((mode, sha, name, int(size) if size.isdigit() else 0))
+    return keep, dropped
 
 
-def _diff(repo, base_sha, head, paths, stripped, kept_names, max_file_bytes):
-    """CHANGE.diff built from the same decisions as the export: every stripped path is excluded as a literal
-    pathspec (no pattern, so git's matching rules cannot differ from ours), and every path the diff touches must
-    be a kept path."""
+def _diff(repo, base_sha, head, paths, dropped, kept_names, max_file_bytes):
+    """CHANGE.diff built from the same decisions as the export: every dropped path (stripped or in an excluded
+    tree) is excluded as a literal pathspec (no pattern, so git's matching rules cannot differ from ours), and
+    every path the diff touches must be a kept path. Output is read in chunks and git is stopped at the cap."""
     specs = [f":(top,literal){p}" for p in paths] or [":(top)"]
-    specs += [f":(exclude,top,literal){n}" for n in sorted(set(stripped))]
-    common = (
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--no-renames",
-    )
+    specs += [f":(exclude,top,literal){n}" for n in sorted(set(dropped))]
+    common = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames")
     tail = (base_sha, head, "--", *specs)
-    names = _git(repo, *common, "--name-only", "-z", *tail, binary=True)
+    names = _git_capped(repo, *common, "--name-only", "-z", *tail, cap=max_file_bytes)
     for raw in names.split(b"\0"):
         if raw and os.fsdecode(raw) not in kept_names:
-            raise Refused(f"the diff names {os.fsdecode(raw)!r}, which is not a kept path")
+            raise Refused(f"the diff names {_q(os.fsdecode(raw))}, which is not a kept path")
     # --text: the diff shows content whatever a -diff or binary attribute says
-    diff = _git(repo, *common, "--text", *tail, binary=True)
-    if len(diff) > max_file_bytes:
-        raise Refused(f"{DIFF_NAME} is {len(diff)} bytes, over the size cap of {max_file_bytes}")
-    return diff
+    return _git_capped(repo, *common, "--text", *tail, cap=max_file_bytes)
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_parent(root_fd, parts):
+    """Walk (creating) the directories of `parts` one component at a time relative to an open directory, never
+    following a symlink; return the last directory's fd and every fd opened, for closing."""
+    fds = []
+    fd = root_fd
+    try:
+        for comp in parts:
+            try:
+                os.mkdir(comp, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
+            fd = os.open(comp, _DIR_FLAGS, dir_fd=fd)
+            fds.append(fd)
+    except BaseException:
+        for f in fds:
+            os.close(f)
+        raise
+    return fd, fds
+
+
+def _write_entry(root_fd, name, data, mode):
+    """Create one file (O_EXCL, no symlink followed, mode set on the same descriptor) or one symlink, relative to
+    the output directory's descriptor. No path is resolved a second time after a check."""
+    *dirs, leaf = name.split("/")
+    pfd, fds = _open_parent(root_fd, dirs)
+    try:
+        if mode == "120000":
+            os.symlink(os.fsdecode(data), leaf, dir_fd=pfd)
+            return
+        fd = os.open(leaf, _FILE_FLAGS, 0o600, dir_fd=pfd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fchmod(fd, 0o755 if mode == "100755" else 0o644)
+        finally:
+            os.close(fd)
+    finally:
+        for f in fds:
+            os.close(f)
+
+
+def _clean_tree(trees):
+    out = []
+    for t in trees:
+        t = t.rstrip("/")
+        if not t or t.startswith("/") or "\0" in t or any(c in ("", ".", "..") for c in t.split("/")):
+            raise Refused(f"bad --exclude-tree {_q(t)}")
+        out.append(t)
+    return tuple(out)
 
 
 def export(
@@ -381,6 +522,9 @@ def export(
     max_file_bytes=DEFAULT_MAX_FILE_BYTES,
     allow_nonascii=False,
     dot_allow=DEFAULT_DOT_ALLOW,
+    exclude_trees=(),
+    max_files=DEFAULT_MAX_FILES,
+    max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
 ):
     """Write the export and return {"files": n, "bytes": n}. Raises Refused before writing on any problem;
     a failure while writing removes what was written."""
@@ -390,63 +534,81 @@ def export(
     base_sha = _resolve_ref(repo, base) if base else None
     strip = tuple(strip)
     dot_allow = tuple(dot_allow)
+    trees = _clean_tree(exclude_trees)
 
-    keep, stripped = _classify(_tree(repo, head), strip, allow_nonascii, dot_allow, max_file_bytes, True)
-    if base_sha and any(name == DIFF_NAME for _, _, name in keep):
+    keep, dropped = _classify(_tree(repo, head), strip, allow_nonascii, dot_allow, max_file_bytes, True, trees)
+    if base_sha and any(name == DIFF_NAME for _, _, name, _ in keep):
         raise Refused(f"the repository already has a file named {DIFF_NAME}")
+    if len(keep) > max_files:
+        raise Refused(f"{len(keep)} files, over the file-count cap of {max_files}")
+    planned = sum(size for *_, size in keep)
+    if planned > max_total_bytes:
+        raise Refused(f"{planned} bytes in total, over the cap of {max_total_bytes}")
 
     diff = b""
     if base_sha:
-        base_keep, base_stripped = _classify(
-            _tree(repo, base_sha), strip, allow_nonascii, dot_allow, max_file_bytes, False
+        base_keep, base_dropped = _classify(
+            _tree(repo, base_sha), strip, allow_nonascii, dot_allow, max_file_bytes, False, trees
         )
-        kept_names = {n for _, _, n in keep} | {n for _, _, n in base_keep}
-        diff = _diff(repo, base_sha, head, paths, stripped + base_stripped, kept_names, max_file_bytes)
+        kept_names = {n for _, _, n, _ in keep} | {n for _, _, n, _ in base_keep}
+        diff = _diff(repo, base_sha, head, paths, dropped + base_dropped, kept_names, max_file_bytes)
+        if planned + len(diff) > max_total_bytes:
+            raise Refused(f"{planned + len(diff)} bytes in total with {DIFF_NAME}, over the cap of {max_total_bytes}")
 
-    _check_names(keep)
-    links = {_key(name) for mode, _, name in keep if mode == "120000"}
-    blobs = {}
-    for mode, sha, name in keep:
+    _check_names([(m, s, n) for m, s, n, _ in keep])
+    links = {_key(name) for mode, _, name, _ in keep if mode == "120000"}
+    targets = {}
+    for mode, sha, name, size in keep:
+        if mode != "120000":
+            continue
+        if size > MAX_LINK_TARGET:
+            raise Refused(f"symlink {_q(name)} has an over-long target")
         data = _git(repo, "cat-file", "blob", sha, binary=True)
-        blobs[name] = data
-        if mode == "120000":
-            target = os.fsdecode(data)
-            problem = _link_problem(name, target, links)
-            if problem:
-                raise Refused(f"symlink {name} -> {target} {problem}")
+        targets[name] = data
+        problem = _link_problem(name, os.fsdecode(data), links)
+        if problem:
+            raise Refused(f"symlink {_q(name)} -> {_q(data)} {problem}")
 
     existed = out.exists()
     files = total = 0
     made = []
+    clean_up = False  # nothing is removed until the directory is open (no symlink) and verified empty
     try:
         out.mkdir(parents=True, exist_ok=True)
-        # directories and regular files first, symlinks last, each parent re-checked on disk before the write
-        for want_link in (False, True):
-            for mode, _, name in keep:
-                if (mode == "120000") != want_link:
-                    continue
-                dest = out / name
-                _check_parent(out, dest)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                _check_parent(out, dest)
-                data = blobs[name]
-                if want_link:
-                    dest.symlink_to(os.fsdecode(data))
-                    made.append(name)
-                else:
-                    dest.write_bytes(data)
-                    dest.chmod(0o755 if mode == "100755" else 0o644)
-                    total += len(data)
+        root_fd = os.open(out, _DIR_FLAGS)
+        try:
+            if os.listdir(root_fd):
+                raise Refused(f"output directory {_q(str(out))} is not empty")
+            clean_up = True
+            # regular files first, symlinks last; one blob in memory at a time, never over the per-file cap
+            for want_link in (False, True):
+                for mode, sha, name, size in keep:
+                    if (mode == "120000") != want_link:
+                        continue
+                    data = targets[name] if want_link else _git(repo, "cat-file", "blob", sha, binary=True)
+                    if len(data) != size:
+                        raise Refused(f"{_q(name)} changed size while reading")
+                    _write_entry(root_fd, name, data, mode)
+                    if want_link:
+                        made.append(name)
+                    else:
+                        total += len(data)
+                    files += 1
+            if base_sha:
+                _write_entry(root_fd, DIFF_NAME, diff, "100644")
                 files += 1
-        if base_sha:
-            with (out / DIFF_NAME).open("xb") as f:
-                f.write(diff)
-            files += 1
-            total += len(diff)
+                total += len(diff)
+        finally:
+            os.close(root_fd)
         _verify_links(out, made)
-        _backstop(out, {n for _, _, n in keep} | ({DIFF_NAME} if base_sha else set()), strip)
+        _backstop(out, {n for _, _, n, _ in keep} | ({DIFF_NAME} if base_sha else set()), strip)
+    except OSError as exc:
+        if clean_up:
+            _cleanup(out, existed)
+        raise Refused(f"cannot write the export: {exc.strerror or 'error'}") from exc
     except BaseException:
-        _cleanup(out, existed)
+        if clean_up:
+            _cleanup(out, existed)
         raise
     return {"files": files, "bytes": total}
 
@@ -485,7 +647,15 @@ def main(argv=None):
         action="store_true",
         help="keep non-ASCII letter names (NFC, no format or control characters); off by default",
     )
+    e.add_argument(
+        "--exclude-tree",
+        action="append",
+        default=[],
+        help="drop this literal tree prefix from the export and from CHANGE.diff, unchecked; repeatable",
+    )
     e.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES)
+    e.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
+    e.add_argument("--max-total-bytes", type=int, default=DEFAULT_MAX_TOTAL_BYTES)
     n = sub.add_parser("next-prompt", help="base prompt plus the previous round's findings")
     n.add_argument("--base-prompt", required=True, type=Path)
     n.add_argument("--findings", required=True, type=Path)
@@ -504,6 +674,9 @@ def main(argv=None):
                 a.max_file_bytes,
                 a.allow_nonascii_paths,
                 [*DEFAULT_DOT_ALLOW, *a.allow_dot],
+                a.exclude_tree,
+                a.max_files,
+                a.max_total_bytes,
             )
             print(f"export: {a.out}\nfiles: {m['files']}\nbytes: {m['bytes']}")
         else:
