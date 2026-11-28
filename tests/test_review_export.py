@@ -1123,6 +1123,30 @@ class Round2(Base):
         self.assertIn("parent directory", str(cm.exception))
         self.assertFalse((self.tmp / "no").exists())
 
+    def test_a_kill_immediately_before_the_marker_leaves_a_staging_directory_without_one(self):
+        code = (
+            "import os, signal, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import review_export as rx\n"
+            "real = rx._write_entry\n"
+            "def w(root_fd, name, *a, **k):\n"
+            "    if name == rx.MARKER_NAME:\n"
+            "        os.kill(os.getpid(), signal.SIGKILL)\n"
+            "    return real(root_fd, name, *a, **k)\n"
+            "rx._write_entry = w\n"
+            "rx.export(sys.argv[2], sys.argv[3], sys.argv[4])\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(ROOT / "scripts"), str(self.repo), self.head, str(self.out)],
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(res.returncode, -9)
+        self.assertFalse(self.out.exists(), "the requested name never appears")
+        (staging,) = [p for p in self.tmp.iterdir() if p.name.startswith(".out.staging-")]
+        self.assertFalse((staging / rx.MARKER_NAME).exists(), "killed before the marker: no marker")
+        self.assertTrue(any(staging.iterdir()), "the finalized tree is there, unmarked")
+
     def test_a_kill_after_the_marker_and_before_the_rename_publishes_nothing(self):
         code = (
             "import os, signal, sys\n"
