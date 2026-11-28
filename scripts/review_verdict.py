@@ -142,20 +142,84 @@ def finding_match(line):
     return None
 
 
+# A severity section heading: `## High`, `## High findings`, `## **Medium severity**`. Its findings are the headings
+# nested under it (`### 1. Title`), and the severity comes from the section.
+SEV_SECTION_RE = re.compile(
+    r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]*(?:\*\*|__)?(?P<sev>" + SEV + r")"
+    r"(?:[ \t]+(?:severity[ \t]+)?(?:findings?|issues?|severity|items?))?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*$",
+    re.I,
+)
+ANY_HEADING_RE = re.compile(r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]+(?P<text>.*)$")
+NUMBERED_RE = re.compile(r"^(?:\*\*|__)?\d+(?:\.\d+)*[.)][ \t]+(?P<title>.+)$")
+# A heading that names a severity but that no rule above classifies (`### 1. Title (High)`, `### Finding 2 [Critical]`).
+UNCLASSIFIED_RE = re.compile(r"\b(?:critical|high|medium|low)\b(?![ \t-]+level)", re.I)
+
+
+def _norm_sev(word):
+    sev = word.lower()
+    return "info" if sev.startswith("info") else sev
+
+
 def parse_findings(text, offset=0):
-    """Findings [(severity, title, line)] deduplicated on severity and title, first line kept."""
+    """Findings [(severity, title, line)] deduplicated on severity and title, first line kept. A severity section
+    heading (`## High`) contributes the headings nested under it: the numbered ones (`### 1. Title`) when there are
+    any, otherwise every deeper heading. A severity section with no nested heading is itself one finding with an
+    empty title (fail closed), as is any `### High - title` heading."""
     findings, seen = [], set()
-    for number, line in enumerate(text.splitlines(), 1 + offset):
+
+    def add(sev, title, number):
+        key = (sev, re.sub(r"\W+", " ", title).strip().lower())
+        if key not in seen:
+            seen.add(key)
+            findings.append((sev, title, number))
+
+    lines = text.splitlines()
+    skip = set()  # line indexes of nested headings already taken by a severity section
+    for i, line in enumerate(lines):
+        sm = SEV_SECTION_RE.match(line)
+        if not sm or i in skip:
+            continue
+        level = len(sm.group("hashes"))
+        kids = []
+        for j in range(i + 1, len(lines)):
+            hm = ANY_HEADING_RE.match(lines[j])
+            if not hm:
+                continue
+            if len(hm.group("hashes")) <= level:
+                break
+            kids.append((j, hm.group("text")))
+        own = [j for j, _ in kids if finding_match(lines[j])]  # `### High - title` headings stand on their own
+        kids = [(j, t) for j, t in kids if j not in own]
+        numbered = [(j, NUMBERED_RE.match(t.strip())) for j, t in kids]
+        numbered = [(j, m.group("title")) for j, m in numbered if m]
+        chosen = numbered or kids
+        sev = _norm_sev(sm.group("sev"))
+        for j, title in chosen:
+            skip.add(j)
+            add(sev, clean_title(title), j + 1 + offset)
+        if not chosen and not own:
+            add(sev, "", i + 1 + offset)
+        skip.add(i)
+    for i, line in enumerate(lines):
+        if i in skip:
+            continue
         m = finding_match(line)
         if m:
-            sev = m.group(1).lower()
-            sev = "info" if sev.startswith("info") else sev
-            title = clean_title(m.group("title"))
-            key = (sev, re.sub(r"\W+", " ", title).strip().lower())
-            if key not in seen:
-                seen.add(key)
-                findings.append((sev, title, number))
+            add(_norm_sev(m.group(1)), clean_title(m.group("title")), i + 1 + offset)
+    findings.sort(key=lambda f: f[2])
     return findings
+
+
+def unclassified_heading(text):
+    """True when a heading names a severity but is neither a finding heading, a severity section nor nested in one."""
+    claimed = {n for _, _, n in parse_findings(text)}
+    for number, line in enumerate(text.splitlines(), 1):
+        hm = ANY_HEADING_RE.match(line)
+        if not hm or number in claimed or finding_match(line) or SEV_SECTION_RE.match(line):
+            continue
+        if UNCLASSIFIED_RE.search(hm.group("text")) and not SECTION_RE.match(line):
+            return True
+    return False
 
 
 HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]")
@@ -192,6 +256,7 @@ def parse(text):
     stray = any(
         SEVERITY_MENTION_RE.search(ln) and not finding_match(ln) and not CLEAN_RE.search(ln) for ln in seg.splitlines()
     )
+    stray = stray or unclassified_heading(seg)
     return findings, section, clean_statement, held, bool(seg.strip()), stray, bool(seg_findings), tail_bad
 
 

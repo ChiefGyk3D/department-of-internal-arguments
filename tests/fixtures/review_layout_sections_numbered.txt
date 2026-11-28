@@ -1,0 +1,28 @@
+tokens used
+12,345
+No Critical findings. I found 2 High, 1 Medium, and 1 Low finding.
+
+## High
+
+### 1. Gate integrity does not cover repository code run by the workflow
+
+File: [src/example/ship.py](src/example/ship.py:10)
+
+Reproduction:
+
+1. The trusted gate runs a script from the repository.
+2. A change to that script returns success without doing the check.
+
+### 2. Base state is not pinned before a merge retry
+
+The retry path skips revalidation.
+
+## Medium
+
+### 3. Cache key omits the platform
+
+Body text that must never be echoed.
+
+## Low
+
+### 4. Typo in a log label

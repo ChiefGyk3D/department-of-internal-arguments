@@ -450,5 +450,50 @@ class Unreadable(unittest.TestCase):
                 self.assertEqual(r.returncode, want)
 
 
+class SectionLayout(unittest.TestCase):
+    """Issue #143: `## High` with `### 1. Title` children. Fixtures are short anonymized heading blocks."""
+
+    def fx(self, name):
+        return (ROOT / "tests" / "fixtures" / name).read_text()
+
+    def test_numbered_children_give_titles_and_section_counts(self):
+        code, out = run(self.fx("review_layout_sections_numbered.txt"))
+        self.assertEqual(code, 1)
+        first = out.splitlines()[0]
+        for part in ("critical=0", "high=2", "medium=1", "low=1", "unique 4"):
+            self.assertIn(part, first)
+        self.assertIn("Gate integrity does not cover repository code run by the workflow", out)
+        self.assertIn("Typo in a log label", out)
+        self.assertNotIn("must never be echoed", out)
+
+    def test_no_finding_has_an_empty_title(self):
+        findings = rv.parse_findings(self.fx("review_layout_sections_numbered.txt"))
+        self.assertEqual(len(findings), 4)
+        self.assertTrue(all(title for _, title, _ in findings))
+
+    def test_findings_suffix_headings_and_mixed_children(self):
+        code, out = run(self.fx("review_layout_sections_findings_suffix.txt"))
+        self.assertEqual(code, 1)
+        first = out.splitlines()[0]
+        self.assertIn("high=1", first)
+        self.assertIn("medium=1", first)
+        self.assertIn("Required check can be spoofed by a status", out)
+        self.assertIn("Typed values accept a trailing newline", out)
+
+    def test_empty_severity_section_still_fails_closed(self):
+        code, out = run("## High\n\nSomething was found but not itemized.\n")
+        self.assertEqual(code, 1)
+        self.assertIn("high=1", out.splitlines()[0])
+
+    def test_unclassifiable_severity_heading_is_never_clean(self):
+        code, out = run(self.fx("review_layout_unclassified.txt"))
+        self.assertIn(code, (1, 3))
+        self.assertNotIn("CLEAN", out.splitlines()[0])
+
+    def test_ordinary_numbered_headings_do_not_hold_a_clean_review(self):
+        code, _ = run("## Findings\n\n### 1. Scope reviewed\n\nNo Critical or High findings.\n")
+        self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

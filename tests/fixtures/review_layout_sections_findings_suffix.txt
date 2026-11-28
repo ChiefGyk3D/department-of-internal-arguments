@@ -1,0 +1,11 @@
+tokens used
+9,000
+## High findings
+
+### High - Required check can be spoofed by a status
+
+**Location:** [ship.py](src/example/ship.py:177)
+
+## Medium findings
+
+### 1. Typed values accept a trailing newline
