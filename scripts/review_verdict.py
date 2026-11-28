@@ -163,8 +163,8 @@ def _norm_sev(word):
 def parse_findings(text, offset=0):
     """Findings [(severity, title, line)] deduplicated on severity and title, first line kept. A severity section
     heading (`## High`) contributes the headings nested under it: the numbered ones (`### 1. Title`) when there are
-    any, otherwise the headings at the first child level (deeper ones are ignored). A severity section with no nested heading is itself one finding with an
-    empty title (fail closed), as is any `### High - title` heading."""
+    any, otherwise the headings at the first child level (deeper ones are ignored).
+    A severity section with no nested heading is itself one finding with an empty title (fail closed), as is any `### High - title` heading."""
     findings, seen = [], set()
 
     def add(sev, title, number):
