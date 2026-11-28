@@ -163,7 +163,7 @@ def _norm_sev(word):
 def parse_findings(text, offset=0):
     """Findings [(severity, title, line)] deduplicated on severity and title, first line kept. A severity section
     heading (`## High`) contributes the headings nested under it: the numbered ones (`### 1. Title`) when there are
-    any, otherwise every deeper heading. A severity section with no nested heading is itself one finding with an
+    any, otherwise the headings at the first child level (deeper ones are ignored). A severity section with no nested heading is itself one finding with an
     empty title (fail closed), as is any `### High - title` heading."""
     findings, seen = [], set()
 
@@ -189,7 +189,13 @@ def parse_findings(text, offset=0):
                 break
             kids.append((j, hm.group("text")))
         own = [j for j, _ in kids if finding_match(lines[j])]  # `### High - title` headings stand on their own
-        kids = [(j, t) for j, t in kids if j not in own]
+        # Only the intended child level counts: deeper headings (`#### Evidence`) are a finding's own parts.
+        child_level = min((len(ANY_HEADING_RE.match(lines[j]).group("hashes")) for j, _ in kids), default=0)
+        kids = [
+            (j, t)
+            for j, t in kids
+            if j not in own and len(ANY_HEADING_RE.match(lines[j]).group("hashes")) == child_level
+        ]
         numbered = [(j, NUMBERED_RE.match(t.strip())) for j, t in kids]
         numbered = [(j, m.group("title")) for j, m in numbered if m]
         chosen = numbered or kids
@@ -217,7 +223,7 @@ def unclassified_heading(text):
         hm = ANY_HEADING_RE.match(line)
         if not hm or number in claimed or finding_match(line) or SEV_SECTION_RE.match(line):
             continue
-        if UNCLASSIFIED_RE.search(hm.group("text")) and not SECTION_RE.match(line):
+        if UNCLASSIFIED_RE.search(hm.group("text")):
             return True
     return False
 

@@ -1,0 +1,7 @@
+tokens used
+9,000
+## Findings (High)
+
+Details that must never be echoed.
+
+No Critical or High findings remain after the probes above.

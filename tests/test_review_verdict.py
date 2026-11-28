@@ -494,6 +494,25 @@ class SectionLayout(unittest.TestCase):
         code, _ = run("## Findings\n\n### 1. Scope reviewed\n\nNo Critical or High findings.\n")
         self.assertEqual(code, 0)
 
+    def test_deeper_subheadings_are_not_findings(self):
+        text = self.fx("review_layout_section_with_subheadings.txt")
+        findings = rv.parse_findings(text)
+        self.assertEqual(
+            [(sev, title) for sev, title, _ in findings],
+            [
+                ("high", "Required check can be spoofed by a status"),
+                ("medium", "Typed values accept a trailing newline"),
+            ],
+        )
+        code, out = run(text)
+        self.assertEqual(code, 1)
+        self.assertIn("unique 2", out.splitlines()[0])
+
+    def test_severity_in_a_findings_heading_never_gives_clean(self):
+        code, out = run(self.fx("review_layout_findings_heading_with_severity.txt"))
+        self.assertEqual(code, 3)
+        self.assertTrue(out.startswith("VERDICT: HELD"))
+
 
 if __name__ == "__main__":
     unittest.main()
