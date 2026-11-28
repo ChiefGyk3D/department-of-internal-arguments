@@ -1,0 +1,9 @@
+tokens used
+9,000
+## Findings
+
+### 1. Gate bypass through a local action (High)
+
+Body text that must never be echoed.
+
+No Critical or High findings remain after the probes above.

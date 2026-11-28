@@ -1,0 +1,21 @@
+tokens used
+9,000
+## High findings
+
+### High - Required check can be spoofed by a status
+
+#### Location
+
+src/example/ship.py
+
+#### Evidence
+
+Probe output that must never be echoed.
+
+## Medium
+
+### 1. Typed values accept a trailing newline
+
+#### Evidence
+
+More body.
